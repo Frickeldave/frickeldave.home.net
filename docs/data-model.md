@@ -127,9 +127,10 @@ diesem Fall wird der Store überhaupt nicht verändert.
 ### Bilder
 
 `<image_base_url>/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg` mit `NN` = 01…10.
-Je Index wird zuerst `.jpg`, dann `.jpeg` angefragt. Der erste Index, der in beiden
-Endungen fehlt (HTTP 404), beendet die Suche; höchstens zehn Bilder pro Produkt, das
-erste Bild ist das Hauptbild. Dateien landen unter
+Alle zehn Indizes werden geprüft, je Index zuerst `.jpg`, dann `.jpeg`; fehlt ein Index in
+beiden Endungen (HTTP 404), wird der nächste probiert. Dadurch bleiben Lücken erhalten
+(im aktuellen Bestand `LAKBCD` mit 01, 03, 05, 08 – alle vier werden übernommen).
+Höchstens zehn Bilder pro Produkt, das erste gefundene Bild ist das Hauptbild. Dateien landen unter
 `config/frickeldave_store/images/<artikelnummer>/` – identisch zu Panel-Uploads, damit
 Export und Panel dieselben Bilder nutzen. Bildfehler (HTTP ≠ 200, Timeout, leerer
 Inhalt, fehlende Bildsignatur) werden als `errors`-Eintrag gemeldet, brechen den
@@ -139,9 +140,8 @@ Produktimport aber nicht ab. Abrufe laufen mit höchstens fünf gleichzeitigen A
 Der Import prüft die Dateisignatur (JPEG, PNG, WebP, GIF) statt des Content-Type, weil
 GitHub große Binärdateien als `application/octet-stream` ausliefert, und akzeptiert bis
 25 MB pro Bild (der Altbestand enthält eine ~12-MB-Datei); Panel-Uploads bleiben bei
-10 MB. Weil die Suche beim ersten fehlenden Index endet, werden Lücken im
-Website-Verzeichnis abgeschnitten – im aktuellen Bestand betrifft das nur `LAKBCD`
-(01, 03, 05, 08), von dem daher ausschließlich `LAKBCD-01.jpg` übernommen wird.
+10 MB. Pro Produkt fallen damit höchstens 20 Bildanfragen an (zehn Indizes mal zwei
+Endungen), was für den einmaligen Import unkritisch ist.
 
 ## Tags
 

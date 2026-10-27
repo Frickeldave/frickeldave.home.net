@@ -125,9 +125,9 @@ Der Import übernimmt den bestehenden Website-Katalog
 - Bilder werden aus dem Website-Repository geladen
   (`<image_base_url>/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg`, `NN` = 01…10,
   zuerst `.jpg`, dann `.jpeg`) und im selben Layout wie Panel-Uploads abgelegt
-  (`config/frickeldave_store/images/<artikelnummer>/`); das erste Bild ist das
-  Hauptbild. Die Suche endet beim ersten fehlenden Index, höchstens zehn Bilder je
-  Produkt.
+  (`config/frickeldave_store/images/<artikelnummer>/`); das erste gefundene Bild ist
+  das Hauptbild. Geprüft werden alle Indizes 01…10, Lücken (z. B. 01, 03, 05, 08) werden
+  übersprungen; höchstens zehn Bilder je Produkt.
 - Bildfehler brechen den Produktimport nicht ab, sondern erscheinen in `errors`. Nur ein
   nicht lesbares oder strukturell ungültiges Katalogdokument lehnt die Anfrage
   vollständig ab – dann bleibt der Store unverändert.
@@ -151,7 +151,7 @@ Beispielantwort für den aktuellen Bestand (63 Produkte):
   "created": 63,
   "skipped": 0,
   "failed": 0,
-  "images_imported": 167,
+  "images_imported": 170,
   "products_total": 63,
   "errors": []
 }

@@ -319,7 +319,40 @@ async def test_broken_catalog_aborts_without_touching_the_store(
     assert not (tmp_path / "frickeldave_store.data").exists()
 
 
-async def test_image_discovery_stops_at_first_missing_index(tmp_path: Path) -> None:
+async def test_image_gaps_are_probed_and_all_images_imported(tmp_path: Path) -> None:
+    """Lücken wie im Altbestand (01, 03, 05, 08) verlieren keine Bilder."""
+
+    store = await make_store(tmp_path)
+    session = FakeSession(
+        catalog_payload(1),
+        images={
+            image_url("3D", "3D0000", f"3D0000-{index:02d}.jpg"): (200, jpeg(f"-{index}".encode()))
+            for index in (1, 3, 5, 8)
+        },
+    )
+
+    result = await async_import_catalog(store, session=session)
+
+    assert result.created == 1
+    assert result.failed == 0
+    assert result.errors == []
+    assert result.images_imported == 4
+    product = store.get_raw_product("3D0000")
+    assert product is not None
+    assert product["images"] == [
+        {"name": "3D0000-01.jpg", "is_main": True},
+        {"name": "3D0000-03.jpg", "is_main": False},
+        {"name": "3D0000-05.jpg", "is_main": False},
+        {"name": "3D0000-08.jpg", "is_main": False},
+    ]
+    # Auch hinter der Lücke wird weiter geprüft (jpg zuerst, dann jpeg).
+    assert image_url("3D", "3D0000", "3D0000-02.jpg") in session.requests
+    assert image_url("3D", "3D0000", "3D0000-02.jpeg") in session.requests
+    assert image_url("3D", "3D0000", "3D0000-10.jpg") in session.requests
+    assert store.images.path_for("3D0000", "3D0000-08.jpg").read_bytes() == jpeg(b"-8")
+
+
+async def test_missing_indices_create_no_phantom_images(tmp_path: Path) -> None:
     store = await make_store(tmp_path)
     session = FakeSession(
         catalog_payload(1),
@@ -341,11 +374,13 @@ async def test_image_discovery_stops_at_first_missing_index(tmp_path: Path) -> N
         {"name": "3D0000-01.jpg", "is_main": True},
         {"name": "3D0000-02.jpg", "is_main": False},
     ]
-    # Nach dem fehlenden Index 03 wird nicht weiter gesucht (erst jpg, dann jpeg).
+    # Alle Indizes werden geprüft, aber nur vorhandene Dateien landen im Store.
     assert image_url("3D", "3D0000", "3D0000-03.jpg") in session.requests
-    assert image_url("3D", "3D0000", "3D0000-03.jpeg") in session.requests
-    assert image_url("3D", "3D0000", "3D0000-04.jpg") not in session.requests
-    assert store.images.path_for("3D0000", "3D0000-01.jpg").read_bytes() == jpeg(b"-1")
+    assert image_url("3D", "3D0000", "3D0000-10.jpeg") in session.requests
+    assert sorted(item.name for item in store.images.product_dir("3D0000").iterdir()) == [
+        "3D0000-01.jpg",
+        "3D0000-02.jpg",
+    ]
 
 
 async def test_jpeg_extension_is_used_when_jpg_is_missing(tmp_path: Path) -> None:
@@ -397,6 +432,9 @@ async def test_image_error_is_collected_and_import_continues(tmp_path: Path) -> 
         }
     ]
     assert store.get_raw_product("3D0000")["images"] == []  # type: ignore[index]
+    # Harte Fehler (≠ 404) beenden die Bildsuche dieses Produkts weiterhin sofort.
+    assert image_url("3D", "3D0000", "3D0000-01.jpeg") not in session.requests
+    assert image_url("3D", "3D0000", "3D0000-02.jpg") not in session.requests
     assert store.get_raw_product("EP0001")["images"] == [  # type: ignore[index]
         {"name": "EP0001-01.jpg", "is_main": True}
     ]

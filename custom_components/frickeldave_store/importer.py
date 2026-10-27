@@ -336,7 +336,7 @@ async def _async_product_images(
     semaphore: asyncio.Semaphore,
     result: ImportResult,
 ) -> list[Image]:
-    """``<artikel>-01`` bis ``<artikel>-10`` laden und beim ersten Fehlen stoppen."""
+    """``<artikel>-01`` bis ``<artikel>-10`` prüfen; fehlende Indizes werden übersprungen."""
 
     images: list[Image] = []
     for index in range(1, MAX_IMAGES + 1):
@@ -361,7 +361,7 @@ async def _async_product_images(
             found = (name, outcome.data)
             break
         if found is None:
-            break
+            continue
         name, data = found
         await store.images.async_write(product.article_number, name, data)
         images.append(Image(name=name, is_main=not images))
