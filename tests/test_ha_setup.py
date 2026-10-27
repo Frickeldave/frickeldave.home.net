@@ -11,7 +11,14 @@ from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
-from custom_components.frickeldave_store.const import DOMAIN, STORAGE_KEY
+from custom_components.frickeldave_store.const import (
+    DOMAIN,
+    STORAGE_KEY,
+    STORAGE_MINOR_VERSION,
+    STORAGE_PATH,
+    STORAGE_VERSION,
+)
+from custom_components.frickeldave_store.models import SCHEMA_VERSION
 
 OPTIONS: dict[str, Any] = {
     "ai_endpoint": "https://api.deepseek.com/chat/completions",
@@ -91,14 +98,25 @@ async def test_unload_removes_panel(hass: Any, enable_custom_integrations: Any) 
     assert "frickeldave-store" not in hass.data[frontend.DATA_PANELS]
 
 
-async def test_store_and_views_are_registered(hass: Any, enable_custom_integrations: Any) -> None:
+async def test_store_and_views_are_registered(
+    hass: Any, enable_custom_integrations: Any, hass_storage: dict[str, Any]
+) -> None:
     entry = await _setup_entry(hass)
 
     runtime: FrickeldaveStoreRuntime = hass.data[DOMAIN]
-    await runtime.products.async_create({"name": "Schild", "category": "LA"})
+    product = await runtime.products.async_create({"name": "Schild", "category": "LA"})
     await hass.async_block_till_done()
-    store_file = Path(hass.config.path("frickeldave_store", STORAGE_KEY))
-    assert store_file.is_file()
+
+    # Die `hass`-Fixture ersetzt HA-Storage durch `hass_storage`; Dateisystem-Assertions
+    # wären hier von Artefakten früherer Läufe abhängig.
+    assert Path(runtime.store._backend.path) == Path(hass.config.path(STORAGE_PATH, STORAGE_KEY))
+    persisted = hass_storage[STORAGE_KEY]
+    assert persisted["version"] == STORAGE_VERSION
+    assert persisted["minor_version"] == STORAGE_MINOR_VERSION
+    assert persisted["data"]["schemaVersion"] == SCHEMA_VERSION
+    assert [item["articleNumber"] for item in persisted["data"]["products"]] == [
+        product.article_number
+    ]
 
     image_path = runtime.store.images.path_for("LAH3K3", "LAH3K3-01.jpg")
     assert image_path.parent.parent == Path(hass.config.path("frickeldave_store", "images"))
