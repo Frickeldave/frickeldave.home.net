@@ -23,6 +23,8 @@ const PAGE_SIZE = 24;
 const SEARCH_DEBOUNCE_MS = 300;
 const TOAST_TIMEOUT_MS = 6000;
 const REQUEST_TIMEOUT_MS = 30000;
+// Der Katalogimport lädt Produkte und Bilder von der Website und darf länger laufen.
+const IMPORT_TIMEOUT_MS = 180000;
 
 const CATEGORY_LABELS = Object.freeze({
   "3D": "3D-Druck",
@@ -180,6 +182,7 @@ export class FrickeldaveStorePanel extends LitElement {
     _stockDialog: { state: true },
     _archiveDialog: { state: true },
     _tagsDialog: { state: true },
+    _importDialog: { state: true },
 
     _settingsLoading: { state: true },
     _settingsSaving: { state: true },
@@ -233,6 +236,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._stockDialog = null;
     this._archiveDialog = null;
     this._tagsDialog = null;
+    this._importDialog = null;
 
     this._settingsLoading = false;
     this._settingsSaving = false;
@@ -392,7 +396,7 @@ export class FrickeldaveStorePanel extends LitElement {
    * Fehlerformat {"error":{"code","message"}} und bricht nach Timeout ab.
    */
   async _api(path, options = {}) {
-    const { method = "GET", body, formData } = options;
+    const { method = "GET", body, formData, timeoutMs = REQUEST_TIMEOUT_MS } = options;
 
     const token = this._token();
     if (!this.hass) {
@@ -408,7 +412,7 @@ export class FrickeldaveStorePanel extends LitElement {
     const timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
 
     const headers = {
       Authorization: `Bearer ${token}`,
@@ -506,6 +510,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._stockDialog = null;
     this._archiveDialog = null;
     this._tagsDialog = null;
+    this._importDialog = null;
     this._settingsForm = { ai_endpoint: "", ai_model: "", ai_prompt: "", api_key: "" };
     this._settingsMeta = { api_key_set: false };
     this._settingsError = "";
@@ -587,6 +592,7 @@ export class FrickeldaveStorePanel extends LitElement {
         this._stockDialog = null;
         this._archiveDialog = null;
         this._tagsDialog = null;
+        this._importDialog = null;
         return;
       }
       if (!can.product) {
@@ -599,6 +605,7 @@ export class FrickeldaveStorePanel extends LitElement {
         this._stockDialog = null;
         this._archiveDialog = null;
         this._tagsDialog = null;
+        this._importDialog = null;
       } else if (this._view === "products") {
         this._loadProducts();
         this._loadTags();
@@ -947,6 +954,7 @@ export class FrickeldaveStorePanel extends LitElement {
       ["#fd-stock-dialog", Boolean(this._stockDialog)],
       ["#fd-archive-dialog", Boolean(this._archiveDialog)],
       ["#fd-tags-dialog", Boolean(this._tagsDialog)],
+      ["#fd-import-dialog", Boolean(this._importDialog)],
     ];
     for (const [selector, shouldOpen] of entries) {
       const dialog = this.renderRoot?.querySelector(selector);
@@ -1595,6 +1603,126 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
+  /* Katalogimport von frickeldave.de                                       */
+  /* --------------------------------------------------------------------- */
+
+  _openImport() {
+    if (!this._can("product")) {
+      return;
+    }
+    this._captureFocus();
+    this._importDialog = {
+      phase: "confirm",
+      busy: false,
+      error: "",
+      result: null,
+    };
+  }
+
+  _closeImport() {
+    if (this._importDialog?.busy) {
+      return;
+    }
+    this._importDialog = null;
+    this._restoreFocus();
+  }
+
+  _focusImport(selector) {
+    this.updateComplete
+      .then(() => {
+        const target = this.renderRoot?.querySelector(selector);
+        if (target && typeof target.focus === "function") {
+          target.focus();
+        }
+      })
+      .catch(() => {});
+  }
+
+  _importErrorText(error) {
+    if (error instanceof ApiError) {
+      if (error.status === 403) {
+        return "Keine Berechtigung für den Katalogimport.";
+      }
+      if (error.status === 401) {
+        return "Die Sitzung ist abgelaufen. Bitte die Seite neu laden.";
+      }
+      if (error.status === 408 || error.status === 504) {
+        return "Der Import hat zu lange gedauert. Bitte erneut versuchen.";
+      }
+      if (error.status === 0) {
+        return "Der Server ist nicht erreichbar. Bitte die Verbindung prüfen und erneut versuchen.";
+      }
+      return error.message || "Der Katalog konnte nicht importiert werden. Bitte erneut versuchen.";
+    }
+    return "Der Katalog konnte nicht importiert werden. Bitte erneut versuchen.";
+  }
+
+  _normalizeImportResult(data) {
+    const count = (value) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
+    };
+    const errors = Array.isArray(data?.errors)
+      ? data.errors
+          .filter((entry) => entry && typeof entry === "object")
+          .map((entry) => ({
+            articleNumber: String(entry.articleNumber ?? "").trim(),
+            message: String(entry.message ?? "").trim(),
+          }))
+      : [];
+    return {
+      created: count(data?.created),
+      skipped: count(data?.skipped),
+      failed: count(data?.failed),
+      imagesImported: count(data?.images_imported),
+      productsTotal: count(data?.products_total),
+      errors,
+    };
+  }
+
+  async _startImport() {
+    const dialog = this._importDialog;
+    if (!dialog || dialog.busy || !this._can("product")) {
+      return;
+    }
+
+    this._importDialog = { phase: "running", busy: true, error: "", result: null };
+    this._focusImport("#fd-import-status");
+
+    try {
+      const data = await this._api(`${API_ROOT}/import/catalog`, {
+        method: "POST",
+        body: { import_images: true },
+        timeoutMs: IMPORT_TIMEOUT_MS,
+      });
+      const result = this._normalizeImportResult(data);
+
+      // Nach dem Import ohne Such- und Filtereinschränkung neu laden,
+      // damit die übernommenen Produkte sichtbar sind.
+      clearTimeout(this._searchTimer);
+      this._resetFilters();
+      this._loadTags();
+
+      this._importDialog = { phase: "result", busy: false, error: "", result };
+      this._focusImport("#fd-import-result");
+    } catch (error) {
+      if (!this._importDialog) {
+        return;
+      }
+      this._importDialog = {
+        phase: "error",
+        busy: false,
+        error: this._importErrorText(error),
+        result: null,
+      };
+      this._focusImport("#fd-import-error");
+      if (error instanceof ApiError && (error.status === 403 || error.status === 401)) {
+        this._revalidateAccess();
+      }
+    }
+  }
+
+  /* --------------------------------------------------------------------- */
   /* Tag-Verwaltung                                                         */
   /* --------------------------------------------------------------------- */
 
@@ -1821,6 +1949,7 @@ export class FrickeldaveStorePanel extends LitElement {
       ${this._renderStockDialog()}
       ${this._renderArchiveDialog()}
       ${this._renderTagsDialog()}
+      ${this._renderImportDialog()}
       ${this._renderToast()}
     `;
   }
@@ -1904,6 +2033,14 @@ export class FrickeldaveStorePanel extends LitElement {
               ? html`
                   <button type="button" class="fd-button" @click=${() => this._reloadAll()} ?disabled=${this._productsLoading}>
                     Aktualisieren
+                  </button>
+                  <button
+                    type="button"
+                    class="fd-button"
+                    @click=${() => this._openImport()}
+                    ?disabled=${Boolean(this._importDialog?.busy)}
+                  >
+                    Katalog importieren
                   </button>
                   <button type="button" class="fd-button fd-button--primary" @click=${() => this._openCreate()}>
                     Produkt anlegen
@@ -2958,6 +3095,181 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
+  /* Render: Katalogimport                                                  */
+  /* --------------------------------------------------------------------- */
+
+  _renderImportDialog() {
+    const dialog = this._importDialog;
+    if (!dialog) {
+      return "";
+    }
+    const running = dialog.busy;
+    const result = dialog.result;
+    const showIntro = dialog.phase === "confirm" || dialog.phase === "running";
+
+    return html`
+      <dialog
+        id="fd-import-dialog"
+        class="fd-dialog"
+        aria-labelledby="fd-import-title"
+        @cancel=${(event) => this._handleDialogCancel(event, () => this._closeImport())}
+        @click=${(event) => {
+          if (event.target === event.currentTarget) {
+            this._closeImport();
+          }
+        }}
+      >
+        <div class="fd-dialog-head">
+          <div>
+            <h2 id="fd-import-title">Katalog importieren</h2>
+            <p class="fd-muted fd-small">Produkte der Live-Website übernehmen</p>
+          </div>
+          <button
+            type="button"
+            class="fd-icon-button"
+            @click=${() => this._closeImport()}
+            ?disabled=${running}
+            aria-label="Dialog schließen"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div class="fd-dialog-body">
+          ${showIntro
+            ? html`
+                <div class="fd-import-intro">
+                  <p>
+                    Der aktuelle Katalog von <strong>frickeldave.de</strong> wird in diese Verwaltung geladen.
+                  </p>
+                  <ul class="fd-import-notes">
+                    <li>Bereits vorhandene Artikelnummern werden übersprungen und niemals überschrieben.</li>
+                    <li>
+                      Zu jedem Produkt werden bis zu ${MAX_IMAGES} Bilder aus dem Website-Repository
+                      übernommen.
+                    </li>
+                    <li>
+                      Der Vorgang kann einen Moment dauern. Die Seite bitte bis zum Abschluss geöffnet
+                      lassen.
+                    </li>
+                  </ul>
+                </div>
+              `
+            : ""}
+
+          ${dialog.error
+            ? html`
+                <div id="fd-import-error" class="fd-banner fd-banner--error" role="alert" tabindex="-1">
+                  ${dialog.error}
+                </div>
+              `
+            : ""}
+
+          ${running
+            ? html`
+                <div
+                  id="fd-import-status"
+                  class="fd-state fd-state--inline"
+                  role="status"
+                  aria-live="polite"
+                  tabindex="-1"
+                >
+                  <span class="fd-spinner" aria-hidden="true"></span>
+                  <p>Katalog wird geladen …</p>
+                </div>
+              `
+            : ""}
+
+          ${result ? this._renderImportResult(result) : ""}
+
+          <div class="fd-dialog-foot">
+            ${dialog.phase === "result"
+              ? html`
+                  <button type="button" class="fd-button fd-button--primary" @click=${() => this._closeImport()}>
+                    Schließen
+                  </button>
+                `
+              : html`
+                  <button
+                    type="button"
+                    class="fd-button"
+                    @click=${() => this._closeImport()}
+                    ?disabled=${running}
+                    data-autofocus
+                  >
+                    ${dialog.phase === "error" ? "Schließen" : "Abbrechen"}
+                  </button>
+                  <button
+                    type="button"
+                    class="fd-button fd-button--primary"
+                    @click=${() => this._startImport()}
+                    ?disabled=${running}
+                  >
+                    ${running ? "Import läuft …" : dialog.phase === "error" ? "Erneut versuchen" : "Import starten"}
+                  </button>
+                `}
+          </div>
+        </div>
+      </dialog>
+    `;
+  }
+
+  _renderImportResult(result) {
+    const errorCount = result.errors.length;
+
+    return html`
+      <section id="fd-import-result" class="fd-import-result" tabindex="-1" aria-live="polite">
+        <h3>Import abgeschlossen</h3>
+
+        <dl class="fd-import-summary">
+          <div class="fd-import-stat">
+            <dt>Neu</dt>
+            <dd>${formatNumber(result.created)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Übersprungen</dt>
+            <dd>${formatNumber(result.skipped)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Fehlgeschlagen</dt>
+            <dd class=${errorCount > 0 || result.failed > 0 ? "fd-import-stat--error" : ""}>
+              ${formatNumber(result.failed)}
+            </dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Bilder</dt>
+            <dd>${formatNumber(result.imagesImported)}</dd>
+          </div>
+        </dl>
+
+        <p class="fd-muted fd-small">
+          ${result.productsTotal === 1
+            ? "1 Produkt im Katalog."
+            : `${formatNumber(result.productsTotal)} Produkte im Katalog.`}
+        </p>
+
+        ${errorCount > 0
+          ? html`
+              <div class="fd-import-errors">
+                <h4>Fehler pro Produkt</h4>
+                <ul role="list">
+                  ${result.errors.map(
+                    (entry) => html`
+                      <li>
+                        <strong>${entry.articleNumber || "Ohne Artikelnummer"}</strong>
+                        <span>${entry.message || "Unbekannter Fehler."}</span>
+                      </li>
+                    `,
+                  )}
+                </ul>
+              </div>
+            `
+          : ""}
+      </section>
+    `;
+  }
+
+  /* --------------------------------------------------------------------- */
   /* Render: Tag-Verwaltung                                                 */
   /* --------------------------------------------------------------------- */
 
@@ -3969,6 +4281,109 @@ export class FrickeldaveStorePanel extends LitElement {
       gap: var(--fd-space-2);
       padding: var(--fd-space-3) var(--fd-space-4);
       border-top: 1px solid var(--fd-divider);
+    }
+
+    /* Katalogimport -------------------------------------------------------- */
+
+    .fd-import-intro {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-import-intro p {
+      margin: 0;
+    }
+
+    .fd-import-notes {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 0;
+      padding-left: 1.2em;
+    }
+
+    .fd-import-result {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-3);
+    }
+
+    .fd-import-result h3 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 500;
+    }
+
+    .fd-import-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: var(--fd-space-2);
+      margin: 0;
+    }
+
+    .fd-import-stat {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: var(--fd-space-2) var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-import-stat dt {
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-import-stat dd {
+      margin: 0;
+      font-size: 1.15rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .fd-import-stat--error {
+      color: var(--fd-error);
+    }
+
+    .fd-import-errors {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-import-errors h4 {
+      margin: 0;
+      font-size: var(--fd-font-small);
+      font-weight: 500;
+    }
+
+    .fd-import-errors ul {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 240px;
+      margin: 0;
+      padding: var(--fd-space-2);
+      overflow-y: auto;
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+      list-style: none;
+    }
+
+    .fd-import-errors li {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--fd-divider);
+    }
+
+    .fd-import-errors li:last-child {
+      padding-bottom: 0;
+      border-bottom: none;
     }
 
     /* Bilder -------------------------------------------------------------- */
