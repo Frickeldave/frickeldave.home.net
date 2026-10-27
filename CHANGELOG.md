@@ -6,6 +6,29 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-27
+
+### Added
+
+- **Katalogimport** (`POST /api/frickeldave_store/import/catalog`): Der bestehende
+  Website-Katalog `https://frickeldave.de/data/handmade.json` wird samt Bildern
+  (172 Dateien im Website-Repository) idempotent in den Store übernommen. Die
+  Zuordnung erfolgt über die `articleNumber`; vorhandene Produkte werden nie
+  überschrieben (`skipped`), Duplikate im Dokument gelten als `failed`, gelöscht
+  wird nichts. Bilder werden als `<artikelnummer>-NN.jpg` (01…10, erst `.jpg`,
+  dann `.jpeg`) geladen und im Panel-Layout gespeichert; Bildabrufe laufen mit
+  höchstens fünf parallelen Anfragen und eigenem Zeitlimit, Bildfehler brechen
+  den Produktimport nicht ab. Nur ein nicht lesbares oder strukturell ungültiges
+  Katalogdokument lehnt die Anfrage ab, ohne den Store zu verändern.
+- Eigene `source_url`/`image_base_url` erfordern `app_admin` und sind auf
+  `https` plus die Hosts `frickeldave.de` und `raw.githubusercontent.com`
+  beschränkt (SSRF-Schutz); die Standardquellen genügen der Rolle `product`.
+- Tests (`tests/test_importer.py`, 38 Fälle, gemocktes aiohttp ohne Netzwerk)
+  für Feldabbildung, Idempotenz, Fehlerfälle, Bilderkennung, Obergrenzen und
+  die Rechteprüfung des Endpunkts.
+- Dokumentation des Imports in README, `docs/data-model.md` und
+  `docs/architecture.md`.
+
 ## [0.1.2] - 2026-10-27
 
 ### Fixed

@@ -15,8 +15,14 @@ from homeassistant.core import HomeAssistant
 
 from . import FrickeldaveStoreRuntime, runtime_for
 from .ai import AIError
-from .const import API_PREFIX, DOMAIN
+from .const import (
+    API_PREFIX,
+    DEFAULT_CATALOG_URL,
+    DEFAULT_IMAGE_BASE_URL,
+    DOMAIN,
+)
 from .export import async_export_catalog
+from .importer import async_import_catalog
 from .models import NotFoundError, PermissionDenied, StoreError, ValidationError
 from .permissions import ROLE_APP_ADMIN, ROLE_PRODUCT
 from .products import ProductFilter
@@ -41,6 +47,8 @@ STATUS_BY_CODE: dict[str, int] = {
     "ai_invalid_response": 502,
     "schema_too_new": 503,
     "not_loaded": 503,
+    "catalog_unavailable": 502,
+    "catalog_invalid": 422,
 }
 
 
@@ -87,6 +95,23 @@ async def _json_body(request: web.Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValidationError("Anfragekörper muss ein JSON-Objekt sein.")
     return payload
+
+
+async def _optional_json_body(request: web.Request) -> dict[str, Any]:
+    """Körper ist optional: ohne Inhalt gilt ``{}`` (alle Felder haben Standardwerte)."""
+
+    if not request.can_read_body:
+        return {}
+    return await _json_body(request)
+
+
+def _optional_url(payload: dict[str, Any], key: str) -> str | None:
+    if key not in payload:
+        return None
+    value = payload[key]
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{key} muss eine absolute https-URL sein.")
+    return value.strip()
 
 
 class MeView(HomeAssistantView):
@@ -405,6 +430,38 @@ class ExportView(HomeAssistantView):
             return _error_response(err)
 
 
+class CatalogImportView(HomeAssistantView):
+    """Bestehenden Website-Katalog importieren (idempotent, ohne Überschreiben)."""
+
+    name = "api:frickeldave_store:import_catalog"
+    url = f"{API_PREFIX}/import/catalog"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            payload = await _optional_json_body(request)
+            unknown = set(payload) - {"source_url", "image_base_url", "import_images"}
+            if unknown:
+                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+            # Eigene Quellen können interne Adressen ansprechen: nur App-Admins.
+            custom = "source_url" in payload or "image_base_url" in payload
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN if custom else ROLE_PRODUCT)
+            source_url = _optional_url(payload, "source_url")
+            image_base_url = _optional_url(payload, "image_base_url")
+            import_images = payload.get("import_images", True)
+            if not isinstance(import_images, bool):
+                raise ValidationError("import_images muss ein Wahrheitswert sein.")
+            result = await async_import_catalog(
+                runtime.store,
+                source_url=source_url or DEFAULT_CATALOG_URL,
+                image_base_url=image_base_url or DEFAULT_IMAGE_BASE_URL,
+                import_images=import_images,
+            )
+            return web.json_response(result.to_dict())
+        except StoreError as err:
+            return _error_response(err)
+
+
 VIEWS: tuple[type[HomeAssistantView], ...] = (
     MeView,
     ProductsView,
@@ -421,6 +478,7 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     DescriptionSuggestView,
     SettingsView,
     ExportView,
+    CatalogImportView,
 )
 
 

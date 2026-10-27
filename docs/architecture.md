@@ -24,6 +24,7 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
   Snapshots. Reine Dateiablage (`FileBackend`) für CLI und Tests ohne HA.
 - **`permissions.py`** – Rollen, Default Deny, Prüfung je Anfrage.
 - **`ai.py`** – Anbieter-Abstraktion, DeepSeek-Client, Metadaten-Bereinigung.
+- **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen).
 - **`export.py`** – idempotenter Katalogexport im Website-Schema.
 - **`panel.py`** – statische Dateien und `panel_custom`-Panel.
 - **`frontend/`** – Lit-Web-Component, gepflegt vom Frontend-Team (nicht Teil dieser Schicht).
@@ -55,6 +56,9 @@ das Panel „kein Zugriff“ anzeigen kann. Es enthält keine Produkt-, Kunden- 
 | Ausschließlich Soft-Delete (`archived`) | Export und Website bleiben konsistent, kein Hard-Delete-Pfad |
 | KI-Vorschläge ohne Persistenz | bestehende Beschreibungen werden nie automatisch überschrieben |
 | Export im Website-Schema, idempotent | Website bleibt Konsument, keine Schemaänderung nötig |
+| Import nur anlegen, nie überschreiben | Bestandsdaten und Panel-Pflege haben Vorrang; keine Datenverluste durch Wiederholung |
+| Import-Quellen nur `https` + Host-Allowlist | verhindert SSRF über `source_url`/`image_base_url`; eigene Quellen nur für `app_admin` |
+| Bildimport über dasselbe `ImageStorage`-Layout | Panel, Export und Import teilen sich einen Bildbestand |
 
 ### Speicherort des HA-`Store`
 
@@ -70,7 +74,12 @@ direkt gesetzt. Der Dateiname und der Speicherort bleiben in beiden Fällen iden
 - Kein Hintergrund-Polling externer Dienste (KI nur auf ausdrückliche Anfrage).
 - Blockierendes Datei-I/O ausschließlich im Executor (`asyncio.to_thread`,
   `hass.async_add_executor_job`).
-- Externe Fehler (KI, Netzwerk) verändern den gespeicherten Datenstand nicht.
+- Externe Fehler (KI, Netzwerk) verändern den gespeicherten Datenstand nicht. Ausnahme
+  ist der Katalogimport: Er schreibt nur neue Produkte, und ein ungültiges oder nicht
+  lesbares Dokument wird abgelehnt, bevor der Store verändert wird. Bildfehler werden
+  gesammelt (`errors`) und brechen den Produktimport nicht ab.
+- Der Bildimport läuft mit höchstens fünf parallelen Anfragen und 30 s Zeitlimit je
+  Anfrage; Datei-I/O bleibt im Executor (`ImageStorage.async_write`).
 
 ## Nicht Teil dieser Ausbaustufe
 

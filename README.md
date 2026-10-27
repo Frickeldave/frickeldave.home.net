@@ -4,7 +4,8 @@
 
 Home-Assistant-Custom-Integration für die Verwaltung des Frickeldave-Handmade-Katalogs:
 Produkte, Bilder, Tags, Bestände, Berechtigungen und KI-Beschreibungsvorschläge – alles
-in einem deutschen Panel in Home Assistant. Der Katalogexport versorgt die Website.
+in einem deutschen Panel in Home Assistant. Der Katalogexport versorgt die Website,
+der Katalogimport übernimmt den bestehenden Bestand zurück in die Verwaltung.
 
 Die Integration läuft mit **Home Assistant Container** – ohne Supervisor, Add-on oder
 zusätzlichen Anwendungscontainer. Es gibt keine `hassio`- oder Supervisor-Aufrufe.
@@ -108,6 +109,60 @@ python -m custom_components.frickeldave_store.export \
   config/frickeldave_store/frickeldave_store.data ./export
 ```
 
+## Katalogimport
+
+Der Import übernimmt den bestehenden Website-Katalog
+(`https://frickeldave.de/data/handmade.json`) samt Bildern in den Store. Er ist für die
+Übernahme des Altbestands gedacht und bleibt gefahrlos wiederholbar:
+
+- Zuordnung ausschließlich über die `articleNumber`. Bereits vorhandene Produkte werden
+  **nie überschrieben** (Zähler `skipped`), doppelte Artikelnummern im gelieferten
+  Dokument gelten als `failed`. Ein Import legt nur neue Produkte an und löscht nichts.
+- Übernommen werden alle Felder des Live-Schemas: `name`, `description`, `category`,
+  `price`, `size`, `tags`, `visible`, `customizable`, `stock`, `salesCabinet`. Neue
+  Produkte erhalten `archived=false`, `schemaVersion=1` sowie `createdAt`/`updatedAt`
+  des Imports.
+- Bilder werden aus dem Website-Repository geladen
+  (`<image_base_url>/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg`, `NN` = 01…10,
+  zuerst `.jpg`, dann `.jpeg`) und im selben Layout wie Panel-Uploads abgelegt
+  (`config/frickeldave_store/images/<artikelnummer>/`); das erste Bild ist das
+  Hauptbild. Die Suche endet beim ersten fehlenden Index, höchstens zehn Bilder je
+  Produkt.
+- Bildfehler brechen den Produktimport nicht ab, sondern erscheinen in `errors`. Nur ein
+  nicht lesbares oder strukturell ungültiges Katalogdokument lehnt die Anfrage
+  vollständig ab – dann bleibt der Store unverändert.
+- Bildabrufe laufen mit höchstens fünf parallelen Anfragen und je 30 s Zeitlimit; es
+  wird nie im Event-Loop blockierend gelesen oder geschrieben. Geprüft wird die
+  Dateisignatur (JPEG, PNG, WebP, GIF), nicht der Content-Type – GitHub liefert große
+  Binärdateien als `application/octet-stream`. Der Import akzeptiert bis 25 MB pro Bild,
+  weil der Altbestand eine ~12-MB-Datei enthält; Panel-Uploads bleiben bei 10 MB.
+
+```bash
+curl -sS -X POST http://homeassistant.local:8123/api/frickeldave_store/import/catalog \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Beispielantwort für den aktuellen Bestand (63 Produkte):
+
+```json
+{
+  "created": 63,
+  "skipped": 0,
+  "failed": 0,
+  "images_imported": 167,
+  "products_total": 63,
+  "errors": []
+}
+```
+
+Alle Felder im Anfragekörper sind optional: `source_url`, `image_base_url` und
+`import_images` (Standard `true`). Die Standardquellen genügen der Rolle `product`; wer
+eigene `source_url` oder `image_base_url` angibt, braucht `app_admin`. Erlaubt sind
+ausschließlich `https`-URLs auf `frickeldave.de` und `raw.githubusercontent.com`
+(SSRF-Schutz).
+
 ## KI-Beschreibungen
 
 Der Vorschlag wird **nie automatisch gespeichert**. Es werden nur Produktdaten und
@@ -136,6 +191,7 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | DELETE | `/tags/{name}` |
 | GET, PATCH | `/settings` (nur `app_admin`) |
 | POST | `/export` (nur `app_admin`) |
+| POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
 
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = UND),
 `customizable`, `in_stock`, `in_cabinet`, `visibility=visible|invisible`, `archived`,
@@ -177,9 +233,8 @@ Nicht enthalten und bewusst auf später verschoben:
 
 - PayPal-Synchronisation (Artikel und Kunden)
 - vollständige Kundenverwaltung (CRUD, Rechnungs-/Lieferadresse)
-- Website-Publish-Workflow oder PR-Automation (nur Export)
+- Website-Publish-Workflow oder PR-Automation (nur Export und Katalogimport)
 - Aufnahme in den offiziellen HACS-Katalog
-- produktive Datenmigration des Altbestands
 - Finanzfunktionen (Einkaufskosten, Margen, Steuerrücklagen)
 
 ## Lizenz

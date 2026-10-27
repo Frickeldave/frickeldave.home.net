@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "frickeldave_store"
 NAME: Final = "Frickeldave Store"
 MANUFACTURER: Final = "Frickeldave"
-VERSION: Final = "0.1.2"
+VERSION: Final = "0.1.3"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/frickeldave.home.net"
 
@@ -40,3 +40,10 @@ DEFAULT_AI_PROMPT: Final = (
 )
 
 DEFAULT_EXPORT_PATH: Final = "frickeldave_store/export"
+
+#: Katalogimport: vertrauenswürdige Quellen und SSRF-Allowlist.
+DEFAULT_CATALOG_URL: Final = "https://frickeldave.de/data/handmade.json"
+DEFAULT_IMAGE_BASE_URL: Final = (
+    "https://raw.githubusercontent.com/Frickeldave/frickeldave.github.io/dev/src/assets/handmade"
+)
+IMPORT_ALLOWED_HOSTS: Final[tuple[str, ...]] = ("frickeldave.de", "raw.githubusercontent.com")
