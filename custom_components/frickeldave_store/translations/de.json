@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Frickeldave Store einrichten",
-        "description": "Freigaben als eine Zeile pro HA-Benutzer: `<ha_user_id>: product,app_admin`. Ohne Freigabe gilt Default Deny.",
+        "description": "Freigaben als eine Zeile pro HA-Benutzer, zum Beispiel `ha_user_id: product,app_admin`. Ohne Freigabe gilt Default Deny.",
         "data": {
           "users": "Freigegebene HA-Benutzer (ID: Rollen)"
         },
@@ -29,12 +29,12 @@
           "export_path": "Exportverzeichnis (relativ zu config/)"
         },
         "data_description": {
-          "users": "Eine Zeile pro Benutzer: `<ha_user_id>: product,finance,app_admin`.",
+          "users": "Eine Zeile pro Benutzer, zum Beispiel `ha_user_id: product,finance,app_admin`.",
           "ai_endpoint": "Vollständige URL der Chat-Completions-API.",
           "ai_model": "Standard: deepseek-flash (akzeptiert Bilder).",
           "ai_api_key": "Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um den gespeicherten Key zu behalten.",
           "ai_prompt": "Initial: „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“",
-          "export_path": "Der Export schreibt den Katalog nach <pfad>/public/data/handmade.json und Bilder nach <pfad>/src/assets/handmade/."
+          "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis."
         }
       }
     }

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up Frickeldave Store",
-        "description": "One line per Home Assistant user: `<ha_user_id>: product,app_admin`. Without a grant the default is deny.",
+        "description": "One line per Home Assistant user, for example `ha_user_id: product,app_admin`. Without a grant the default is deny.",
         "data": {
           "users": "Authorised Home Assistant users (ID: roles)"
         },
@@ -29,12 +29,12 @@
           "export_path": "Export directory (relative to config/)"
         },
         "data_description": {
-          "users": "One line per user: `<ha_user_id>: product,finance,app_admin`.",
+          "users": "One line per user, for example `ha_user_id: product,finance,app_admin`.",
           "ai_endpoint": "Full URL of the chat completions API.",
           "ai_model": "Default: deepseek-flash (accepts images).",
           "ai_api_key": "Never returned, logged or exported. Leave empty to keep the stored key.",
           "ai_prompt": "Default: “Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.”",
-          "export_path": "The export writes the catalogue to <path>/public/data/handmade.json and images to <path>/src/assets/handmade/."
+          "export_path": "The export writes the catalogue to public/data/handmade.json and images to src/assets/handmade/, relative to the configured directory."
         }
       }
     }
