@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Frickeldave Store einrichten",
+        "description": "Freigaben als eine Zeile pro HA-Benutzer: `<ha_user_id>: product,app_admin`. Ohne Freigabe gilt Default Deny.",
+        "data": {
+          "users": "Freigegebene HA-Benutzer (ID: Rollen)"
+        },
+        "data_description": {
+          "users": "Rollen: product (Produktpflege), finance (Finanzen), app_admin (Einstellungen und Freigaben)."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Die Integration ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Frickeldave Store – Einstellungen",
+        "data": {
+          "users": "Freigegebene HA-Benutzer (ID: Rollen)",
+          "ai_endpoint": "KI-Endpunkt",
+          "ai_model": "KI-Modell",
+          "ai_api_key": "KI-API-Key",
+          "ai_prompt": "Prompt für Beschreibungen",
+          "export_path": "Exportverzeichnis (relativ zu config/)"
+        },
+        "data_description": {
+          "users": "Eine Zeile pro Benutzer: `<ha_user_id>: product,finance,app_admin`.",
+          "ai_endpoint": "Vollständige URL der Chat-Completions-API.",
+          "ai_model": "Standard: deepseek-flash (akzeptiert Bilder).",
+          "ai_api_key": "Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um den gespeicherten Key zu behalten.",
+          "ai_prompt": "Initial: „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“",
+          "export_path": "Der Export schreibt den Katalog nach <pfad>/public/data/handmade.json und Bilder nach <pfad>/src/assets/handmade/."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,436 @@
+"""HTTP-API der Integration (JSON, Default Deny je Anfrage).
+
+Fehlerformat: ``{"error": {"code": ..., "message": ...}}``.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+from aiohttp import web
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.core import HomeAssistant
+
+from . import FrickeldaveStoreRuntime, runtime_for
+from .ai import AIError
+from .const import API_PREFIX, DOMAIN
+from .export import async_export_catalog
+from .models import NotFoundError, PermissionDenied, StoreError, ValidationError
+from .permissions import ROLE_APP_ADMIN, ROLE_PRODUCT
+from .products import ProductFilter
+
+_LOGGER = logging.getLogger(__name__)
+
+STATUS_BY_CODE: dict[str, int] = {
+    "validation_error": 400,
+    "category_immutable": 400,
+    "archive_endpoint_required": 400,
+    "unsupported_media_type": 415,
+    "file_too_large": 413,
+    "not_found": 404,
+    "conflict": 409,
+    "image_limit": 409,
+    "forbidden": 403,
+    "ai_not_configured": 400,
+    "ai_rate_limited": 429,
+    "ai_unavailable": 502,
+    "ai_unauthorized": 502,
+    "ai_request_failed": 502,
+    "ai_invalid_response": 502,
+    "schema_too_new": 503,
+    "not_loaded": 503,
+}
+
+
+class NotLoadedError(StoreError):
+    code = "not_loaded"
+
+
+def _error_response(err: StoreError) -> web.Response:
+    status = STATUS_BY_CODE.get(err.code, 400)
+    return web.json_response({"error": err.as_dict}, status=status)
+
+
+def _hass(request: web.Request) -> HomeAssistant:
+    hass: HomeAssistant = request.app["hass"]
+    return hass
+
+
+def _runtime(request: web.Request) -> FrickeldaveStoreRuntime:
+    runtime = runtime_for(_hass(request))
+    if runtime is None:
+        raise NotLoadedError("Die Integration ist nicht eingerichtet.")
+    return runtime
+
+
+def _user(request: web.Request) -> Any:
+    user = request.get("hass_user")
+    if user is None:
+        raise PermissionDenied("Nicht authentifiziert.")
+    return user
+
+
+def _authorize(request: web.Request, role: str) -> tuple[FrickeldaveStoreRuntime, Any]:
+    runtime = _runtime(request)
+    user = _user(request)
+    runtime.permissions.require(str(user.id), role)
+    return runtime, user
+
+
+async def _json_body(request: web.Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except ValueError as err:
+        raise ValidationError("Ungültiges JSON im Anfragekörper.") from err
+    if not isinstance(payload, dict):
+        raise ValidationError("Anfragekörper muss ein JSON-Objekt sein.")
+    return payload
+
+
+class MeView(HomeAssistantView):
+    """Eigene Identität und effektive Rechte (keine geschützten Daten)."""
+
+    name = "api:frickeldave_store:me"
+    url = f"{API_PREFIX}/me"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime = _runtime(request)
+            user = _user(request)
+            return web.json_response(runtime.permissions.snapshot(str(user.id)))
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ProductsView(HomeAssistantView):
+    name = "api:frickeldave_store:products"
+    url = f"{API_PREFIX}/products"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            filters = ProductFilter.from_query(dict(request.query))
+            products, total = await runtime.products.async_list(filters)
+            return web.json_response(
+                {"products": [item.to_dict() for item in products], "total": total}
+            )
+        except StoreError as err:
+            return _error_response(err)
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            runtime, user = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            product = await runtime.products.async_create(payload, actor=str(user.id))
+            return web.json_response(product.to_dict(), status=201)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ProductView(HomeAssistantView):
+    name = "api:frickeldave_store:product"
+    url = f"{API_PREFIX}/products/{{article_number}}"
+    requires_auth = True
+
+    async def get(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            product = await runtime.products.async_get(article_number)
+            return web.json_response(product.to_dict())
+        except StoreError as err:
+            return _error_response(err)
+
+    async def patch(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            product = await runtime.products.async_update(article_number, payload)
+            return web.json_response(product.to_dict())
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ArchiveView(HomeAssistantView):
+    name = "api:frickeldave_store:archive"
+    url = f"{API_PREFIX}/products/{{article_number}}/archive"
+    requires_auth = True
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            product = await runtime.products.async_archive(article_number)
+            return web.json_response({"product": product.to_dict()})
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImagesView(HomeAssistantView):
+    name = "api:frickeldave_store:images"
+    url = f"{API_PREFIX}/products/{{article_number}}/images"
+    requires_auth = True
+
+    async def get(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            images = await runtime.products.async_list_images(article_number)
+            return web.json_response({"images": images})
+        except StoreError as err:
+            return _error_response(err)
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            post = await request.post()
+            upload = post.get("file") or post.get("image")
+            upload_file = getattr(upload, "file", None)
+            if upload is None or isinstance(upload, str) or upload_file is None:
+                raise ValidationError(
+                    "Multipart-Feld 'file' mit Bilddatei ist erforderlich.",
+                    code="validation_error",
+                )
+            data = upload_file.read()
+            result = await runtime.products.async_add_image(
+                article_number,
+                filename=str(getattr(upload, "filename", "") or ""),
+                content_type=str(getattr(upload, "content_type", "") or ""),
+                data=data,
+            )
+            return web.json_response(result, status=201)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImageFileView(HomeAssistantView):
+    name = "api:frickeldave_store:image_file"
+    url = f"{API_PREFIX}/products/{{article_number}}/images/{{name}}"
+    requires_auth = True
+
+    async def get(self, request: web.Request, article_number: str, name: str) -> web.StreamResponse:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            path, content_type = await runtime.products.async_read_image(article_number, name)
+            if not path.is_file():
+                raise NotFoundError(f"Bild {name} nicht gefunden.")
+            body = await _hass(request).async_add_executor_job(path.read_bytes)
+            return web.Response(body=body, content_type=content_type)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImageOrderView(HomeAssistantView):
+    name = "api:frickeldave_store:image_order"
+    url = f"{API_PREFIX}/products/{{article_number}}/images/order"
+    requires_auth = True
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            order = payload.get("order")
+            if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+                raise ValidationError("order muss eine Liste von Bildnamen sein.")
+            images = await runtime.products.async_set_image_order(article_number, order)
+            return web.json_response(images)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImageMainView(HomeAssistantView):
+    name = "api:frickeldave_store:image_main"
+    url = f"{API_PREFIX}/products/{{article_number}}/images/main"
+    requires_auth = True
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            name = payload.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValidationError("name ist ein Pflichtfeld.")
+            images = await runtime.products.async_set_main_image(article_number, name)
+            return web.json_response(images)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImageDeleteView(HomeAssistantView):
+    name = "api:frickeldave_store:image_delete"
+    url = f"{API_PREFIX}/products/{{article_number}}/images/{{name}}"
+    requires_auth = True
+
+    async def delete(self, request: web.Request, article_number: str, name: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            images = await runtime.products.async_delete_image(article_number, name)
+            return web.json_response(images)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class TagsView(HomeAssistantView):
+    name = "api:frickeldave_store:tags"
+    url = f"{API_PREFIX}/tags"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            return web.json_response({"tags": await runtime.products.async_list_tags()})
+        except StoreError as err:
+            return _error_response(err)
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            tag = await runtime.products.async_create_tag(payload)
+            tags = await runtime.products.async_list_tags()
+            return web.json_response({"tags": tags, "name": tag}, status=201)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class TagView(HomeAssistantView):
+    name = "api:frickeldave_store:tag"
+    url = f"{API_PREFIX}/tags/{{name}}"
+    requires_auth = True
+
+    async def delete(self, request: web.Request, name: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            await runtime.products.async_delete_tag(name)
+            return web.json_response({"tags": await runtime.products.async_list_tags()})
+        except StoreError as err:
+            return _error_response(err)
+
+
+class StockView(HomeAssistantView):
+    name = "api:frickeldave_store:stock"
+    url = f"{API_PREFIX}/products/{{article_number}}/stock"
+    requires_auth = True
+
+    async def get(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            bookings = await runtime.products.async_list_bookings(article_number)
+            return web.json_response({"bookings": bookings})
+        except StoreError as err:
+            return _error_response(err)
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, user = _authorize(request, ROLE_PRODUCT)
+            payload = await _json_body(request)
+            result = await runtime.products.async_book_stock(
+                article_number, payload, ha_user_id=str(user.id)
+            )
+            return web.json_response(result, status=201)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class DescriptionSuggestView(HomeAssistantView):
+    name = "api:frickeldave_store:description_suggest"
+    url = f"{API_PREFIX}/products/{{article_number}}/description/suggest"
+    requires_auth = True
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            suggestion = await runtime.ai.async_suggest_description(article_number)
+            return web.json_response({"suggestion": suggestion})
+        except AIError as err:
+            return _error_response(err)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class SettingsView(HomeAssistantView):
+    name = "api:frickeldave_store:settings"
+    url = f"{API_PREFIX}/settings"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            payload = runtime.store.public_settings()
+            payload["users"] = [
+                {"user_id": grant.user_id, "name": grant.name, "roles": list(grant.roles)}
+                for grant in runtime.permissions.grants().values()
+            ]
+            payload["export_path"] = str(runtime.export_path)
+            return web.json_response(payload)
+        except StoreError as err:
+            return _error_response(err)
+
+    async def patch(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            payload = await _json_body(request)
+            unknown = set(payload) - {"ai"}
+            if unknown:
+                raise ValidationError(
+                    f"Unbekannte Felder: {', '.join(sorted(unknown))}. "
+                    "Benutzerfreigaben werden über den Options-Flow verwaltet.",
+                )
+            changes = dict(payload)
+            ai_changes = changes.get("ai")
+            if isinstance(ai_changes, dict) and not ai_changes.get("api_key"):
+                ai_changes.pop("api_key", None)
+            runtime.store.update_settings(changes)
+            await runtime.store.async_save()
+            return web.json_response(runtime.store.public_settings())
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ExportView(HomeAssistantView):
+    name = "api:frickeldave_store:export"
+    url = f"{API_PREFIX}/export"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            target = Path(_hass(request).config.path(str(runtime.export_path)))
+            result = await async_export_catalog(
+                runtime.store.products(), runtime.store.images, target
+            )
+            return web.json_response(result)
+        except StoreError as err:
+            return _error_response(err)
+
+
+VIEWS: tuple[type[HomeAssistantView], ...] = (
+    MeView,
+    ProductsView,
+    ProductView,
+    ArchiveView,
+    ImagesView,
+    ImageFileView,
+    ImageOrderView,
+    ImageMainView,
+    ImageDeleteView,
+    TagsView,
+    TagView,
+    StockView,
+    DescriptionSuggestView,
+    SettingsView,
+    ExportView,
+)
+
+
+async def async_register_views(hass: HomeAssistant) -> None:
+    """Alle API-Routen einmalig registrieren."""
+
+    key = f"{DOMAIN}_views_registered"
+    if hass.data.get(key):
+        return
+    for view_class in VIEWS:
+        hass.http.register_view(view_class())
+    hass.data[key] = True
+    _LOGGER.debug("Frickeldave Store: %s HTTP-Routen registriert", len(VIEWS))
