@@ -56,6 +56,14 @@ das Panel „kein Zugriff“ anzeigen kann. Es enthält keine Produkt-, Kunden- 
 | KI-Vorschläge ohne Persistenz | bestehende Beschreibungen werden nie automatisch überschrieben |
 | Export im Website-Schema, idempotent | Website bleibt Konsument, keine Schemaänderung nötig |
 
+### Speicherort des HA-`Store`
+
+Der `Store`-Helper erhält den Schlüssel `frickeldave_store.data` (Version 1,
+Minor-Version 1). Ältere HA-Versionen (bis 2025.1) kennen keinen `path`-Parameter;
+dort überschreibt eine kleine Subclass die `path`-Property, sodass die Datei ebenfalls
+unter `config/frickeldave_store/` liegt. Ab HA-Versionen mit `path`-Parameter wird dieser
+direkt gesetzt. Der Dateiname und der Speicherort bleiben in beiden Fällen identisch.
+
 ## Betriebsgrenzen
 
 - Kein Supervisor, kein Add-on, kein `hassio`-Aufruf.
