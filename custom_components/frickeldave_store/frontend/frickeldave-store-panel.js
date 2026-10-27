@@ -2,19 +2,20 @@
  * Frickeldave Store - Verwaltungspanel für Home Assistant.
  *
  * Einzelne Lit-Web-Component für `panel_custom` mit `embed_iframe=False`.
- * Einzige Laufzeitabhängigkeit ist der von Home Assistant bereitgestellte
- * Lit-Import-Map-Eintrag. Alle Daten kommen über die HA-HTTP-API mit
- * Bearer-Token; die Autorisierung erfolgt serverseitig pro Anfrage.
+ * Lit liegt als vendored ESM-Bundle unter `./lit.js` (siehe frontend/README.md),
+ * weil Home Assistant keine Import-Map für den nackten Spezifizierer "lit"
+ * bereitstellt. Alle Daten kommen über die HA-HTTP-API mit Bearer-Token; die
+ * Autorisierung erfolgt serverseitig pro Anfrage.
  *
  * Aufbau:
  *   1. Konstanten und Hilfsfunktionen
  *   2. API-Schicht und Zustandsverwaltung
  *   3. Editor-, Bild-, Bestands-, Archiv-, Tag- und Einstellungslogik
  *   4. Render-Methoden (Produktliste, Dialoge, Einstellungen)
- *   5. Styles ausschliesslich ueber HA-Design-Tokens und eigene --fd-* Schicht
+ *   5. Styles ausschließlich über HA-Design-Tokens und eigene --fd-* Schicht
  */
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css } from "./lit.js";
 
 const API_ROOT = "/api/frickeldave_store";
 const MAX_IMAGES = 10;

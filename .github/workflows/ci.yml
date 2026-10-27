@@ -23,6 +23,19 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
 
+  frontend:
+    name: "Frontend"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: "Syntax: Panel"
+        run: node --check custom_components/frickeldave_store/frontend/frickeldave-store-panel.js
+      - name: "Syntax: Lit-Bundle"
+        run: node --check custom_components/frickeldave_store/frontend/lit.js
+
   typing:
     name: "mypy"
     runs-on: ubuntu-latest

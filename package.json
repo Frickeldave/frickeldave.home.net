@@ -1,0 +1,14 @@
+{
+  "name": "frickeldave-store-integration",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Build-Werkzeuge für das Frontend der Home-Assistant-Integration frickeldave_store",
+  "type": "module",
+  "scripts": {
+    "build:frontend": "node scripts/build_frontend.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "lit": "3.3.3"
+  }
+}

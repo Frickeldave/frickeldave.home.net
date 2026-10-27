@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-27
+
+### Fixed
+
+- Das Panel zeigte im Browser nur eine schwarze Seite: Das ES-Modul importierte
+  Lit über den nackten Spezifizierer `lit`. Home Assistant liefert keine
+  Import-Map aus, sodass `panel_custom` den Import mit "Failed to resolve module
+  specifier 'lit'" abbrach. Lit 3.3.3 liegt jetzt als vendored ESM-Bundle unter
+  `custom_components/frickeldave_store/frontend/lit.js`; das Panel importiert
+  `./lit.js`. Der Build ist über `package.json` und `npm run build:frontend`
+  reproduzierbar (lit und esbuild exakt gepinnt) und wird von
+  `tests/test_frontend_assets.py` abgesichert: keine nackten Spezifizierer im
+  Panel, Bundle vorhanden und mit `LitElement`, `html` und `css` exportiert.
+
 ## [0.1.1] - 2026-10-27
 
 ### Fixed

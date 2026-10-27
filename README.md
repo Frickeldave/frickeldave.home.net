@@ -155,7 +155,18 @@ ruff format --check .
 mypy custom_components
 pytest -q
 python -m json.tool custom_components/frickeldave_store/manifest.json
+
+# Panel-Frontend (Lit-Bundle)
+npm ci
+npm run build:frontend
+node --check custom_components/frickeldave_store/frontend/frickeldave-store-panel.js
+node --check custom_components/frickeldave_store/frontend/lit.js
 ```
+
+`custom_components/frickeldave_store/frontend/lit.js` ist ein vendored Build von
+Lit 3.3.3. Home Assistant liefert keine Import-Map für den Spezifizierer `lit`,
+deshalb importiert das Panel `./lit.js`; das Bundle wird nie von Hand bearbeitet.
+Details: [frontend/README.md](custom_components/frickeldave_store/frontend/README.md).
 
 Dokumentation: [Architektur](docs/architecture.md), [Datenmodell](docs/data-model.md),
 [Berechtigungen](docs/permissions.md), [Backup & Restore](docs/backup-restore.md).
