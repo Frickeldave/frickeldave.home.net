@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import voluptuous as vol
+try:  # HA 2026.10+ ships probatio as the schema library
+    import probatio as schema_lib
+except ImportError:  # pragma: no cover - HA <= 2026.9
+    import voluptuous as schema_lib
+
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
@@ -24,15 +28,7 @@ VERSION = 1
 MINOR_VERSION = 1
 
 
-def _validate_users(value: str) -> str:
-    try:
-        parse_user_grants(value)
-    except StoreError as err:
-        raise vol.Invalid(str(err)) from err
-    return value
-
-
-USER_SCHEMA = vol.Schema({vol.Optional("users", default=""): _validate_users})
+USER_SCHEMA = schema_lib.Schema({schema_lib.Optional("users", default=""): str})
 
 
 class FrickeldaveStoreConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
@@ -49,9 +45,8 @@ class FrickeldaveStoreConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[cal
         if user_input is not None:
             try:
                 grants = parse_user_grants(str(user_input.get("users", "") or ""))
-            except StoreError as err:
+            except StoreError:
                 errors["users"] = "invalid_users"
-                _ = err
             else:
                 users = format_user_grants(grants)
                 return self.async_create_entry(
@@ -122,20 +117,20 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
                     options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
                 return self.async_create_entry(title="", data=options)
 
-        schema = vol.Schema(
+        schema = schema_lib.Schema(
             {
-                vol.Optional("users", default=str(current.get("users", ""))): _validate_users,
-                vol.Optional(
+                schema_lib.Optional("users", default=str(current.get("users", ""))): str,
+                schema_lib.Optional(
                     "ai_endpoint", default=str(current.get("ai_endpoint", DEFAULT_AI_ENDPOINT))
                 ): str,
-                vol.Optional(
+                schema_lib.Optional(
                     "ai_model", default=str(current.get("ai_model", DEFAULT_AI_MODEL))
                 ): str,
-                vol.Optional("ai_api_key", default=""): str,
-                vol.Optional(
+                schema_lib.Optional("ai_api_key", default=""): str,
+                schema_lib.Optional(
                     "ai_prompt", default=str(current.get("ai_prompt", DEFAULT_AI_PROMPT))
                 ): str,
-                vol.Optional(
+                schema_lib.Optional(
                     "export_path", default=str(current.get("export_path", DEFAULT_EXPORT_PATH))
                 ): str,
             }

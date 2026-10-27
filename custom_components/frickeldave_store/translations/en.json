@@ -12,6 +12,9 @@
         }
       }
     },
+    "error": {
+      "invalid_users": "Invalid grants. Use one line per user in the format `ha_user_id: role,role` with roles product, finance or app_admin."
+    },
     "abort": {
       "already_configured": "The integration is already configured."
     }
@@ -37,6 +40,9 @@
           "export_path": "The export writes the catalogue to public/data/handmade.json and images to src/assets/handmade/, relative to the configured directory."
         }
       }
+    },
+    "error": {
+      "invalid_users": "Invalid grants. Use one line per user in the format `ha_user_id: role,role` with roles product, finance or app_admin."
     }
   }
 }

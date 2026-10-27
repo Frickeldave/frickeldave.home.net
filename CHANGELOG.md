@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-27
+
+### Fixed
+
+- Config- und Options-Flow verwenden das von Home Assistant mitgelieferte
+  Schema-Modul (`probatio` ab HA 2026.10, sonst `voluptuous`) und definieren das
+  Feld `users` als serialisierbaren String. Dadurch schlägt das Laden des
+  Formulars nicht mehr mit "Config flow could not be loaded: 500 Internal Server
+  Error" fehl; die Freigabevalidierung erfolgt weiterhin im Flow-Schritt und
+  zeigt `invalid_users` an. Neue Regressionstests serialisieren die Formularschemata
+  wie der HTTP-Layer.
+
+## [0.1.0] - 2026-10-27
+
 ### Added
 
 - Grundgerüst der Home-Assistant-Custom-Integration `frickeldave_store`

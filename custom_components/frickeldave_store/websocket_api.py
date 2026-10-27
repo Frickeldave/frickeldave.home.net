@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import voluptuous as vol
+try:  # HA 2026.10+ ships probatio as the schema library
+    import probatio as schema_lib
+except ImportError:  # pragma: no cover - HA <= 2026.9
+    import voluptuous as schema_lib
+
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
@@ -18,18 +22,18 @@ from .products import ProductFilter
 _LOGGER = logging.getLogger(__name__)
 
 _FILTER_KEYS: dict[str, Any] = {
-    "search": vol.Optional("search", default=""),
-    "category": vol.Optional("category", default=""),
-    "tags": vol.Optional("tags", default=""),
-    "customizable": vol.Optional("customizable"),
-    "in_stock": vol.Optional("in_stock"),
-    "in_cabinet": vol.Optional("in_cabinet"),
-    "visibility": vol.Optional("visibility"),
-    "archived": vol.Optional("archived"),
-    "sort": vol.Optional("sort", default="name"),
-    "order": vol.Optional("order", default="asc"),
-    "limit": vol.Optional("limit"),
-    "offset": vol.Optional("offset", default=0),
+    "search": schema_lib.Optional("search", default=""),
+    "category": schema_lib.Optional("category", default=""),
+    "tags": schema_lib.Optional("tags", default=""),
+    "customizable": schema_lib.Optional("customizable"),
+    "in_stock": schema_lib.Optional("in_stock"),
+    "in_cabinet": schema_lib.Optional("in_cabinet"),
+    "visibility": schema_lib.Optional("visibility"),
+    "archived": schema_lib.Optional("archived"),
+    "sort": schema_lib.Optional("sort", default="name"),
+    "order": schema_lib.Optional("order", default="asc"),
+    "limit": schema_lib.Optional("limit"),
+    "offset": schema_lib.Optional("offset", default=0),
 }
 
 
@@ -63,7 +67,7 @@ def _query_from_msg(msg: dict[str, Any]) -> dict[str, str]:
     return query
 
 
-@websocket_api.websocket_command({vol.Required("type"): "frickeldave_store/me"})
+@websocket_api.websocket_command({schema_lib.Required("type"): "frickeldave_store/me"})
 @websocket_api.async_response
 async def websocket_me(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
     runtime = _runtime_or_error(hass, connection, msg)
@@ -74,7 +78,7 @@ async def websocket_me(hass: HomeAssistant, connection: Any, msg: dict[str, Any]
 
 
 def _command_schema(command: str) -> dict[Any, Any]:
-    schema: dict[Any, Any] = {vol.Required("type"): command}
+    schema: dict[Any, Any] = {schema_lib.Required("type"): command}
     schema.update(_FILTER_KEYS)
     return schema
 

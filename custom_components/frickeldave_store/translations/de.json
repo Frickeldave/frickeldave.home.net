@@ -12,6 +12,9 @@
         }
       }
     },
+    "error": {
+      "invalid_users": "Ungültige Freigaben. Eine Zeile pro Benutzer im Format `ha_user_id: role,role` mit den Rollen product, finance oder app_admin."
+    },
     "abort": {
       "already_configured": "Die Integration ist bereits eingerichtet."
     }
@@ -37,6 +40,9 @@
           "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis."
         }
       }
+    },
+    "error": {
+      "invalid_users": "Ungültige Freigaben. Eine Zeile pro Benutzer im Format `ha_user_id: role,role` mit den Rollen product, finance oder app_admin."
     }
   }
 }
