@@ -17,6 +17,14 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Error" fehl; die Freigabevalidierung erfolgt weiterhin im Flow-Schritt und
   zeigt `invalid_users` an. Neue Regressionstests serialisieren die Formularschemata
   wie der HTTP-Layer.
+- Die WebSocket-Kommandos `frickeldave_store/products` und
+  `frickeldave_store/subscribe` verwenden ein gültiges Filter-Schema
+  (Marker als Schlüssel, Validatoren als Werte). Bisher standen die
+  `Optional`-Marker als Werte im Mapping, wodurch jede Nachricht mit Filterfeldern
+  mit "not a valid value at 'search'" abgelehnt wurde. Die Feldnamen für
+  `_query_from_msg` liegen nun in einer separaten Konstante; ein Regressionstest
+  prüft alle Kommando-Schemas mit realistischen Filterwerten und weist ungültige
+  Werte (z. B. `limit: "abc"`) zurück.
 
 ## [0.1.0] - 2026-10-27
 

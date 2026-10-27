@@ -21,19 +21,38 @@ from .products import ProductFilter
 
 _LOGGER = logging.getLogger(__name__)
 
-_FILTER_KEYS: dict[str, Any] = {
-    "search": schema_lib.Optional("search", default=""),
-    "category": schema_lib.Optional("category", default=""),
-    "tags": schema_lib.Optional("tags", default=""),
-    "customizable": schema_lib.Optional("customizable"),
-    "in_stock": schema_lib.Optional("in_stock"),
-    "in_cabinet": schema_lib.Optional("in_cabinet"),
-    "visibility": schema_lib.Optional("visibility"),
-    "archived": schema_lib.Optional("archived"),
-    "sort": schema_lib.Optional("sort", default="name"),
-    "order": schema_lib.Optional("order", default="asc"),
-    "limit": schema_lib.Optional("limit"),
-    "offset": schema_lib.Optional("offset", default=0),
+#: Feldnamen der Filter (für ``_query_from_msg``) – bewusst getrennt vom Schema.
+_FILTER_NAMES: tuple[str, ...] = (
+    "search",
+    "category",
+    "tags",
+    "customizable",
+    "in_stock",
+    "in_cabinet",
+    "visibility",
+    "archived",
+    "sort",
+    "order",
+    "limit",
+    "offset",
+)
+
+#: Schema-Mapping Marker → Validator. Die Marker sind Schlüssel; die Werte sind
+#: Validatoren. Ein Validator als Schlüssel würde die Filterfelder ungeprüft
+#: durchreichen und vom Schema als ungültiger Wert abgelehnt.
+_FILTER_SCHEMA: dict[Any, Any] = {
+    schema_lib.Optional("search", default=""): str,
+    schema_lib.Optional("category", default=""): str,
+    schema_lib.Optional("tags", default=""): str,
+    schema_lib.Optional("customizable"): bool,
+    schema_lib.Optional("in_stock"): bool,
+    schema_lib.Optional("in_cabinet"): bool,
+    schema_lib.Optional("visibility"): str,
+    schema_lib.Optional("archived"): bool,
+    schema_lib.Optional("sort", default="name"): str,
+    schema_lib.Optional("order", default="asc"): str,
+    schema_lib.Optional("limit"): int,
+    schema_lib.Optional("offset", default=0): int,
 }
 
 
@@ -56,7 +75,7 @@ def _require(
 
 def _query_from_msg(msg: dict[str, Any]) -> dict[str, str]:
     query: dict[str, str] = {}
-    for key in _FILTER_KEYS:
+    for key in _FILTER_NAMES:
         value = msg.get(key)
         if value is None or value == "":
             continue
@@ -79,7 +98,7 @@ async def websocket_me(hass: HomeAssistant, connection: Any, msg: dict[str, Any]
 
 def _command_schema(command: str) -> dict[Any, Any]:
     schema: dict[Any, Any] = {schema_lib.Required("type"): command}
-    schema.update(_FILTER_KEYS)
+    schema.update(_FILTER_SCHEMA)
     return schema
 
 
