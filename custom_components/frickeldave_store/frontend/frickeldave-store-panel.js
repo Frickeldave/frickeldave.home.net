@@ -65,12 +65,6 @@ const STOCK_TYPES = Object.freeze([
   },
 ]);
 
-const ROLE_LABELS = Object.freeze({
-  product: "Produktpflege",
-  finance: "Finanzen",
-  app_admin: "Anwendungsverwaltung",
-});
-
 const currencyFormatter = new Intl.NumberFormat("de-DE", {
   style: "currency",
   currency: "EUR",
@@ -156,7 +150,8 @@ export class FrickeldaveStorePanel extends LitElement {
     _accessState: { state: true },
     _accessError: { state: true },
     _me: { state: true },
-    _view: { state: true },
+
+    _menuOpen: { state: true },
 
     _products: { state: true },
     _total: { state: true },
@@ -184,6 +179,7 @@ export class FrickeldaveStorePanel extends LitElement {
     _tagsDialog: { state: true },
     _importDialog: { state: true },
 
+    _settingsDialog: { state: true },
     _settingsLoading: { state: true },
     _settingsSaving: { state: true },
     _settingsError: { state: true },
@@ -211,7 +207,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessState = "idle";
     this._accessError = "";
     this._me = null;
-    this._view = "products";
+    this._menuOpen = false;
 
     this._products = [];
     this._total = 0;
@@ -238,6 +234,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._tagsDialog = null;
     this._importDialog = null;
 
+    this._settingsDialog = false;
     this._settingsLoading = false;
     this._settingsSaving = false;
     this._settingsError = "";
@@ -258,6 +255,10 @@ export class FrickeldaveStorePanel extends LitElement {
         this._revalidateAccess();
       }
     };
+
+    // Gebundene Listener für das Kontextmenü (document-Ebene).
+    this._onMenuOutside = (event) => this._handleMenuOutside(event);
+    this._onMenuKeydown = (event) => this._handleMenuKeydown(event);
   }
 
   get hass() {
@@ -293,6 +294,7 @@ export class FrickeldaveStorePanel extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
+    this._detachMenuListeners();
     clearTimeout(this._searchTimer);
     clearTimeout(this._toastTimer);
     for (const controller of this._controllers) {
@@ -505,12 +507,15 @@ export class FrickeldaveStorePanel extends LitElement {
     this._products = [];
     this._total = 0;
     this._allTags = [];
+    this._menuOpen = false;
+    this._detachMenuListeners();
     this._editor = null;
     this._imagesDialog = null;
     this._stockDialog = null;
     this._archiveDialog = null;
     this._tagsDialog = null;
     this._importDialog = null;
+    this._settingsDialog = false;
     this._settingsForm = { ai_endpoint: "", ai_model: "", ai_prompt: "", api_key: "" };
     this._settingsMeta = { api_key_set: false };
     this._settingsError = "";
@@ -540,13 +545,9 @@ export class FrickeldaveStorePanel extends LitElement {
 
       if (can.product || can.app_admin) {
         this._accessState = "ready";
-        this._view = can.product ? "products" : "settings";
         if (can.product) {
           this._loadTags();
           this._loadProducts();
-        }
-        if (can.app_admin) {
-          this._loadSettings();
         }
       } else {
         this._accessState = "denied";
@@ -587,6 +588,8 @@ export class FrickeldaveStorePanel extends LitElement {
         this._products = [];
         this._total = 0;
         this._allTags = [];
+        this._menuOpen = false;
+        this._detachMenuListeners();
         this._editor = null;
         this._imagesDialog = null;
         this._stockDialog = null;
@@ -599,16 +602,20 @@ export class FrickeldaveStorePanel extends LitElement {
         this._products = [];
         this._total = 0;
         this._allTags = [];
-        this._view = "settings";
+        this._menuOpen = false;
+        this._detachMenuListeners();
         this._editor = null;
         this._imagesDialog = null;
         this._stockDialog = null;
         this._archiveDialog = null;
         this._tagsDialog = null;
         this._importDialog = null;
-      } else if (this._view === "products") {
+      } else {
         this._loadProducts();
         this._loadTags();
+      }
+      if (!can.app_admin) {
+        this._settingsDialog = false;
       }
     } catch (error) {
       if (isAbortError(error)) {
@@ -628,19 +635,6 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessState = "idle";
     this._accessError = "";
     this._bootstrap();
-  }
-
-  _setView(view) {
-    if (view === "settings" && !this._can("app_admin")) {
-      return;
-    }
-    if (view === "products" && !this._can("product")) {
-      return;
-    }
-    this._view = view;
-    if (view === "settings" && !this._settingsLoading && !this._settingsForm.ai_endpoint) {
-      this._loadSettings();
-    }
   }
 
   _reloadAll() {
@@ -896,25 +890,6 @@ export class FrickeldaveStorePanel extends LitElement {
     this._imagePending.clear();
   }
 
-  _roleLabels() {
-    const roles = this._me?.roles ?? [];
-    const labels = roles.map((role) => ROLE_LABELS[role]).filter(Boolean);
-    if (labels.length > 0) {
-      return labels;
-    }
-    const derived = [];
-    if (this._can("product")) {
-      derived.push(ROLE_LABELS.product);
-    }
-    if (this._can("finance")) {
-      derived.push(ROLE_LABELS.finance);
-    }
-    if (this._can("app_admin")) {
-      derived.push(ROLE_LABELS.app_admin);
-    }
-    return derived;
-  }
-
   _showToast(message) {
     clearTimeout(this._toastTimer);
     this._toast = { message };
@@ -954,6 +929,7 @@ export class FrickeldaveStorePanel extends LitElement {
       ["#fd-stock-dialog", Boolean(this._stockDialog)],
       ["#fd-archive-dialog", Boolean(this._archiveDialog)],
       ["#fd-tags-dialog", Boolean(this._tagsDialog)],
+      ["#fd-settings-dialog", Boolean(this._settingsDialog)],
       ["#fd-import-dialog", Boolean(this._importDialog)],
     ];
     for (const [selector, shouldOpen] of entries) {
@@ -1730,7 +1706,13 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!this._can("product")) {
       return;
     }
-    this._captureFocus();
+    const trigger = this._menuTrigger();
+    this._closeMenu({ restoreFocus: false });
+    if (trigger) {
+      this._focusReturn = trigger;
+    } else {
+      this._captureFocus();
+    }
     this._tagsDialog = {
       tags: [...this._allTags],
       draft: "",
@@ -1949,6 +1931,7 @@ export class FrickeldaveStorePanel extends LitElement {
       ${this._renderStockDialog()}
       ${this._renderArchiveDialog()}
       ${this._renderTagsDialog()}
+      ${this._renderSettingsDialog()}
       ${this._renderImportDialog()}
       ${this._renderToast()}
     `;
@@ -2007,26 +1990,201 @@ export class FrickeldaveStorePanel extends LitElement {
     `;
   }
 
+  /* --------------------------------------------------------------------- */
+  /* Kopfzeile, Hauptmenü und Einstellungsdialog                            */
+  /* --------------------------------------------------------------------- */
+
+  _menuItems() {
+    return [...(this.renderRoot?.querySelectorAll(".fd-menu [role='menuitem']") ?? [])];
+  }
+
+  _menuTrigger() {
+    const trigger = this.renderRoot?.querySelector("#fd-menu-trigger");
+    return trigger && typeof trigger.focus === "function" ? trigger : null;
+  }
+
+  _toggleSidebar() {
+    this._closeMenu({ restoreFocus: false });
+    this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
+  }
+
+  _toggleMenu() {
+    if (this._menuOpen) {
+      this._closeMenu();
+    } else {
+      this._openMenu();
+    }
+  }
+
+  _openMenu() {
+    if (this._menuOpen) {
+      return;
+    }
+    this._menuOpen = true;
+    document.addEventListener("pointerdown", this._onMenuOutside, true);
+    document.addEventListener("keydown", this._onMenuKeydown, true);
+    this._focusMenuItem(0);
+  }
+
+  _closeMenu({ restoreFocus = true } = {}) {
+    if (!this._menuOpen) {
+      return;
+    }
+    this._menuOpen = false;
+    this._detachMenuListeners();
+    if (restoreFocus) {
+      const trigger = this._menuTrigger();
+      this.updateComplete
+        .then(() => {
+          trigger?.focus?.();
+        })
+        .catch(() => {});
+    }
+  }
+
+  _detachMenuListeners() {
+    document.removeEventListener("pointerdown", this._onMenuOutside, true);
+    document.removeEventListener("keydown", this._onMenuKeydown, true);
+  }
+
+  _focusMenuItem(index) {
+    this.updateComplete
+      .then(() => {
+        const items = this._menuItems();
+        if (items.length === 0) {
+          return;
+        }
+        items[(index + items.length) % items.length].focus();
+      })
+      .catch(() => {});
+  }
+
+  _handleMenuOutside(event) {
+    if (!this._menuOpen) {
+      return;
+    }
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    const anchor = this.renderRoot?.querySelector(".fd-menu-anchor");
+    if (anchor && path.includes(anchor)) {
+      return;
+    }
+    this._closeMenu({ restoreFocus: false });
+  }
+
+  _handleMenuKeydown(event) {
+    if (!this._menuOpen) {
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this._closeMenu();
+      return;
+    }
+    if (event.key === "Tab") {
+      this._closeMenu({ restoreFocus: false });
+      return;
+    }
+    const items = this._menuItems();
+    if (items.length === 0) {
+      return;
+    }
+    const current = items.indexOf(this.renderRoot?.activeElement);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      this._focusMenuItem(current < 0 ? 0 : current + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      this._focusMenuItem(current <= 0 ? items.length - 1 : current - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      this._focusMenuItem(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      this._focusMenuItem(items.length - 1);
+    }
+  }
+
+  _openSettingsDialog() {
+    if (!this._can("app_admin")) {
+      return;
+    }
+    this._closeMenu({ restoreFocus: false });
+    this._focusReturn = this._menuTrigger();
+    this._settingsDialog = true;
+    this._loadSettings();
+  }
+
+  _closeSettingsDialog() {
+    this._settingsDialog = false;
+    this._restoreFocus();
+  }
+
+  _renderHeaderMenu() {
+    if (!this._menuOpen) {
+      return "";
+    }
+    const canAdmin = this._can("app_admin");
+    const canProduct = this._can("product");
+    if (!canAdmin && !canProduct) {
+      return "";
+    }
+    return html`
+      <div id="fd-main-menu" class="fd-menu" role="menu" aria-label="Weitere Aktionen">
+        ${canAdmin
+          ? html`
+              <button
+                type="button"
+                class="fd-menu-item"
+                role="menuitem"
+                tabindex="-1"
+                @click=${() => this._openSettingsDialog()}
+              >
+                KI
+              </button>
+            `
+          : ""}
+        ${canAdmin && canProduct ? html`<div class="fd-menu-separator" role="separator"></div>` : ""}
+        ${canProduct
+          ? html`
+              <button
+                type="button"
+                class="fd-menu-item"
+                role="menuitem"
+                tabindex="-1"
+                @click=${() => this._openTags()}
+              >
+                Tags verwalten
+              </button>
+            `
+          : ""}
+      </div>
+    `;
+  }
+
   _renderMain() {
     const canProduct = this._can("product");
-    const canAdmin = this._can("app_admin");
-    const view = this._view === "settings" && canAdmin ? "settings" : canProduct ? "products" : "settings";
 
     return html`
       <div class="fd-shell">
         <header class="fd-header">
+          <button
+            type="button"
+            class="fd-menu-button"
+            @click=${() => this._toggleSidebar()}
+            aria-label="Menü öffnen"
+            title="Menü"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4 6h16" />
+              <path d="M4 12h16" />
+              <path d="M4 18h16" />
+            </svg>
+          </button>
           <div class="fd-header-text">
             <h1 id="fd-main-heading" tabindex="-1">Frickeldave Store</h1>
-            <p class="fd-muted">
+            <p class="fd-muted fd-header-subtitle">
               Angemeldet als ${this._me?.name || this.hass?.user?.name || "Unbekannt"}
             </p>
-            ${this._roleLabels().length > 0
-              ? html`
-                  <ul class="fd-role-list" role="list">
-                    ${this._roleLabels().map((label) => html`<li class="fd-role">${label}</li>`)}
-                  </ul>
-                `
-              : ""}
           </div>
           <div class="fd-header-actions">
             ${canProduct
@@ -2048,42 +2206,42 @@ export class FrickeldaveStorePanel extends LitElement {
                 `
               : ""}
           </div>
+          <div class="fd-menu-anchor">
+            <button
+              id="fd-menu-trigger"
+              type="button"
+              class="fd-more-button"
+              @click=${() => this._toggleMenu()}
+              aria-haspopup="menu"
+              aria-expanded=${this._menuOpen ? "true" : "false"}
+              aria-controls="fd-main-menu"
+              aria-label="Weitere Aktionen"
+              title="Weitere Aktionen"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="12" cy="5" r="1.7" />
+                <circle cx="12" cy="12" r="1.7" />
+                <circle cx="12" cy="19" r="1.7" />
+              </svg>
+            </button>
+            ${this._renderHeaderMenu()}
+          </div>
         </header>
 
-        ${canProduct && canAdmin ? this._renderTabs(view) : ""}
-        ${view === "settings" ? this._renderSettings() : this._renderProducts()}
+        ${canProduct ? this._renderProducts() : this._renderNoProductView()}
       </div>
     `;
   }
 
-  _renderTabs(view) {
+  _renderNoProductView() {
     return html`
-      <nav class="fd-tabs" aria-label="Bereiche">
-        ${this._can("product")
-          ? html`
-              <button
-                type="button"
-                class="fd-tab"
-                aria-current=${view === "products" ? "page" : "false"}
-                @click=${() => this._setView("products")}
-              >
-                Produkte
-              </button>
-            `
-          : ""}
-        ${this._can("app_admin")
-          ? html`
-              <button
-                type="button"
-                class="fd-tab"
-                aria-current=${view === "settings" ? "page" : "false"}
-                @click=${() => this._setView("settings")}
-              >
-                Einstellungen
-              </button>
-            `
-          : ""}
-      </nav>
+      <section class="fd-card fd-state">
+        <h2>Keine Produktverwaltung</h2>
+        <p class="fd-muted">
+          Ihr Benutzer darf keine Produkte verwalten. Die KI-Einstellungen erreichen Sie über das
+          Menü oben rechts.
+        </p>
+      </section>
     `;
   }
 
@@ -2107,7 +2265,6 @@ export class FrickeldaveStorePanel extends LitElement {
             />
           </div>
           <div class="fd-filter-actions">
-            <button type="button" class="fd-button" @click=${() => this._openTags()}>Tags verwalten</button>
             <button
               type="button"
               class="fd-button"
@@ -2119,47 +2276,47 @@ export class FrickeldaveStorePanel extends LitElement {
           </div>
         </div>
 
-        <fieldset class="fd-fieldset">
-          <legend class="fd-label">Kategorie</legend>
-          <div class="fd-chip-row">
-            ${CATEGORY_KEYS.map(
-              (key) => html`
-                <button
-                  type="button"
-                  class="fd-chip"
-                  aria-pressed=${this._categoryFilter.includes(key) ? "true" : "false"}
-                  @click=${() => this._toggleFilterValue("_categoryFilter", key)}
-                >
-                  ${CATEGORY_LABELS[key]}
-                </button>
-              `,
-            )}
-          </div>
-          <p class="fd-hint">Mehrere Kategorien werden mit „oder“ verknüpft.</p>
-        </fieldset>
+        <div class="fd-filter-options">
+          <fieldset class="fd-fieldset">
+            <legend class="fd-label">Kategorie</legend>
+            <div class="fd-chip-row">
+              ${CATEGORY_KEYS.map(
+                (key) => html`
+                  <button
+                    type="button"
+                    class="fd-chip"
+                    aria-pressed=${this._categoryFilter.includes(key) ? "true" : "false"}
+                    @click=${() => this._toggleFilterValue("_categoryFilter", key)}
+                  >
+                    ${CATEGORY_LABELS[key]}
+                  </button>
+                `,
+              )}
+            </div>
+          </fieldset>
 
-        <fieldset class="fd-fieldset">
-          <legend class="fd-label">Tags</legend>
-          ${this._allTags.length === 0
-            ? html`<p class="fd-hint">Noch keine Tags angelegt.</p>`
-            : html`
-                <div class="fd-chip-row fd-chip-row--scroll">
-                  ${this._allTags.map(
-                    (tag) => html`
-                      <button
-                        type="button"
-                        class="fd-chip"
-                        aria-pressed=${this._tagFilter.includes(tag) ? "true" : "false"}
-                        @click=${() => this._toggleFilterValue("_tagFilter", tag)}
-                      >
-                        ${tag}
-                      </button>
-                    `,
-                  )}
-                </div>
-              `}
-          <p class="fd-hint">Mehrere Tags werden mit „und“ verknüpft.</p>
-        </fieldset>
+          <fieldset class="fd-fieldset">
+            <legend class="fd-label">Tags</legend>
+            ${this._allTags.length === 0
+              ? html`<p class="fd-hint">Noch keine Tags angelegt.</p>`
+              : html`
+                  <div class="fd-chip-row fd-chip-row--scroll">
+                    ${this._allTags.map(
+                      (tag) => html`
+                        <button
+                          type="button"
+                          class="fd-chip"
+                          aria-pressed=${this._tagFilter.includes(tag) ? "true" : "false"}
+                          @click=${() => this._toggleFilterValue("_tagFilter", tag)}
+                        >
+                          ${tag}
+                        </button>
+                      `,
+                    )}
+                  </div>
+                `}
+          </fieldset>
+        </div>
 
         <div class="fd-filter-grid">
           <div class="fd-field">
@@ -3383,110 +3540,147 @@ export class FrickeldaveStorePanel extends LitElement {
   /* Render: Einstellungen                                                  */
   /* --------------------------------------------------------------------- */
 
-  _renderSettings() {
-    if (!this._can("app_admin")) {
-      return html`
-        <section class="fd-card fd-state">
-          <h2>Kein Zugriff</h2>
-          <p class="fd-muted">Die Einstellungen sind der Anwendungsverwaltung vorbehalten.</p>
-        </section>
-      `;
+  _renderSettingsDialog() {
+    if (!this._settingsDialog || !this._can("app_admin")) {
+      return "";
     }
 
+    return html`
+      <dialog
+        id="fd-settings-dialog"
+        class="fd-dialog fd-dialog--wide"
+        aria-labelledby="fd-settings-title"
+        @cancel=${(event) => this._handleDialogCancel(event, () => this._closeSettingsDialog())}
+        @click=${(event) => {
+          if (event.target === event.currentTarget) {
+            this._closeSettingsDialog();
+          }
+        }}
+      >
+        <div class="fd-dialog-head">
+          <div>
+            <h2 id="fd-settings-title">KI-Einstellungen</h2>
+            <p class="fd-muted fd-small">Für KI-Beschreibungsvorschläge im Produkteditor.</p>
+          </div>
+          <button
+            type="button"
+            class="fd-icon-button"
+            @click=${() => this._closeSettingsDialog()}
+            aria-label="Dialog schließen"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div class="fd-dialog-body">
+          <p class="fd-muted fd-small">
+            Zugangsdaten bleiben serverseitig gespeichert und werden nie an die Oberfläche
+            zurückgegeben.
+          </p>
+
+          ${this._settingsLoading ? html`<p class="fd-muted" role="status">Einstellungen werden geladen …</p>` : ""}
+          ${this._settingsError
+            ? html`<div class="fd-banner fd-banner--error" role="alert">${this._settingsError}</div>`
+            : ""}
+          ${this._settingsNotice
+            ? html`<div class="fd-banner fd-banner--success" role="status">${this._settingsNotice}</div>`
+            : ""}
+
+          ${this._renderSettingsForm()}
+        </div>
+
+        <div class="fd-dialog-foot">
+          <button type="button" class="fd-button" @click=${() => this._closeSettingsDialog()}>
+            Schließen
+          </button>
+        </div>
+      </dialog>
+    `;
+  }
+
+  _renderSettingsForm() {
     const form = this._settingsForm;
     const keySet = Boolean(this._settingsMeta.api_key_set);
 
     return html`
-      <section class="fd-card fd-settings" aria-labelledby="fd-settings-title">
-        <h2 id="fd-settings-title">KI-Beschreibungsvorschläge</h2>
-        <p class="fd-muted fd-small">
-          Zugangsdaten bleiben serverseitig gespeichert und werden nie an die Oberfläche zurückgegeben.
-        </p>
+      <form class="fd-form-grid" @submit=${(event) => this._saveSettings(event)} novalidate>
+        <div class="fd-field fd-field--full">
+          <label class="fd-label" for="fd-settings-endpoint">KI-Endpunkt</label>
+          <input
+            id="fd-settings-endpoint"
+            data-autofocus
+            class="fd-input"
+            type="url"
+            placeholder="https://api.example.com/v1/chat/completions"
+            .value=${form.ai_endpoint}
+            @input=${(event) => this._setSettingsField("ai_endpoint", event.target.value)}
+          />
+          <p class="fd-hint">Vollständige URL des Chat-Completion-Endpunkts.</p>
+        </div>
 
-        ${this._settingsLoading ? html`<p class="fd-muted" role="status">Einstellungen werden geladen …</p>` : ""}
-        ${this._settingsError ? html`<div class="fd-banner fd-banner--error" role="alert">${this._settingsError}</div>` : ""}
-        ${this._settingsNotice
-          ? html`<div class="fd-banner fd-banner--success" role="status">${this._settingsNotice}</div>`
-          : ""}
+        <div class="fd-field">
+          <label class="fd-label" for="fd-settings-model">Modell</label>
+          <input
+            id="fd-settings-model"
+            class="fd-input"
+            type="text"
+            placeholder="deepseek-flash"
+            .value=${form.ai_model}
+            @input=${(event) => this._setSettingsField("ai_model", event.target.value)}
+          />
+        </div>
 
-        <form class="fd-form-grid" @submit=${(event) => this._saveSettings(event)} novalidate>
-          <div class="fd-field fd-field--full">
-            <label class="fd-label" for="fd-settings-endpoint">KI-Endpunkt</label>
-            <input
-              id="fd-settings-endpoint"
-              class="fd-input"
-              type="url"
-              placeholder="https://api.example.com/v1/chat/completions"
-              .value=${form.ai_endpoint}
-              @input=${(event) => this._setSettingsField("ai_endpoint", event.target.value)}
-            />
-            <p class="fd-hint">Vollständige URL des Chat-Completion-Endpunkts.</p>
+        <div class="fd-field">
+          <label class="fd-label" for="fd-settings-key">API-Key</label>
+          <input
+            id="fd-settings-key"
+            class="fd-input"
+            type="password"
+            autocomplete="new-password"
+            placeholder=${keySet ? "•••••••• (gesetzt)" : "Noch kein Schlüssel gesetzt"}
+            .value=${form.api_key}
+            @input=${(event) => this._setSettingsField("api_key", event.target.value)}
+          />
+          <p class="fd-hint">
+            ${keySet ? "API-Key gesetzt." : "Noch kein API-Key gesetzt."}
+            Der Schlüssel wird ausschließlich gespeichert und nie angezeigt.
+          </p>
+        </div>
+
+        <div class="fd-field fd-field--full">
+          <label class="fd-label" for="fd-settings-prompt">Prompt</label>
+          <textarea
+            id="fd-settings-prompt"
+            class="fd-input fd-textarea"
+            rows="5"
+            .value=${form.ai_prompt}
+            @input=${(event) => this._setSettingsField("ai_prompt", event.target.value)}
+          ></textarea>
+        </div>
+
+        <div class="fd-field fd-field--full">
+          <div class="fd-inline-actions">
+            <button
+              type="submit"
+              class="fd-button fd-button--primary"
+              ?disabled=${this._settingsSaving || this._settingsLoading}
+            >
+              ${this._settingsSaving ? "Speichern …" : "Einstellungen speichern"}
+            </button>
+            <button
+              type="button"
+              class="fd-button"
+              @click=${() => this._loadSettings()}
+              ?disabled=${this._settingsLoading}
+            >
+              Neu laden
+            </button>
+            <span class="fd-status ${keySet ? "fd-status--ok" : "fd-status--warn"}">
+              ${keySet ? "API-Key gesetzt" : "API-Key fehlt"}
+            </span>
           </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-settings-model">Modell</label>
-            <input
-              id="fd-settings-model"
-              class="fd-input"
-              type="text"
-              placeholder="deepseek-flash"
-              .value=${form.ai_model}
-              @input=${(event) => this._setSettingsField("ai_model", event.target.value)}
-            />
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-settings-key">API-Key</label>
-            <input
-              id="fd-settings-key"
-              class="fd-input"
-              type="password"
-              autocomplete="new-password"
-              placeholder=${keySet ? "•••••••• (gesetzt)" : "Noch kein Schlüssel gesetzt"}
-              .value=${form.api_key}
-              @input=${(event) => this._setSettingsField("api_key", event.target.value)}
-            />
-            <p class="fd-hint">
-              ${keySet ? "API-Key gesetzt." : "Noch kein API-Key gesetzt."}
-              Der Schlüssel wird ausschließlich gespeichert und nie angezeigt.
-            </p>
-          </div>
-
-          <div class="fd-field fd-field--full">
-            <label class="fd-label" for="fd-settings-prompt">Prompt</label>
-            <textarea
-              id="fd-settings-prompt"
-              class="fd-input fd-textarea"
-              rows="5"
-              .value=${form.ai_prompt}
-              @input=${(event) => this._setSettingsField("ai_prompt", event.target.value)}
-            ></textarea>
-          </div>
-
-          <div class="fd-field fd-field--full">
-            <div class="fd-inline-actions">
-              <button
-                type="submit"
-                class="fd-button fd-button--primary"
-                ?disabled=${this._settingsSaving || this._settingsLoading}
-              >
-                ${this._settingsSaving ? "Speichern …" : "Einstellungen speichern"}
-              </button>
-              <button
-                type="button"
-                class="fd-button"
-                @click=${() => this._loadSettings()}
-                ?disabled=${this._settingsLoading}
-              >
-                Neu laden
-              </button>
-              <span class="fd-status ${keySet ? "fd-status--ok" : "fd-status--warn"}">
-                ${keySet ? "API-Key gesetzt" : "API-Key fehlt"}
-              </span>
-            </div>
-          </div>
-        </form>
-      </section>
+        </div>
+      </form>
     `;
   }
 
@@ -3567,73 +3761,134 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
       display: flex;
       flex-wrap: wrap;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: var(--fd-space-3);
+      align-items: center;
+      gap: var(--fd-space-2);
+      min-height: 56px;
+      margin: calc(-1 * var(--fd-space-4)) calc(-1 * var(--fd-space-4)) 0;
+      padding: 6px var(--fd-space-4);
+      background: var(--fd-surface);
+      border-bottom: 1px solid var(--fd-divider);
+    }
+
+    .fd-menu-button,
+    .fd-more-button {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
+      min-height: 44px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--fd-text);
+      cursor: pointer;
+    }
+
+    .fd-menu-button:hover,
+    .fd-more-button:hover {
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-menu-button svg,
+    .fd-more-button svg {
+      display: block;
+      width: 24px;
+      height: 24px;
+    }
+
+    .fd-menu-button svg path {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+    }
+
+    .fd-more-button svg circle {
+      fill: currentColor;
+      stroke: none;
+    }
+
+    .fd-header-text {
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
     .fd-header-text h1 {
       margin: 0;
-      font-size: 1.6rem;
+      overflow: hidden;
+      font-size: 1.25rem;
       font-weight: 500;
-      line-height: 1.25;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .fd-header-text p {
-      margin: 4px 0 0;
+      margin: 0;
+    }
+
+    .fd-header-subtitle {
+      font-size: var(--fd-font-small);
     }
 
     .fd-header-actions {
       display: flex;
       flex-wrap: wrap;
       gap: var(--fd-space-2);
+      margin-left: auto;
     }
 
-    .fd-role-list {
+    .fd-menu-anchor {
+      position: relative;
+      flex: none;
+    }
+
+    .fd-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      z-index: 30;
       display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      list-style: none;
-      margin: var(--fd-space-2) 0 0;
-      padding: 0;
-    }
-
-    .fd-role {
-      padding: 2px 10px;
+      flex-direction: column;
+      min-width: 200px;
+      padding: 6px 0;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
-      background: var(--fd-surface-alt);
-      color: var(--fd-text-muted);
-      font-size: var(--fd-font-small);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface);
+      box-shadow: var(--fd-shadow-dialog);
     }
 
-    .fd-tabs {
+    .fd-menu-item {
       display: flex;
-      gap: var(--fd-space-1);
-      border-bottom: 1px solid var(--fd-divider);
-    }
-
-    .fd-tab {
-      appearance: none;
-      padding: 10px 14px;
+      align-items: center;
+      min-height: 44px;
+      padding: 8px 16px;
       border: none;
-      border-bottom: 3px solid transparent;
       background: none;
-      color: var(--fd-text-muted);
+      color: var(--fd-text);
       font: inherit;
+      text-align: left;
       cursor: pointer;
     }
 
-    .fd-tab:hover {
-      color: var(--fd-text);
+    .fd-menu-item:hover,
+    .fd-menu-item:focus-visible {
+      background: var(--fd-surface-alt);
     }
 
-    .fd-tab[aria-current="page"] {
-      border-bottom-color: var(--fd-accent);
-      color: var(--fd-accent);
-      font-weight: 500;
+    .fd-menu-separator {
+      height: 1px;
+      margin: 6px 0;
+      background: var(--fd-divider);
     }
 
     /* Karten ------------------------------------------------------------- */
@@ -4054,6 +4309,19 @@ export class FrickeldaveStorePanel extends LitElement {
       display: flex;
       flex-wrap: wrap;
       gap: var(--fd-space-2);
+    }
+
+    .fd-filter-options {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--fd-space-3);
+      align-items: start;
+    }
+
+    @media (min-width: 1200px) {
+      .fd-filter-options {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     .fd-filter-grid {
@@ -4500,20 +4768,7 @@ export class FrickeldaveStorePanel extends LitElement {
       border-radius: var(--fd-radius-sm);
     }
 
-    /* Einstellungen ------------------------------------------------------- */
-
-    .fd-settings {
-      display: flex;
-      flex-direction: column;
-      gap: var(--fd-space-3);
-      padding: var(--fd-space-4);
-    }
-
-    .fd-settings h2 {
-      margin: 0;
-      font-size: 1.2rem;
-      font-weight: 500;
-    }
+    /* Vorschlag (KI) ------------------------------------------------------ */
 
     .fd-suggestion {
       display: flex;
@@ -4556,6 +4811,11 @@ export class FrickeldaveStorePanel extends LitElement {
         padding: var(--fd-space-3);
       }
 
+      .fd-header {
+        margin: calc(-1 * var(--fd-space-3)) calc(-1 * var(--fd-space-3)) 0;
+        padding: 6px var(--fd-space-3);
+      }
+
       .fd-grid {
         grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
       }
@@ -4567,7 +4827,18 @@ export class FrickeldaveStorePanel extends LitElement {
       }
 
       .fd-header {
-        flex-direction: column;
+        margin: calc(-1 * var(--fd-space-2)) calc(-1 * var(--fd-space-2)) 0;
+        padding: 6px var(--fd-space-2);
+      }
+
+      .fd-header-subtitle {
+        display: none;
+      }
+
+      .fd-header-actions {
+        flex: 1 1 100%;
+        order: 4;
+        margin-left: 0;
       }
 
       .fd-grid {
