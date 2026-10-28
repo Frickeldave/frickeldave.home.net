@@ -106,6 +106,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     _ai: { state: true },
     _toast: { state: true },
+
+    _forwardAvailable: { state: true },
   };
 
   constructor() {
@@ -143,6 +145,16 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     };
 
     this._toast = null;
+
+    this._forwardAvailable = false;
+    this._awaitingForwardPopstate = false;
+    this._onPopState = () => {
+      if (this._awaitingForwardPopstate) {
+        this._awaitingForwardPopstate = false;
+        return;
+      }
+      this._forwardAvailable = true;
+    };
   }
 
   set hass(value) {
@@ -160,6 +172,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    window.addEventListener("popstate", this._onPopState);
     this._bootstrap();
   }
 
@@ -170,10 +183,51 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
     this._controllers.clear();
     clearTimeout(this._toastTimer);
+    window.removeEventListener("popstate", this._onPopState);
   }
 
   updated() {
     this._syncDialogs();
+  }
+
+  /* --------------------------------------------------------------------- */
+  /* Navigation der Konfigurationsseite                                     */
+  /* --------------------------------------------------------------------- */
+
+  _sameOriginReferrer() {
+    if (!document.referrer) {
+      return false;
+    }
+    try {
+      return new URL(document.referrer).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  _canGoBack() {
+    return (window.history?.length ?? 1) > 1;
+  }
+
+  _goBack() {
+    if (!this._canGoBack()) {
+      return;
+    }
+    if (this._sameOriginReferrer()) {
+      this._forwardAvailable = true;
+      window.history.back();
+      return;
+    }
+    window.location.assign("/config/integrations");
+  }
+
+  _goForward() {
+    if (!this._forwardAvailable) {
+      return;
+    }
+    this._forwardAvailable = false;
+    this._awaitingForwardPopstate = true;
+    window.history.forward();
   }
 
   /* --------------------------------------------------------------------- */
@@ -919,38 +973,59 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
   _renderMain() {
     return html`
-      <div class="fd-shell">
-        <header class="fd-header">
-          <div class="fd-header-text">
-            <h1 id="fd-config-heading" tabindex="-1">Frickeldave Store – Konfiguration</h1>
-            <p class="fd-muted fd-header-subtitle">
-              Angemeldet als ${this._me?.name || this.hass?.user?.name || "Unbekannt"}
-            </p>
-          </div>
+      <div class="fd-app">
+        <header class="fd-app-bar">
+          <button
+            type="button"
+            class="fd-bar-icon"
+            @click=${() => this._goBack()}
+            ?disabled=${!this._canGoBack()}
+            aria-label="Zurück"
+            title="Zurück"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="fd-bar-icon"
+            @click=${() => this._goForward()}
+            ?disabled=${!this._forwardAvailable}
+            aria-label="Vorwärts"
+            title="Vorwärts"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z" />
+            </svg>
+          </button>
+          <h1 id="fd-config-heading" class="fd-bar-title" tabindex="-1">Frickeldave Store</h1>
         </header>
 
-        <div class="fd-tabs" role="tablist" aria-label="Konfigurationsbereiche">
-          ${TABS.map((tab) => {
-            const active = this._tab === tab.id;
-            return html`
-              <button
-                id="fd-config-tab-${tab.id}"
-                type="button"
-                class="fd-tab"
-                role="tab"
-                aria-selected=${active ? "true" : "false"}
-                aria-controls=${tab.panelId}
-                tabindex=${active ? "0" : "-1"}
-                @click=${() => this._selectTab(tab.id)}
-                @keydown=${(event) => this._onTabKeydown(event)}
-              >
-                ${tab.label}
-              </button>
-            `;
-          })}
-        </div>
+        <div class="fd-shell">
+          <div class="fd-tabs" role="tablist" aria-label="Konfigurationsbereiche">
+            ${TABS.map((tab) => {
+              const active = this._tab === tab.id;
+              return html`
+                <button
+                  id="fd-config-tab-${tab.id}"
+                  type="button"
+                  class="fd-tab"
+                  role="tab"
+                  aria-selected=${active ? "true" : "false"}
+                  aria-controls=${tab.panelId}
+                  tabindex=${active ? "0" : "-1"}
+                  @click=${() => this._selectTab(tab.id)}
+                  @keydown=${(event) => this._onTabKeydown(event)}
+                >
+                  ${tab.label}
+                </button>
+              `;
+            })}
+          </div>
 
-        ${this._tab === "users" ? this._renderUsersTab() : this._renderAiTab()}
+          ${this._tab === "users" ? this._renderUsersTab() : this._renderAiTab()}
+        </div>
       </div>
     `;
   }
@@ -1489,15 +1564,14 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       --fd-space-2: 8px;
       --fd-space-3: 12px;
       --fd-space-4: 16px;
-      --fd-space-5: 20px;
       --fd-space-6: 24px;
       --fd-space-8: 32px;
 
       --fd-radius-lg: var(--ha-card-border-radius, 12px);
-      --fd-radius: 10px;
+      --fd-radius: var(--ha-card-border-radius, 12px);
       --fd-radius-sm: 8px;
 
-      --fd-surface: var(--card-background-color, #ffffff);
+      --fd-surface: var(--ha-card-background, var(--card-background-color, #ffffff));
       --fd-surface-alt: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
       --fd-text: var(--primary-text-color, #212121);
       --fd-text-muted: var(--secondary-text-color, #6b6b6b);
@@ -1507,7 +1581,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       --fd-warning: var(--warning-color, #ff9800);
       --fd-success: var(--success-color, #2e7d32);
       --fd-divider: var(--divider-color, rgba(0, 0, 0, 0.12));
-      --fd-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0, 0, 0, 0.12));
+      --fd-shadow: var(--ha-card-box-shadow, none);
       --fd-shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.35);
 
       --fd-font-small: var(--ha-font-size-s, 13px);
@@ -1527,47 +1601,87 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     /* Layout ------------------------------------------------------------- */
 
-    .fd-shell {
+    .fd-app {
       display: flex;
       flex-direction: column;
+      min-height: 100%;
+    }
+
+    .fd-shell {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
       gap: var(--fd-space-4);
+      width: 100%;
       max-width: 1100px;
       margin: 0 auto;
       padding: var(--fd-space-4);
     }
 
-    .fd-header {
+    /* App-Leiste: volle Panel-Breite, HA-Metriken ------------------------- */
+
+    .fd-app-bar {
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 20;
       display: flex;
-      flex-wrap: wrap;
+      flex: none;
+      flex-wrap: nowrap;
       align-items: center;
-      gap: var(--fd-space-2);
-      min-height: 56px;
-      margin: calc(-1 * var(--fd-space-4)) calc(-1 * var(--fd-space-4)) 0;
-      padding: 6px var(--fd-space-4);
-      background: var(--fd-surface);
-      border-bottom: 1px solid var(--fd-divider);
+      gap: 0;
+      height: var(--header-height, 56px);
+      padding: 0 var(--ha-space-3, 12px);
+      background: var(--app-header-background-color, var(--primary-background-color));
+      color: var(--app-header-text-color, var(--primary-text-color));
+      border-bottom: var(--app-header-border-bottom, 1px solid var(--divider-color));
     }
 
-    .fd-header-text {
+    .fd-bar-title {
       flex: 1 1 auto;
       min-width: 0;
-    }
-
-    .fd-header-text h1 {
       margin: 0;
+      padding-inline-start: var(--ha-space-6, 24px);
       overflow: hidden;
-      font-size: 1.25rem;
-      font-weight: 500;
-      line-height: 1.3;
+      font-size: var(--ha-font-size-xl, 1.5rem);
+      font-weight: 400;
+      line-height: var(--header-height, 56px);
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .fd-header-subtitle {
-      font-size: var(--fd-font-small);
+    .fd-bar-icon {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: var(--ha-icon-button-size, 48px);
+      height: var(--ha-icon-button-size, 48px);
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+    }
+
+    .fd-bar-icon:hover:not(:disabled) {
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.16));
+    }
+
+    .fd-bar-icon:disabled {
+      opacity: 0.38;
+      cursor: default;
+    }
+
+    .fd-bar-icon svg {
+      display: block;
+      width: 24px;
+      height: 24px;
+    }
+
+    .fd-bar-icon svg path {
+      fill: currentColor;
+      stroke: none;
     }
 
     /* Tabs --------------------------------------------------------------- */
@@ -1575,19 +1689,17 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     .fd-tabs {
       display: flex;
       flex-wrap: wrap;
-      gap: 4px;
-      padding: 4px;
-      border: 1px solid var(--fd-divider);
-      border-radius: var(--fd-radius);
-      background: var(--fd-surface-alt);
+      gap: var(--fd-space-1);
+      border-bottom: 1px solid var(--fd-divider);
     }
 
     .fd-tab {
-      flex: 1 1 180px;
-      min-height: 42px;
+      flex: 0 1 auto;
+      min-height: 44px;
       padding: 8px 16px;
       border: none;
-      border-radius: var(--fd-radius-sm);
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
       background: transparent;
       color: var(--fd-text-muted);
       font: inherit;
@@ -1596,21 +1708,20 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
 
     .fd-tab:hover {
-      background: var(--fd-surface);
+      background: var(--fd-surface-alt);
       color: var(--fd-text);
     }
 
     .fd-tab[aria-selected="true"] {
-      background: var(--fd-surface);
-      color: var(--fd-text);
-      box-shadow: var(--fd-shadow);
+      border-bottom-color: var(--fd-accent);
+      color: var(--fd-accent);
     }
 
     /* Karten und Zustände ------------------------------------------------ */
 
     .fd-card {
       background: var(--fd-surface);
-      border: 1px solid var(--fd-divider);
+      border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--fd-divider));
       border-radius: var(--fd-radius-lg);
       box-shadow: var(--fd-shadow);
     }
@@ -1777,7 +1888,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     .fd-input {
       width: 100%;
-      min-height: 40px;
+      min-height: 44px;
       padding: 10px 12px;
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius-sm);
@@ -1879,7 +1990,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       align-items: center;
       justify-content: center;
       gap: 6px;
-      min-height: 38px;
+      min-height: 44px;
       padding: 8px 14px;
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius-sm);
@@ -1926,8 +2037,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       flex: none;
       align-items: center;
       justify-content: center;
-      width: 36px;
-      height: 36px;
+      width: 44px;
+      height: 44px;
       padding: 0;
       border: none;
       border-radius: 50%;
@@ -2121,13 +2232,9 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         padding: var(--fd-space-2);
       }
 
-      .fd-header {
-        margin: calc(-1 * var(--fd-space-2)) calc(-1 * var(--fd-space-2)) 0;
-        padding: 6px var(--fd-space-2);
-      }
-
-      .fd-header-subtitle {
-        display: none;
+      .fd-bar-title {
+        padding-inline-start: var(--ha-space-3, 12px);
+        font-size: var(--ha-font-size-l, 1.25rem);
       }
 
       .fd-dialog,

@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-28
+
+### Changed
+
+- **Topbar im HA-Stil:** vollbreite, sticky App-Bar außerhalb des Inhaltsbereichs mit
+  HA-Metriken (56 px Höhe, 48 px Icon-Buttons, `--header-height`, `--app-header-*`,
+  `--ha-space-*`); die Aktionen Aktualisieren, Katalog importieren und Produkt anlegen
+  sind jetzt reine Icon-Buttons mit deutschen Labels; die Unterzeile „Angemeldet als …“
+  entfällt.
+- **Konfigurationspanel:** eigene vollbreite Topbar mit Zurück-/Vorwärts-Navigation
+  (Fallback `/config/integrations`) und sinnvollen deaktivierten Zuständen.
+- **UI-Review:** Karten, Buttons, Eingabefelder, Tabs und Badges an HA-Tokens und
+  -Metriken angeglichen (12 px Radien, 44 px Touch-Ziele, Fokusringe, Kontrast).
+
 ## [0.1.5] - 2026-10-28
 
 ### Added

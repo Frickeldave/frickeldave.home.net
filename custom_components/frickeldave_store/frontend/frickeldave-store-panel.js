@@ -2012,6 +2012,11 @@ export class FrickeldaveStorePanel extends LitElement {
           tabindex="-1"
           @click=${() => this._openTags()}
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M17.63 5.84C17.27 5.33 16.67 5 16 5H5c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h11c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"
+            />
+          </svg>
           Tags verwalten
         </button>
       </div>
@@ -2022,54 +2027,66 @@ export class FrickeldaveStorePanel extends LitElement {
     const canProduct = this._can("product");
 
     return html`
-      <div class="fd-shell">
-        <header class="fd-header">
+      <div class="fd-app">
+        <header class="fd-app-bar">
           <button
             type="button"
-            class="fd-menu-button"
+            class="fd-bar-icon fd-bar-menu"
             @click=${() => this._toggleSidebar()}
             aria-label="Menü öffnen"
             title="Menü"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M4 6h16" />
-              <path d="M4 12h16" />
-              <path d="M4 18h16" />
+              <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" />
             </svg>
           </button>
-          <div class="fd-header-text">
-            <h1 id="fd-main-heading" tabindex="-1">Frickeldave Store</h1>
-            <p class="fd-muted fd-header-subtitle">
-              Angemeldet als ${this._me?.name || this.hass?.user?.name || "Unbekannt"}
-            </p>
-          </div>
-          <div class="fd-header-actions">
-            ${canProduct
-              ? html`
-                  <button type="button" class="fd-button" @click=${() => this._reloadAll()} ?disabled=${this._productsLoading}>
-                    Aktualisieren
+          <h1 id="fd-main-heading" class="fd-bar-title" tabindex="-1">Frickeldave Store</h1>
+          ${canProduct
+            ? html`
+                <div class="fd-bar-actions">
+                  <button
+                    type="button"
+                    class="fd-bar-icon"
+                    @click=${() => this._reloadAll()}
+                    ?disabled=${this._productsLoading}
+                    aria-label="Aktualisieren"
+                    title="Aktualisieren"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path
+                        d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
+                      />
+                    </svg>
                   </button>
                   <button
                     type="button"
-                    class="fd-button"
+                    class="fd-bar-icon"
                     @click=${() => this._openImport()}
                     ?disabled=${Boolean(this._importDialog?.busy)}
+                    aria-label="Katalog importieren"
+                    title="Katalog importieren"
                   >
-                    Katalog importieren
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
+                    </svg>
                   </button>
-                  <button type="button" class="fd-button fd-button--primary" @click=${() => this._openCreate()}>
-                    Produkt anlegen
+                  <button
+                    type="button"
+                    class="fd-bar-icon"
+                    @click=${() => this._openCreate()}
+                    aria-label="Produkt anlegen"
+                    title="Produkt anlegen"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+                    </svg>
                   </button>
-                `
-              : ""}
-          </div>
-          ${canProduct
-            ? html`
+                </div>
                 <div class="fd-menu-anchor">
                   <button
                     id="fd-menu-trigger"
                     type="button"
-                    class="fd-more-button"
+                    class="fd-bar-icon"
                     @click=${() => this._toggleMenu()}
                     aria-haspopup="menu"
                     aria-expanded=${this._menuOpen ? "true" : "false"}
@@ -2089,7 +2106,9 @@ export class FrickeldaveStorePanel extends LitElement {
             : ""}
         </header>
 
-        ${canProduct ? this._renderProducts() : this._renderNoProductView()}
+        <div class="fd-shell">
+          ${canProduct ? this._renderProducts() : this._renderNoProductView()}
+        </div>
       </div>
     `;
   }
@@ -3426,15 +3445,14 @@ export class FrickeldaveStorePanel extends LitElement {
       --fd-space-2: 8px;
       --fd-space-3: 12px;
       --fd-space-4: 16px;
-      --fd-space-5: 20px;
       --fd-space-6: 24px;
       --fd-space-8: 32px;
 
       --fd-radius-lg: var(--ha-card-border-radius, 12px);
-      --fd-radius: 10px;
+      --fd-radius: var(--ha-card-border-radius, 12px);
       --fd-radius-sm: 8px;
 
-      --fd-surface: var(--card-background-color, #ffffff);
+      --fd-surface: var(--ha-card-background, var(--card-background-color, #ffffff));
       --fd-surface-alt: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
       --fd-text: var(--primary-text-color, #212121);
       --fd-text-muted: var(--secondary-text-color, #6b6b6b);
@@ -3444,7 +3462,7 @@ export class FrickeldaveStorePanel extends LitElement {
       --fd-warning: var(--warning-color, #ff9800);
       --fd-success: var(--success-color, #2e7d32);
       --fd-divider: var(--divider-color, rgba(0, 0, 0, 0.12));
-      --fd-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0, 0, 0, 0.12));
+      --fd-shadow: var(--ha-card-box-shadow, none);
       --fd-shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.35);
 
       --fd-font-small: var(--ha-font-size-s, 13px);
@@ -3464,100 +3482,94 @@ export class FrickeldaveStorePanel extends LitElement {
 
     /* Layout ------------------------------------------------------------- */
 
-    .fd-shell {
+    .fd-app {
       display: flex;
       flex-direction: column;
+      min-height: 100%;
+    }
+
+    .fd-shell {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
       gap: var(--fd-space-4);
+      width: 100%;
       max-width: 1440px;
       margin: 0 auto;
       padding: var(--fd-space-4);
     }
 
-    .fd-header {
+    /* App-Leiste: volle Panel-Breite, HA-Metriken ------------------------- */
+
+    .fd-app-bar {
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 20;
       display: flex;
-      flex-wrap: wrap;
+      flex: none;
+      flex-wrap: nowrap;
       align-items: center;
-      gap: var(--fd-space-2);
-      min-height: 56px;
-      margin: calc(-1 * var(--fd-space-4)) calc(-1 * var(--fd-space-4)) 0;
-      padding: 6px var(--fd-space-4);
-      background: var(--fd-surface);
-      border-bottom: 1px solid var(--fd-divider);
+      gap: 0;
+      height: var(--header-height, 56px);
+      padding: 0 var(--ha-space-3, 12px);
+      background: var(--app-header-background-color, var(--primary-background-color));
+      color: var(--app-header-text-color, var(--primary-text-color));
+      border-bottom: var(--app-header-border-bottom, 1px solid var(--divider-color));
     }
 
-    .fd-menu-button,
-    .fd-more-button {
+    .fd-bar-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0;
+      padding-inline-start: var(--ha-space-6, 24px);
+      overflow: hidden;
+      font-size: var(--ha-font-size-xl, 1.5rem);
+      font-weight: 400;
+      line-height: var(--header-height, 56px);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .fd-bar-actions {
+      display: flex;
+      flex: none;
+      align-items: center;
+    }
+
+    .fd-bar-icon {
       display: inline-flex;
       flex: none;
       align-items: center;
       justify-content: center;
-      width: 44px;
-      height: 44px;
-      min-width: 44px;
-      min-height: 44px;
+      width: var(--ha-icon-button-size, 48px);
+      height: var(--ha-icon-button-size, 48px);
       padding: 0;
       border: none;
       border-radius: 50%;
       background: transparent;
-      color: var(--fd-text);
+      color: inherit;
       cursor: pointer;
     }
 
-    .fd-menu-button:hover,
-    .fd-more-button:hover {
-      background: var(--fd-surface-alt);
+    .fd-bar-icon:hover:not(:disabled) {
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.16));
     }
 
-    .fd-menu-button svg,
-    .fd-more-button svg {
+    .fd-bar-icon:disabled {
+      opacity: 0.38;
+      cursor: default;
+    }
+
+    .fd-bar-icon svg {
       display: block;
       width: 24px;
       height: 24px;
     }
 
-    .fd-menu-button svg path {
-      fill: none;
-      stroke: currentColor;
-      stroke-width: 2;
-      stroke-linecap: round;
-    }
-
-    .fd-more-button svg circle {
+    .fd-bar-icon svg path,
+    .fd-bar-icon svg circle {
       fill: currentColor;
       stroke: none;
-    }
-
-    .fd-header-text {
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-
-    .fd-header-text h1 {
-      margin: 0;
-      overflow: hidden;
-      font-size: 1.25rem;
-      font-weight: 500;
-      line-height: 1.3;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .fd-header-text p {
-      margin: 0;
-    }
-
-    .fd-header-subtitle {
-      font-size: var(--fd-font-small);
-    }
-
-    .fd-header-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: var(--fd-space-2);
-      margin-left: auto;
     }
 
     .fd-menu-anchor {
@@ -3598,11 +3610,19 @@ export class FrickeldaveStorePanel extends LitElement {
       background: var(--fd-surface-alt);
     }
 
+    .fd-menu-item svg {
+      flex: none;
+      width: 20px;
+      height: 20px;
+      margin-inline-end: var(--fd-space-3);
+      fill: currentColor;
+    }
+
     /* Karten ------------------------------------------------------------- */
 
     .fd-card {
       background: var(--fd-surface);
-      border: 1px solid var(--fd-divider);
+      border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--fd-divider));
       border-radius: var(--fd-radius-lg);
       box-shadow: var(--fd-shadow);
     }
@@ -3687,7 +3707,7 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-input {
       width: 100%;
-      min-height: 40px;
+      min-height: 44px;
       padding: 10px 12px;
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius-sm);
@@ -3777,7 +3797,7 @@ export class FrickeldaveStorePanel extends LitElement {
       align-items: center;
       justify-content: center;
       gap: 6px;
-      min-height: 38px;
+      min-height: 44px;
       padding: 8px 14px;
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius-sm);
@@ -3824,8 +3844,8 @@ export class FrickeldaveStorePanel extends LitElement {
       align-items: center;
       justify-content: center;
       flex: none;
-      width: 36px;
-      height: 36px;
+      width: 44px;
+      height: 44px;
       padding: 0;
       border: none;
       border-radius: 50%;
@@ -4518,11 +4538,6 @@ export class FrickeldaveStorePanel extends LitElement {
         padding: var(--fd-space-3);
       }
 
-      .fd-header {
-        margin: calc(-1 * var(--fd-space-3)) calc(-1 * var(--fd-space-3)) 0;
-        padding: 6px var(--fd-space-3);
-      }
-
       .fd-grid {
         grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
       }
@@ -4533,19 +4548,9 @@ export class FrickeldaveStorePanel extends LitElement {
         padding: var(--fd-space-2);
       }
 
-      .fd-header {
-        margin: calc(-1 * var(--fd-space-2)) calc(-1 * var(--fd-space-2)) 0;
-        padding: 6px var(--fd-space-2);
-      }
-
-      .fd-header-subtitle {
-        display: none;
-      }
-
-      .fd-header-actions {
-        flex: 1 1 100%;
-        order: 4;
-        margin-left: 0;
+      .fd-bar-title {
+        padding-inline-start: var(--ha-space-3, 12px);
+        font-size: var(--ha-font-size-l, 1.25rem);
       }
 
       .fd-grid {
