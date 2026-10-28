@@ -10,8 +10,8 @@
  * Aufbau:
  *   1. Konstanten und Hilfsfunktionen
  *   2. API-Schicht und Zustandsverwaltung
- *   3. Editor-, Bild-, Bestands-, Archiv-, Tag- und Einstellungslogik
- *   4. Render-Methoden (Produktliste, Dialoge, Einstellungen)
+ *   3. Editor-, Bild-, Bestands-, Archiv- und Tag-Logik
+ *   4. Render-Methoden (Produktliste und Dialoge)
  *   5. Styles ausschließlich über HA-Design-Tokens und eigene --fd-* Schicht
  */
 
@@ -179,14 +179,6 @@ export class FrickeldaveStorePanel extends LitElement {
     _tagsDialog: { state: true },
     _importDialog: { state: true },
 
-    _settingsDialog: { state: true },
-    _settingsLoading: { state: true },
-    _settingsSaving: { state: true },
-    _settingsError: { state: true },
-    _settingsNotice: { state: true },
-    _settingsForm: { state: true },
-    _settingsMeta: { state: true },
-
     _toast: { state: true },
   };
 
@@ -233,19 +225,6 @@ export class FrickeldaveStorePanel extends LitElement {
     this._archiveDialog = null;
     this._tagsDialog = null;
     this._importDialog = null;
-
-    this._settingsDialog = false;
-    this._settingsLoading = false;
-    this._settingsSaving = false;
-    this._settingsError = "";
-    this._settingsNotice = "";
-    this._settingsForm = {
-      ai_endpoint: "",
-      ai_model: "",
-      ai_prompt: "",
-      api_key: "",
-    };
-    this._settingsMeta = { api_key_set: false };
 
     this._toast = null;
     this._imageVersion = 0;
@@ -515,11 +494,6 @@ export class FrickeldaveStorePanel extends LitElement {
     this._archiveDialog = null;
     this._tagsDialog = null;
     this._importDialog = null;
-    this._settingsDialog = false;
-    this._settingsForm = { ai_endpoint: "", ai_model: "", ai_prompt: "", api_key: "" };
-    this._settingsMeta = { api_key_set: false };
-    this._settingsError = "";
-    this._settingsNotice = "";
     this._releaseImages();
     this._imageVersion += 1;
     this._bootstrap();
@@ -613,9 +587,6 @@ export class FrickeldaveStorePanel extends LitElement {
       } else {
         this._loadProducts();
         this._loadTags();
-      }
-      if (!can.app_admin) {
-        this._settingsDialog = false;
       }
     } catch (error) {
       if (isAbortError(error)) {
@@ -929,7 +900,6 @@ export class FrickeldaveStorePanel extends LitElement {
       ["#fd-stock-dialog", Boolean(this._stockDialog)],
       ["#fd-archive-dialog", Boolean(this._archiveDialog)],
       ["#fd-tags-dialog", Boolean(this._tagsDialog)],
-      ["#fd-settings-dialog", Boolean(this._settingsDialog)],
       ["#fd-import-dialog", Boolean(this._importDialog)],
     ];
     for (const [selector, shouldOpen] of entries) {
@@ -1843,83 +1813,6 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
-  /* Einstellungen (nur Anwendungsverwaltung)                               */
-  /* --------------------------------------------------------------------- */
-
-  async _loadSettings() {
-    if (!this._can("app_admin")) {
-      return;
-    }
-    this._settingsLoading = true;
-    this._settingsError = "";
-    try {
-      const data = await this._api(`${API_ROOT}/settings`);
-      const payload = data && typeof data === "object" ? data : {};
-      const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : payload;
-      this._settingsForm = {
-        ai_endpoint: typeof ai.endpoint === "string" ? ai.endpoint : "",
-        ai_model: typeof ai.model === "string" ? ai.model : "",
-        ai_prompt: typeof ai.prompt === "string" ? ai.prompt : "",
-        api_key: "",
-      };
-      this._settingsMeta = { api_key_set: Boolean(ai.api_key_set) };
-    } catch (error) {
-      if (isAbortError(error)) {
-        return;
-      }
-      this._settingsError = this._errorText(error);
-    } finally {
-      this._settingsLoading = false;
-    }
-  }
-
-  _setSettingsField(field, value) {
-    this._settingsForm = { ...this._settingsForm, [field]: value };
-  }
-
-  async _saveSettings(event) {
-    event?.preventDefault();
-    if (!this._can("app_admin") || this._settingsSaving) {
-      return;
-    }
-    const form = this._settingsForm;
-    if (!form.ai_endpoint.trim()) {
-      this._settingsError = "Bitte einen KI-Endpunkt angeben.";
-      return;
-    }
-
-    const ai = {
-      endpoint: form.ai_endpoint.trim(),
-      model: form.ai_model.trim(),
-      prompt: form.ai_prompt,
-    };
-    const key = form.api_key.trim();
-    if (key) {
-      ai.api_key = key;
-    }
-    const body = { ai };
-
-    this._settingsSaving = true;
-    this._settingsError = "";
-    this._settingsNotice = "";
-
-    try {
-      await this._api(`${API_ROOT}/settings`, { method: "PATCH", body });
-      this._settingsForm = { ...this._settingsForm, api_key: "" };
-      this._settingsSaving = false;
-      this._settingsNotice = "Einstellungen gespeichert.";
-      // Der Schlüssel wird nie angezeigt; der Status kommt ausschließlich vom Server.
-      await this._loadSettings();
-    } catch (error) {
-      this._settingsSaving = false;
-      if (isAbortError(error)) {
-        return;
-      }
-      this._settingsError = this._errorText(error);
-    }
-  }
-
-  /* --------------------------------------------------------------------- */
   /* Render: Rahmen, Kopfzeile, Navigation                                  */
   /* --------------------------------------------------------------------- */
 
@@ -1931,7 +1824,6 @@ export class FrickeldaveStorePanel extends LitElement {
       ${this._renderStockDialog()}
       ${this._renderArchiveDialog()}
       ${this._renderTagsDialog()}
-      ${this._renderSettingsDialog()}
       ${this._renderImportDialog()}
       ${this._renderToast()}
     `;
@@ -1991,7 +1883,7 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
-  /* Kopfzeile, Hauptmenü und Einstellungsdialog                            */
+  /* Kopfzeile und Hauptmenü                                                */
   /* --------------------------------------------------------------------- */
 
   _menuItems() {
@@ -2104,59 +1996,24 @@ export class FrickeldaveStorePanel extends LitElement {
     }
   }
 
-  _openSettingsDialog() {
-    if (!this._can("app_admin")) {
-      return;
-    }
-    this._closeMenu({ restoreFocus: false });
-    this._focusReturn = this._menuTrigger();
-    this._settingsDialog = true;
-    this._loadSettings();
-  }
-
-  _closeSettingsDialog() {
-    this._settingsDialog = false;
-    this._restoreFocus();
-  }
-
   _renderHeaderMenu() {
     if (!this._menuOpen) {
       return "";
     }
-    const canAdmin = this._can("app_admin");
-    const canProduct = this._can("product");
-    if (!canAdmin && !canProduct) {
+    if (!this._can("product")) {
       return "";
     }
     return html`
       <div id="fd-main-menu" class="fd-menu" role="menu" aria-label="Weitere Aktionen">
-        ${canAdmin
-          ? html`
-              <button
-                type="button"
-                class="fd-menu-item"
-                role="menuitem"
-                tabindex="-1"
-                @click=${() => this._openSettingsDialog()}
-              >
-                KI
-              </button>
-            `
-          : ""}
-        ${canAdmin && canProduct ? html`<div class="fd-menu-separator" role="separator"></div>` : ""}
-        ${canProduct
-          ? html`
-              <button
-                type="button"
-                class="fd-menu-item"
-                role="menuitem"
-                tabindex="-1"
-                @click=${() => this._openTags()}
-              >
-                Tags verwalten
-              </button>
-            `
-          : ""}
+        <button
+          type="button"
+          class="fd-menu-item"
+          role="menuitem"
+          tabindex="-1"
+          @click=${() => this._openTags()}
+        >
+          Tags verwalten
+        </button>
       </div>
     `;
   }
@@ -2206,26 +2063,30 @@ export class FrickeldaveStorePanel extends LitElement {
                 `
               : ""}
           </div>
-          <div class="fd-menu-anchor">
-            <button
-              id="fd-menu-trigger"
-              type="button"
-              class="fd-more-button"
-              @click=${() => this._toggleMenu()}
-              aria-haspopup="menu"
-              aria-expanded=${this._menuOpen ? "true" : "false"}
-              aria-controls="fd-main-menu"
-              aria-label="Weitere Aktionen"
-              title="Weitere Aktionen"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <circle cx="12" cy="5" r="1.7" />
-                <circle cx="12" cy="12" r="1.7" />
-                <circle cx="12" cy="19" r="1.7" />
-              </svg>
-            </button>
-            ${this._renderHeaderMenu()}
-          </div>
+          ${canProduct
+            ? html`
+                <div class="fd-menu-anchor">
+                  <button
+                    id="fd-menu-trigger"
+                    type="button"
+                    class="fd-more-button"
+                    @click=${() => this._toggleMenu()}
+                    aria-haspopup="menu"
+                    aria-expanded=${this._menuOpen ? "true" : "false"}
+                    aria-controls="fd-main-menu"
+                    aria-label="Weitere Aktionen"
+                    title="Weitere Aktionen"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <circle cx="12" cy="5" r="1.7" />
+                      <circle cx="12" cy="12" r="1.7" />
+                      <circle cx="12" cy="19" r="1.7" />
+                    </svg>
+                  </button>
+                  ${this._renderHeaderMenu()}
+                </div>
+              `
+            : ""}
         </header>
 
         ${canProduct ? this._renderProducts() : this._renderNoProductView()}
@@ -2238,8 +2099,8 @@ export class FrickeldaveStorePanel extends LitElement {
       <section class="fd-card fd-state">
         <h2>Keine Produktverwaltung</h2>
         <p class="fd-muted">
-          Ihr Benutzer darf keine Produkte verwalten. Die KI-Einstellungen erreichen Sie über das
-          Menü oben rechts.
+          Ihr Benutzer darf keine Produkte verwalten. Benutzer und KI-Einstellungen verwalten Sie
+          in den Einstellungen unter „Geräte &amp; Dienste“ → „Frickeldave Store“.
         </p>
       </section>
     `;
@@ -3536,154 +3397,6 @@ export class FrickeldaveStorePanel extends LitElement {
     `;
   }
 
-  /* --------------------------------------------------------------------- */
-  /* Render: Einstellungen                                                  */
-  /* --------------------------------------------------------------------- */
-
-  _renderSettingsDialog() {
-    if (!this._settingsDialog || !this._can("app_admin")) {
-      return "";
-    }
-
-    return html`
-      <dialog
-        id="fd-settings-dialog"
-        class="fd-dialog fd-dialog--wide"
-        aria-labelledby="fd-settings-title"
-        @cancel=${(event) => this._handleDialogCancel(event, () => this._closeSettingsDialog())}
-        @click=${(event) => {
-          if (event.target === event.currentTarget) {
-            this._closeSettingsDialog();
-          }
-        }}
-      >
-        <div class="fd-dialog-head">
-          <div>
-            <h2 id="fd-settings-title">KI-Einstellungen</h2>
-            <p class="fd-muted fd-small">Für KI-Beschreibungsvorschläge im Produkteditor.</p>
-          </div>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeSettingsDialog()}
-            aria-label="Dialog schließen"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div class="fd-dialog-body">
-          <p class="fd-muted fd-small">
-            Zugangsdaten bleiben serverseitig gespeichert und werden nie an die Oberfläche
-            zurückgegeben.
-          </p>
-
-          ${this._settingsLoading ? html`<p class="fd-muted" role="status">Einstellungen werden geladen …</p>` : ""}
-          ${this._settingsError
-            ? html`<div class="fd-banner fd-banner--error" role="alert">${this._settingsError}</div>`
-            : ""}
-          ${this._settingsNotice
-            ? html`<div class="fd-banner fd-banner--success" role="status">${this._settingsNotice}</div>`
-            : ""}
-
-          ${this._renderSettingsForm()}
-        </div>
-
-        <div class="fd-dialog-foot">
-          <button type="button" class="fd-button" @click=${() => this._closeSettingsDialog()}>
-            Schließen
-          </button>
-        </div>
-      </dialog>
-    `;
-  }
-
-  _renderSettingsForm() {
-    const form = this._settingsForm;
-    const keySet = Boolean(this._settingsMeta.api_key_set);
-
-    return html`
-      <form class="fd-form-grid" @submit=${(event) => this._saveSettings(event)} novalidate>
-        <div class="fd-field fd-field--full">
-          <label class="fd-label" for="fd-settings-endpoint">KI-Endpunkt</label>
-          <input
-            id="fd-settings-endpoint"
-            data-autofocus
-            class="fd-input"
-            type="url"
-            placeholder="https://api.example.com/v1/chat/completions"
-            .value=${form.ai_endpoint}
-            @input=${(event) => this._setSettingsField("ai_endpoint", event.target.value)}
-          />
-          <p class="fd-hint">Vollständige URL des Chat-Completion-Endpunkts.</p>
-        </div>
-
-        <div class="fd-field">
-          <label class="fd-label" for="fd-settings-model">Modell</label>
-          <input
-            id="fd-settings-model"
-            class="fd-input"
-            type="text"
-            placeholder="deepseek-flash"
-            .value=${form.ai_model}
-            @input=${(event) => this._setSettingsField("ai_model", event.target.value)}
-          />
-        </div>
-
-        <div class="fd-field">
-          <label class="fd-label" for="fd-settings-key">API-Key</label>
-          <input
-            id="fd-settings-key"
-            class="fd-input"
-            type="password"
-            autocomplete="new-password"
-            placeholder=${keySet ? "•••••••• (gesetzt)" : "Noch kein Schlüssel gesetzt"}
-            .value=${form.api_key}
-            @input=${(event) => this._setSettingsField("api_key", event.target.value)}
-          />
-          <p class="fd-hint">
-            ${keySet ? "API-Key gesetzt." : "Noch kein API-Key gesetzt."}
-            Der Schlüssel wird ausschließlich gespeichert und nie angezeigt.
-          </p>
-        </div>
-
-        <div class="fd-field fd-field--full">
-          <label class="fd-label" for="fd-settings-prompt">Prompt</label>
-          <textarea
-            id="fd-settings-prompt"
-            class="fd-input fd-textarea"
-            rows="5"
-            .value=${form.ai_prompt}
-            @input=${(event) => this._setSettingsField("ai_prompt", event.target.value)}
-          ></textarea>
-        </div>
-
-        <div class="fd-field fd-field--full">
-          <div class="fd-inline-actions">
-            <button
-              type="submit"
-              class="fd-button fd-button--primary"
-              ?disabled=${this._settingsSaving || this._settingsLoading}
-            >
-              ${this._settingsSaving ? "Speichern …" : "Einstellungen speichern"}
-            </button>
-            <button
-              type="button"
-              class="fd-button"
-              @click=${() => this._loadSettings()}
-              ?disabled=${this._settingsLoading}
-            >
-              Neu laden
-            </button>
-            <span class="fd-status ${keySet ? "fd-status--ok" : "fd-status--warn"}">
-              ${keySet ? "API-Key gesetzt" : "API-Key fehlt"}
-            </span>
-          </div>
-        </div>
-      </form>
-    `;
-  }
-
   _renderToast() {
     return html`
       <div class="fd-toast-slot" role="status" aria-live="polite">
@@ -3883,12 +3596,6 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-menu-item:hover,
     .fd-menu-item:focus-visible {
       background: var(--fd-surface-alt);
-    }
-
-    .fd-menu-separator {
-      height: 1px;
-      margin: 6px 0;
-      background: var(--fd-divider);
     }
 
     /* Karten ------------------------------------------------------------- */
