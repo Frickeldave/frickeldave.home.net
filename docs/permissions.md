@@ -39,6 +39,8 @@ Rollen sind beliebig kombinierbar.
 | `/api/frickeldave_store/products/{article_number}/description/suggest` | POST | `product` |
 | `/api/frickeldave_store/tags` | GET, POST | `product` |
 | `/api/frickeldave_store/tags/{name}` | DELETE | `product` |
+| `/api/frickeldave_store/users` | GET | `app_admin` |
+| `/api/frickeldave_store/users/{user_id}` | PUT, DELETE | `app_admin` |
 | `/api/frickeldave_store/settings` | GET, PATCH | `app_admin` |
 | `/api/frickeldave_store/export` | POST | `app_admin` |
 | `/api/frickeldave_store/import/catalog` | POST | `product` ohne eigene Quelle, sonst `app_admin` |
@@ -48,6 +50,38 @@ Rollen sind beliebig kombinierbar.
 
 ## Freigaben verwalten
 
+### Oberfläche (primär)
+
+Das Zahnrad am Eintrag **Einstellungen → Geräte & Dienste → Frickeldave Store** öffnet
+das Konfigurationspanel mit den Tabs **Benutzerverwaltung** und **KI-Einstellungen**
+(`/frickeldave-store-config?config_entry=<id>`). Die JavaScript-Oberfläche nutzt
+ausschließlich die Endpunkte `/users` und `/users/{user_id}`; das Backend ist damit auch
+ohne Frontend testbar.
+
+Ablauf in der Benutzerverwaltung:
+
+1. **Hinzufügen:** Aus `available_users` (aktive HA-Benutzer ohne Freigabe, nur ID und
+   Name) eine Person wählen und mindestens eine Rolle vergeben.
+2. **Bearbeiten:** Rollen einer Freigabe ändern; die Auswahl wird über
+   `normalise_roles` geprüft und dedupliziert.
+3. **Löschen:** Freigabe entfernen. Der Entzug wirkt sofort, weil die Antwort erst nach
+   `_async_apply_entry_config` erzeugt wird.
+
+Der Endpunkt liefert zu jeder Freigabe den echten HA-Namen (`hass.auth.async_get_users`)
+sowie `role_labels` für die Anzeige. Unbekannte Benutzer-IDs bleiben mit `name: ""`
+sichtbar und bearbeit-/entfernbar, damit verwaiste Freigaben aufgeräumt werden können.
+
+Sicherheitsregeln:
+
+- Unbekannte oder leere Rollenlisten → `400 validation_error`.
+- Neue Freigabe für eine nicht existierende HA-Benutzer-ID → `404 not_found`.
+- Die letzte `app_admin`-Freigabe kann weder gelöscht noch herabgestuft werden →
+  `409 conflict` (kein Aussperren der Verwaltung).
+- Jede Mutation schreibt die Option `users` über
+  `hass.config_entries.async_update_entry` und wendet sie sofort an.
+
+### Options-Format (Rückfallebene und Quelle der Wahrheit)
+
 Format in Config-/Options-Entry (`users`), eine Zeile pro Benutzer:
 
 ```
@@ -56,9 +90,10 @@ Format in Config-/Options-Entry (`users`), eine Zeile pro Benutzer:
 <ha_user_id>: product
 ```
 
-Änderungen im Options-Flow werden über einen Update-Listener sofort angewendet
-(`PermissionManager.load`), ohne Neustart. Unbekannte Rollen werden beim Speichern
-abgelehnt (`validation_error`).
+Der Options-Flow bleibt als Rückfallebene erhalten und schreibt dasselbe Format.
+Änderungen werden über den Update-Listener und zusätzlich direkt nach API-Mutationen
+angewendet (`PermissionManager.load`), ohne Neustart. Unbekannte Rollen werden beim
+Speichern abgelehnt (`validation_error`).
 
 ## Antwort von `GET /me`
 

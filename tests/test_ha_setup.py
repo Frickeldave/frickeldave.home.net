@@ -91,11 +91,40 @@ async def test_setup_registers_panel_with_required_contract(
     assert panel.config["api_prefix"] == "/api/frickeldave_store"
 
 
-async def test_unload_removes_panel(hass: Any, enable_custom_integrations: Any) -> None:
+async def test_setup_registers_config_panel_for_entry_gear(
+    hass: Any, enable_custom_integrations: Any
+) -> None:
+    await _setup_entry(hass)
+
+    panels = hass.data[frontend.DATA_PANELS]
+    assert "frickeldave-store-config" in panels
+    panel = panels["frickeldave-store-config"]
+    assert panel.require_admin is True
+    assert panel.config_panel_domain == DOMAIN
+    custom = panel.config["_panel_custom"]
+    assert custom["name"] == "frickeldave-store-config-panel"
+    assert custom["module_url"] == "/frickeldave_store_frontend/frickeldave-store-config-panel.js"
+    assert custom["embed_iframe"] is False
+    assert panel.config["api_prefix"] == "/api/frickeldave_store"
+
+
+async def test_panel_registration_is_idempotent(hass: Any, enable_custom_integrations: Any) -> None:
+    await _setup_entry(hass)
+    from custom_components.frickeldave_store.panel import async_register_panel
+
+    # Ein zweiter Aufruf darf weder das Panel überschreiben noch einen Fehler werfen.
+    await async_register_panel(hass)
+    panels = hass.data[frontend.DATA_PANELS]
+    assert "frickeldave-store" in panels
+    assert "frickeldave-store-config" in panels
+
+
+async def test_unload_removes_panels(hass: Any, enable_custom_integrations: Any) -> None:
     entry = await _setup_entry(hass)
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert "frickeldave-store" not in hass.data[frontend.DATA_PANELS]
+    assert "frickeldave-store-config" not in hass.data[frontend.DATA_PANELS]
 
 
 async def test_store_and_views_are_registered(

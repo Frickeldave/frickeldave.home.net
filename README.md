@@ -60,6 +60,27 @@ Die stabile HA-Benutzer-ID findet man in Home Assistant unter **Einstellungen �
 
 YAML-Konfiguration wird nicht unterstützt (`config_entry_only_config_schema`).
 
+### Benutzerverwaltung
+
+Das Zahnrad am Eintrag **Einstellungen → Geräte & Dienste → Frickeldave Store** öffnet
+das tabbed Konfigurationspanel (`/frickeldave-store-config?config_entry=<id>`) mit den
+Tabs **Benutzerverwaltung** und **KI-Einstellungen**. Dort lassen sich Freigaben bequem
+über echte HA-Benutzernamen anlegen, bearbeiten und löschen; die Rollenauswahl nutzt die
+Labels `Produktpflege`, `Finanzen` und `Anwendungsverwaltung`.
+
+- **Hinzufügen:** In der Benutzerverwaltung eine noch nicht freigegebene aktive
+  HA-Person wählen und mindestens eine Rolle vergeben.
+- **Bearbeiten:** Rollen einer bestehenden Freigabe ändern. Unbekannte Benutzer-IDs
+  (z. B. nach dem Löschen eines HA-Kontos) bleiben als Eintrag ohne Namen sichtbar und
+  können weiter bearbeitet oder entfernt werden.
+- **Löschen:** Freigabe entziehen; der Zugriff endet mit der nächsten Anfrage.
+- **Schutz:** Die letzte Freigabe mit der Rolle `app_admin` kann weder gelöscht noch
+  herabgestuft werden (`409 conflict`).
+
+Der Options-Flow bleibt als Rückfallebene erhalten. Die Option `users` bleibt die einzige
+Quelle der Wahrheit: Die Oberfläche schreibt Änderungen dorthin und wendet sie sofort an,
+sodass ein Rechteentzug ohne Neustart greift.
+
 ## Rollen und Rechte
 
 | Rolle | Umfang |
@@ -76,10 +97,13 @@ Details: [docs/permissions.md](docs/permissions.md).
 ## Bedienung
 
 Nach der Einrichtung erscheint **Frickeldave Store** mit dem Icon `mdi:store-cog` in der
-Seitenleiste. Das Panel wird als `panel_custom`-Web-Component ohne iframe geladen
-(`/frickeldave_store_frontend/frickeldave-store-panel.js`). Die JavaScript-Datei liegt
-unter `custom_components/frickeldave_store/frontend/` und wird vom Frontend-Team gepflegt;
-fehlt sie, bleiben Integration und API vollständig funktionsfähig.
+Seitenleiste. Beide Panels werden als `panel_custom`-Web-Components ohne iframe geladen:
+das Seitenleisten-Panel (`.../frickeldave-store-panel.js`) für die Katalogarbeit und das
+Konfigurationspanel (`.../frickeldave-store-config-panel.js`, `require_admin`) am Zahnrad
+des Integrationseintrags. Einstellungen liegen damit nicht mehr im Drei-Punkte-Menü des
+Seitenleisten-Panels. Die JavaScript-Dateien liegen unter
+`custom_components/frickeldave_store/frontend/` und werden vom Frontend-Team gepflegt;
+fehlt eine Datei, bleiben Integration und API vollständig funktionsfähig.
 
 ## Daten, Speicherort und Backup
 
@@ -189,6 +213,8 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | POST | `/products/{article_number}/description/suggest` |
 | GET, POST | `/tags` |
 | DELETE | `/tags/{name}` |
+| GET | `/users` (nur `app_admin`) |
+| PUT, DELETE | `/users/{user_id}` (nur `app_admin`) |
 | GET, PATCH | `/settings` (nur `app_admin`) |
 | POST | `/export` (nur `app_admin`) |
 | POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
@@ -196,6 +222,13 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`, `in_cabinet`, `visibility=visible|invisible`, `archived`,
 `sort=name|price`, `order=asc|desc`, `limit`, `offset`.
+
+`GET /users` liefert `users` (Freigaben mit `user_id`, `name`, `roles`, `role_labels`),
+`available_users` (aktive, noch nicht freigegebene HA-Benutzer – nur ID und Name) sowie
+`roles` (ID und Label). `PUT /users/{user_id}` erwartet `{"roles": ["product", ...]}`,
+`DELETE /users/{user_id}` entfernt die Freigabe; beide antworten mit derselben Struktur
+wie `GET /users`. Unbekannte Rollen, leere Rollenlisten und das Entfernen der letzten
+`app_admin`-Freigabe werden abgelehnt (`400` bzw. `409`).
 
 WebSocket-Kommandos: `frickeldave_store/me`, `frickeldave_store/products`,
 `frickeldave_store/subscribe`.

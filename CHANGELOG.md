@@ -6,6 +6,33 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-28
+
+### Added
+
+- **Tabbed Konfigurationspanel**: Ein zweites `panel_custom`-Panel hängt über
+  `config_panel_domain` am Zahnrad des Integrationseintrags
+  (`/frickeldave-store-config?config_entry=<id>`, `require_admin`) und bietet die Tabs
+  **Benutzerverwaltung** und **KI-Einstellungen**. Das Seitenleisten-Panel bleibt
+  unverändert; beide Panels werden idempotent registriert und beim Unload entfernt.
+- **Benutzerverwaltungs-API**: `GET /api/frickeldave_store/users` liefert Freigaben mit
+  echten HA-Namen, Rollen-Labels und noch nicht freigegebenen aktiven Benutzern
+  (`available_users`, nur ID und Name). `PUT`/`DELETE /users/{user_id}` legen Freigaben
+  an, ändern Rollen oder entziehen sie, persistieren in der Option `users` und wenden
+  die Änderung sofort an. Der letzte `app_admin` ist gegen Löschen und Herabstufen
+  geschützt (`409 conflict`); unbekannte Benutzer-IDs bleiben bearbeitbar.
+- Tests für Liste, Anlegen, Ändern, Löschen, Namensauflösung, Rollenvalidierung,
+  Letzter-Admin-Schutz, sofortigen Rechteentzug und `403` ohne `app_admin`.
+- Dokumentation der Oberfläche und der Endpunkte in README, `docs/permissions.md` und
+  `docs/architecture.md`.
+
+### Changed
+
+- **Einstellungen nicht mehr im Seitenleisten-Menü**: Der Drei-Punkte-Eintrag „KI“ im
+  Panel entfällt; Einstellungen liegen ausschließlich im Konfigurationspanel am
+  Integrationseintrag (Frontend-Umsetzung durch das Frontend-Team). Der Options-Flow
+  bleibt als Rückfallebene erhalten.
+
 ## [0.1.4] - 2026-10-28
 
 ### Changed

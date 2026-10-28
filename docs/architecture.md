@@ -26,7 +26,9 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
 - **`ai.py`** – Anbieter-Abstraktion, DeepSeek-Client, Metadaten-Bereinigung.
 - **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen).
 - **`export.py`** – idempotenter Katalogexport im Website-Schema.
-- **`panel.py`** – statische Dateien und `panel_custom`-Panel.
+- **`panel.py`** – statische Dateien und zwei `panel_custom`-Panels: Seitenleiste
+  (`frickeldave-store`) und Konfigurationspanel am Integrationseintrag
+  (`frickeldave-store-config`).
 - **`frontend/`** – Lit-Web-Component, gepflegt vom Frontend-Team (nicht Teil dieser Schicht).
 
 ## Anfragefluss
@@ -42,13 +44,42 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
 eigene Identität und die effektiven Rechte (bei unbekannten Benutzern leere Listen), damit
 das Panel „kein Zugriff“ anzeigen kann. Es enthält keine Produkt-, Kunden- oder Finanzdaten.
 
+## Konfigurationspanel
+
+Seit 0.1.5 registriert `panel.py` zusätzlich zum Seitenleisten-Panel ein zweites
+`panel_custom`-Panel:
+
+| Parameter | Wert |
+| --- | --- |
+| `frontend_url_path` | `frickeldave-store-config` |
+| `webcomponent_name` | `frickeldave-store-config-panel` |
+| `module_url` | `/frickeldave_store_frontend/frickeldave-store-config-panel.js` |
+| `config_panel_domain` | `frickeldave_store` |
+| `require_admin` | `true` |
+| `embed_iframe` | `false` |
+| `config` | `{"api_prefix": "/api/frickeldave_store"}` |
+
+`config_panel_domain` bewirkt, dass das Zahnrad am Integrationseintrag auf
+`/frickeldave-store-config?config_entry=<id>` verlinkt statt den Options-Flow zu öffnen.
+Das Panel enthält die Tabs **Benutzerverwaltung** und **KI-Einstellungen**; die
+Seitenleisten-Registrierung bleibt unverändert. Beide Panels werden idempotent
+registriert und beim Unload gemeinsam entfernt.
+
+Die Config-Entry-Optionen bleiben die einzige Quelle der Wahrheit: Die
+Benutzerverwaltungs-API (`PUT`/`DELETE /api/frickeldave_store/users/{user_id}`)
+schreibt `users` über `hass.config_entries.async_update_entry` und ruft anschließend
+`_async_apply_entry_config` auf. Dadurch wirkt ein Rechteentzug auf die nächste Anfrage,
+und der Options-Flow bleibt als Rückfallebene funktionsfähig. Die Sicherheitsregel
+„letzter `app_admin` bleibt“ verhindert das Aussperren der Verwaltung (`409 conflict`).
+
 ## Zentrale Entscheidungen
 
 | Entscheidung | Begründung |
 | --- | --- |
 | Metadaten über HA-`Store`, Datei unter `config/frickeldave_store/` | im Container-Backup enthalten, keine zusätzliche Datenbank, atomare Schreibvorgänge |
 | Bilder als Dateien unter `config/frickeldave_store/images/` | nicht in `.storage`, nicht in `/media` oder `/share`; Backup inklusive |
-| Keine YAML-Konfiguration | Einrichtung ausschließlich über Config Flow / Options Flow |
+| Keine YAML-Konfiguration | Einrichtung ausschließlich über Config Flow; Einstellungen primär über das Konfigurationspanel, Options Flow als Rückfallebene |
+| `users`-Option bleibt Quelle der Wahrheit | Panel-UI und Options Flow schreiben dasselbe Format; sofortige Anwendung je Mutation |
 | `require_admin=False` | `require_admin` steuert nur die Sichtbarkeit, nie den Datenzugriff |
 | Server-seitige Prüfung je Anfrage | Rechteentzug wirkt sofort, auch bei offenem Panel |
 | Artikelnummer = Kategoriepräfix + 4 Zeichen | entspricht dem Altbestand (`LAH3K3`), 6 Zeichen, ohne `I/O/0/1` |

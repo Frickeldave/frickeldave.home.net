@@ -1,4 +1,11 @@
-"""Config Flow und Options Flow (keine YAML-Konfiguration)."""
+"""Config Flow und Options Flow (keine YAML-Konfiguration).
+
+Die primäre Oberfläche für Einstellungen ist seit 0.1.5 das tabbed
+Konfigurationspanel am Zahnrad des Integrationseintrags
+(``CONFIG_PANEL_URL_PATH``): Dort stehen Benutzerverwaltung und KI-Einstellungen
+zur Verfügung. Der Options Flow bleibt als Rückfallebene erhalten, falls das
+Frontend-Modul fehlt; die ``users``-Option bleibt die einzige Quelle der Wahrheit.
+"""
 
 from __future__ import annotations
 

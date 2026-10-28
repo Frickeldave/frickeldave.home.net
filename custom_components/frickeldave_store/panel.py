@@ -1,7 +1,13 @@
-"""Registrierung des HA-Panels und der statischen Frontend-Dateien.
+"""Registrierung der HA-Panels und der statischen Frontend-Dateien.
 
-Die Panel-JS-Datei gehört dem Frontend-Team (``frontend/``). Diese Datei legt
-dort bewusst nichts an; fehlt das Modul, bleibt die Integration funktionsfähig
+Zwei Panels teilen sich das Frontend-Verzeichnis:
+
+- ``frickeldave-store`` – Seitenleisten-Panel (unverändert, ``require_admin=False``).
+- ``frickeldave-store-config`` – Konfigurationspanel am Zahnrad des
+  Integrationseintrags (``config_panel_domain``), nur für Administratoren.
+
+Die Panel-JS-Dateien gehören dem Frontend-Team (``frontend/``). Diese Datei legt
+dort bewusst nichts an; fehlt ein Modul, bleibt die Integration funktionsfähig
 und die API nutzbar.
 """
 
@@ -16,6 +22,8 @@ from homeassistant.components.panel_custom import async_register_panel as _async
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONFIG_PANEL_MODULE_URL,
+    CONFIG_PANEL_URL_PATH,
     DOMAIN,
     FRONTEND_URL_PATH,
     PANEL_ICON,
@@ -28,6 +36,10 @@ _LOGGER = logging.getLogger(__name__)
 
 STATIC_URL = f"/{FRONTEND_URL_PATH}"
 _ATTR_REGISTERED = f"{DOMAIN}_static_registered"
+_ATTR_PANEL_REGISTERED = f"{DOMAIN}_panel_registered"
+_ATTR_CONFIG_PANEL_REGISTERED = f"{DOMAIN}_config_panel_registered"
+
+CONFIG_PANEL_WEBCOMPONENT = "frickeldave-store-config-panel"
 
 
 def frontend_dir() -> Path:
@@ -57,35 +69,64 @@ async def async_register_static(hass: HomeAssistant) -> None:
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
+    """Beide Panels idempotent registrieren (Seitenleiste und Konfiguration)."""
+
     await async_register_static(hass)
-    if hass.data.get(f"{DOMAIN}_panel_registered"):
-        return
-    if not (frontend_dir() / "frickeldave-store-panel.js").is_file():
-        _LOGGER.warning(
-            "Panel-Modul %s noch nicht vorhanden; Panel wird trotzdem registriert.",
-            PANEL_MODULE_URL,
-        )
     config: dict[str, Any] = {
         "api_prefix": "/api/frickeldave_store",
     }
-    await _async_register_panel(
-        hass,
-        frontend_url_path=PANEL_URL_PATH,
-        webcomponent_name="frickeldave-store-panel",
-        sidebar_title=PANEL_TITLE,
-        sidebar_icon=PANEL_ICON,
-        module_url=PANEL_MODULE_URL,
-        embed_iframe=False,
-        require_admin=False,
-        config=config,
-    )
-    hass.data[f"{DOMAIN}_panel_registered"] = True
+
+    if not hass.data.get(_ATTR_PANEL_REGISTERED):
+        if not (frontend_dir() / "frickeldave-store-panel.js").is_file():
+            _LOGGER.warning(
+                "Panel-Modul %s noch nicht vorhanden; Panel wird trotzdem registriert.",
+                PANEL_MODULE_URL,
+            )
+        await _async_register_panel(
+            hass,
+            frontend_url_path=PANEL_URL_PATH,
+            webcomponent_name="frickeldave-store-panel",
+            sidebar_title=PANEL_TITLE,
+            sidebar_icon=PANEL_ICON,
+            module_url=PANEL_MODULE_URL,
+            embed_iframe=False,
+            require_admin=False,
+            config=config,
+        )
+        hass.data[_ATTR_PANEL_REGISTERED] = True
+
+    if not hass.data.get(_ATTR_CONFIG_PANEL_REGISTERED):
+        if not (frontend_dir() / "frickeldave-store-config-panel.js").is_file():
+            _LOGGER.warning(
+                "Konfigurations-Panel-Modul %s noch nicht vorhanden; Panel wird "
+                "trotzdem registriert.",
+                CONFIG_PANEL_MODULE_URL,
+            )
+        # `config_panel_domain` verlinkt das Zahnrad am Integrationseintrag auf
+        # `/{CONFIG_PANEL_URL_PATH}?config_entry=<id>` statt auf den Options-Flow.
+        await _async_register_panel(
+            hass,
+            frontend_url_path=CONFIG_PANEL_URL_PATH,
+            webcomponent_name=CONFIG_PANEL_WEBCOMPONENT,
+            module_url=CONFIG_PANEL_MODULE_URL,
+            embed_iframe=False,
+            require_admin=True,
+            config=config,
+            config_panel_domain=DOMAIN,
+        )
+        hass.data[_ATTR_CONFIG_PANEL_REGISTERED] = True
 
 
 async def async_unregister_panel(hass: HomeAssistant) -> None:
-    if not hass.data.pop(f"{DOMAIN}_panel_registered", False):
-        return
-    try:
-        frontend.async_remove_panel(hass, PANEL_URL_PATH)
-    except Exception:  # pragma: no cover - Panel war nie im Frontend
-        _LOGGER.debug("Panel konnte nicht entfernt werden", exc_info=True)
+    """Beide Panels entfernen, unabhängig davon, welches registriert wurde."""
+
+    for key, url_path in (
+        (_ATTR_PANEL_REGISTERED, PANEL_URL_PATH),
+        (_ATTR_CONFIG_PANEL_REGISTERED, CONFIG_PANEL_URL_PATH),
+    ):
+        if not hass.data.pop(key, False):
+            continue
+        try:
+            frontend.async_remove_panel(hass, url_path)
+        except Exception:  # pragma: no cover - Panel war nie im Frontend
+            _LOGGER.debug("Panel %s konnte nicht entfernt werden", url_path, exc_info=True)

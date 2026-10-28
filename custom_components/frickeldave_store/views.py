@@ -13,7 +13,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from . import FrickeldaveStoreRuntime, runtime_for
+from . import FrickeldaveStoreRuntime, _async_apply_entry_config, runtime_for
 from .ai import AIError
 from .const import (
     API_PREFIX,
@@ -23,8 +23,21 @@ from .const import (
 )
 from .export import async_export_catalog
 from .importer import async_import_catalog
-from .models import NotFoundError, PermissionDenied, StoreError, ValidationError
-from .permissions import ROLE_APP_ADMIN, ROLE_PRODUCT
+from .models import (
+    ConflictError,
+    NotFoundError,
+    PermissionDenied,
+    StoreError,
+    ValidationError,
+)
+from .permissions import (
+    ALL_ROLES,
+    ROLE_APP_ADMIN,
+    ROLE_LABELS,
+    ROLE_PRODUCT,
+    format_user_grants,
+    normalise_roles,
+)
 from .products import ProductFilter
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,6 +125,108 @@ def _optional_url(payload: dict[str, Any], key: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{key} muss eine absolute https-URL sein.")
     return value.strip()
+
+
+async def _async_auth_users(hass: HomeAssistant) -> list[Any]:
+    """Alle HA-Benutzer; ohne Auth-Backend eine leere Liste (keine Namen)."""
+
+    auth = getattr(hass, "auth", None)
+    if auth is None:
+        return []
+    try:
+        return list(await auth.async_get_users())
+    except Exception:  # pragma: no cover - Auth-Backend nicht verfügbar
+        _LOGGER.debug("HA-Benutzer konnten nicht gelesen werden", exc_info=True)
+        return []
+
+
+async def _async_auth_user(hass: HomeAssistant, user_id: str) -> Any | None:
+    auth = getattr(hass, "auth", None)
+    if auth is None:
+        return None
+    try:
+        return await auth.async_get_user(user_id)
+    except Exception:  # pragma: no cover - Auth-Backend nicht verfügbar
+        return None
+
+
+def _user_name(user: Any | None) -> str:
+    if user is None:
+        return ""
+    return str(getattr(user, "name", "") or "")
+
+
+async def _async_users_payload(
+    hass: HomeAssistant, runtime: FrickeldaveStoreRuntime
+) -> dict[str, Any]:
+    """Antwort für ``GET /users`` und nach jeder Änderung.
+
+    Namen kommen ausschließlich aus dem HA-Auth-Backend. Unbekannte Freigaben
+    behalten ``name: ""`` und bleiben bearbeit- sowie entfernbar.
+    """
+
+    auth_users = await _async_auth_users(hass)
+    by_id = {str(getattr(user, "id", "")): user for user in auth_users}
+    grants = runtime.permissions.grants()
+    users = [
+        {
+            "user_id": user_id,
+            "name": _user_name(by_id.get(user_id)),
+            "roles": list(grant.roles),
+            "role_labels": [ROLE_LABELS[role] for role in grant.roles],
+        }
+        for user_id, grant in sorted(grants.items())
+    ]
+    available = sorted(
+        (
+            {"user_id": user_id, "name": _user_name(user)}
+            for user_id, user in by_id.items()
+            if user_id and user_id not in grants and bool(getattr(user, "is_active", True))
+        ),
+        key=lambda item: (item["name"].casefold(), item["user_id"]),
+    )
+    return {
+        "users": users,
+        "available_users": available,
+        "roles": [{"id": role, "label": ROLE_LABELS[role]} for role in ALL_ROLES],
+    }
+
+
+def _grant_map(runtime: FrickeldaveStoreRuntime) -> dict[str, list[str]]:
+    return {user_id: list(grant.roles) for user_id, grant in runtime.permissions.grants().items()}
+
+
+def _ensure_admin_remains(
+    grants: dict[str, list[str]], user_id: str, new_roles: list[str] | None
+) -> None:
+    """Den letzten ``app_admin`` schützen (kein Aussperren der Verwaltung)."""
+
+    current = grants.get(user_id, [])
+    if ROLE_APP_ADMIN not in current:
+        return
+    if new_roles is not None and ROLE_APP_ADMIN in new_roles:
+        return
+    if sum(1 for roles in grants.values() if ROLE_APP_ADMIN in roles) <= 1:
+        raise ConflictError(
+            "Der letzte Benutzer mit der Rolle 'Anwendungsverwaltung' kann nicht "
+            "entfernt oder herabgestuft werden."
+        )
+
+
+async def _async_persist_grants(
+    hass: HomeAssistant,
+    runtime: FrickeldaveStoreRuntime,
+    grants: dict[str, list[str]],
+) -> None:
+    """Freigaben in die Config-Entry-Options schreiben und sofort anwenden."""
+
+    entry = runtime.entry
+    if entry is None:  # pragma: no cover - Runtime ohne Entry nur in Tests
+        raise NotLoadedError("Die Integration ist nicht eingerichtet.")
+    options = dict(getattr(entry, "options", None) or {})
+    options["users"] = format_user_grants(grants)
+    hass.config_entries.async_update_entry(entry, options=options)
+    await _async_apply_entry_config(hass, entry, runtime)
 
 
 class MeView(HomeAssistantView):
@@ -374,6 +489,74 @@ class DescriptionSuggestView(HomeAssistantView):
             return _error_response(err)
 
 
+class UsersView(HomeAssistantView):
+    """Benutzerfreigaben lesen (nur Anwendungsverwaltung)."""
+
+    name = "api:frickeldave_store:users"
+    url = f"{API_PREFIX}/users"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            return web.json_response(await _async_users_payload(_hass(request), runtime))
+        except StoreError as err:
+            return _error_response(err)
+
+
+class UserView(HomeAssistantView):
+    """Freigabe eines Benutzers anlegen/ändern oder entfernen."""
+
+    name = "api:frickeldave_store:user"
+    url = f"{API_PREFIX}/users/{{user_id}}"
+    requires_auth = True
+
+    async def put(self, request: web.Request, user_id: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            hass = _hass(request)
+            payload = await _json_body(request)
+            unknown = set(payload) - {"roles"}
+            if unknown:
+                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+            raw_roles = payload.get("roles")
+            if not isinstance(raw_roles, list) or any(
+                not isinstance(role, str) for role in raw_roles
+            ):
+                raise ValidationError("roles muss eine Liste von Rollen sein.")
+            roles = normalise_roles(raw_roles)
+            if not roles:
+                raise ValidationError("Mindestens eine Rolle ist erforderlich.")
+            target = user_id.strip()
+            if not target:
+                raise ValidationError("user_id darf nicht leer sein.")
+
+            grants = _grant_map(runtime)
+            if target not in grants and await _async_auth_user(hass, target) is None:
+                raise NotFoundError("Unbekannter Home-Assistant-Benutzer.")
+            _ensure_admin_remains(grants, target, roles)
+            grants[target] = roles
+            await _async_persist_grants(hass, runtime, grants)
+            return web.json_response(await _async_users_payload(hass, runtime))
+        except StoreError as err:
+            return _error_response(err)
+
+    async def delete(self, request: web.Request, user_id: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_APP_ADMIN)
+            hass = _hass(request)
+            target = user_id.strip()
+            grants = _grant_map(runtime)
+            if target not in grants:
+                raise NotFoundError("Dieser Benutzer hat keine Freigabe.")
+            _ensure_admin_remains(grants, target, None)
+            del grants[target]
+            await _async_persist_grants(hass, runtime, grants)
+            return web.json_response(await _async_users_payload(hass, runtime))
+        except StoreError as err:
+            return _error_response(err)
+
+
 class SettingsView(HomeAssistantView):
     name = "api:frickeldave_store:settings"
     url = f"{API_PREFIX}/settings"
@@ -476,6 +659,8 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     TagView,
     StockView,
     DescriptionSuggestView,
+    UsersView,
+    UserView,
     SettingsView,
     ExportView,
     CatalogImportView,
