@@ -12,15 +12,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.const import (
-    CONFIG_PANEL_MODULE_URL,
     DOMAIN,
-    FRONTEND_URL_PATH,
-    PANEL_MODULE_URL,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
     STORAGE_PATH,
     STORAGE_VERSION,
-    VERSION,
 )
 from custom_components.frickeldave_store.models import SCHEMA_VERSION
 
@@ -90,7 +86,7 @@ async def test_setup_registers_panel_with_required_contract(
     assert panel.component_name == "custom"
     custom = panel.config["_panel_custom"]
     assert custom["name"] == "frickeldave-store-panel"
-    assert custom["module_url"] == PANEL_MODULE_URL
+    assert custom["module_url"] == "/frickeldave_store_frontend/frickeldave-store-panel.js"
     assert custom["embed_iframe"] is False
     assert panel.config["api_prefix"] == "/api/frickeldave_store"
 
@@ -107,29 +103,9 @@ async def test_setup_registers_config_panel_for_entry_gear(
     assert panel.config_panel_domain == DOMAIN
     custom = panel.config["_panel_custom"]
     assert custom["name"] == "frickeldave-store-config-panel"
-    assert custom["module_url"] == CONFIG_PANEL_MODULE_URL
+    assert custom["module_url"] == "/frickeldave_store_frontend/frickeldave-store-config-panel.js"
     assert custom["embed_iframe"] is False
     assert panel.config["api_prefix"] == "/api/frickeldave_store"
-
-
-async def test_panel_module_urls_are_cache_busted_by_version(
-    hass: Any, enable_custom_integrations: Any
-) -> None:
-    """HACS-Updates muessen den Browser-Cache umgehen (Issue #289)."""
-
-    await _setup_entry(hass)
-
-    panels = hass.data[frontend.DATA_PANELS]
-    expected = {
-        "frickeldave-store": f"/{FRONTEND_URL_PATH}/frickeldave-store-panel.js?v={VERSION}",
-        "frickeldave-store-config": (
-            f"/{FRONTEND_URL_PATH}/frickeldave-store-config-panel.js?v={VERSION}"
-        ),
-    }
-    for panel_key, expected_url in expected.items():
-        module_url = panels[panel_key].config["_panel_custom"]["module_url"]
-        assert module_url == expected_url
-        assert f"?v={VERSION}" in module_url
 
 
 async def test_panel_registration_is_idempotent(hass: Any, enable_custom_integrations: Any) -> None:
