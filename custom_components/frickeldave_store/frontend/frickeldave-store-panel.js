@@ -228,6 +228,8 @@ export class FrickeldaveStorePanel extends LitElement {
 
     this._toast = null;
     this._imageVersion = 0;
+    this._editorSnapshot = "";
+    this._editorShakeTimer = undefined;
 
     this._onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -276,6 +278,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._detachMenuListeners();
     clearTimeout(this._searchTimer);
     clearTimeout(this._toastTimer);
+    clearTimeout(this._editorShakeTimer);
     for (const controller of this._controllers) {
       controller.abort();
     }
@@ -874,8 +877,12 @@ export class FrickeldaveStorePanel extends LitElement {
   /* --------------------------------------------------------------------- */
 
   _captureFocus() {
-    const active = this.renderRoot?.activeElement;
-    this._focusReturn = active && typeof active.focus === "function" ? active : null;
+    try {
+      const active = this.renderRoot?.activeElement;
+      this._focusReturn = active && typeof active.focus === "function" ? active : null;
+    } catch {
+      this._focusReturn = null;
+    }
   }
 
   _restoreFocus() {
@@ -965,7 +972,9 @@ export class FrickeldaveStorePanel extends LitElement {
       error: "",
       fieldErrors: {},
       suggestion: null,
+      shake: false,
     };
+    this._editorSnapshot = this._editorFormState(this._editor);
   }
 
   _openEdit(product) {
@@ -990,15 +999,60 @@ export class FrickeldaveStorePanel extends LitElement {
       error: "",
       fieldErrors: {},
       suggestion: null,
+      shake: false,
     };
+    this._editorSnapshot = this._editorFormState(this._editor);
   }
 
-  _closeEditor() {
+  _editorFormState(editor) {
+    return JSON.stringify({
+      name: editor.name,
+      description: editor.description,
+      category: editor.category,
+      price: editor.price,
+      size: editor.size,
+      tags: editor.tags,
+      customizable: editor.customizable,
+      visible: editor.visible,
+    });
+  }
+
+  _editorHasChanges() {
+    if (!this._editor) {
+      return false;
+    }
+    return this._editorSnapshot !== this._editorFormState(this._editor);
+  }
+
+  _shakeEditor() {
+    if (!this._editor) {
+      return;
+    }
+    clearTimeout(this._editorShakeTimer);
+    this._patchEditor({ shake: true });
+    this._editorShakeTimer = setTimeout(() => {
+      if (this._editor) {
+        this._patchEditor({ shake: false });
+      }
+    }, 600);
+  }
+
+  _closeEditor({ force = false } = {}) {
     if (this._editor?.saving) {
       return;
     }
+    if (!force && this._editorHasChanges()) {
+      this._shakeEditor();
+      return;
+    }
+    clearTimeout(this._editorShakeTimer);
+    this._editorSnapshot = "";
     this._editor = null;
     this._restoreFocus();
+  }
+
+  _discardEditor() {
+    this._closeEditor({ force: true });
   }
 
   _patchEditor(patch) {
@@ -1146,7 +1200,7 @@ export class FrickeldaveStorePanel extends LitElement {
       }
 
       this._editor = null;
-      this._showToast(editor.mode === "create" ? "Produkt wurde angelegt." : "Produkt wurde gespeichert.");
+      this._showToast(editor.mode === "create" ? "Produkt wurde erstellt." : "Produkt wurde gespeichert.");
       this._restoreFocus();
       this._loadProducts();
       this._loadTags();
@@ -1750,7 +1804,7 @@ export class FrickeldaveStorePanel extends LitElement {
           ...this._tagsDialog,
           busy: false,
           draft: "",
-          notice: `Tag „${name}“ wurde angelegt.`,
+          notice: `Tag „${name}“ wurde erstellt.`,
         };
       }
     } catch (error) {
@@ -2074,8 +2128,8 @@ export class FrickeldaveStorePanel extends LitElement {
                     type="button"
                     class="fd-bar-icon"
                     @click=${() => this._openCreate()}
-                    aria-label="Produkt anlegen"
-                    title="Produkt anlegen"
+                    aria-label="Produkt erstellen"
+                    title="Produkt erstellen"
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
@@ -2178,7 +2232,7 @@ export class FrickeldaveStorePanel extends LitElement {
           <fieldset class="fd-fieldset">
             <legend class="fd-label">Tags</legend>
             ${this._allTags.length === 0
-              ? html`<p class="fd-hint">Noch keine Tags angelegt.</p>`
+              ? html`<p class="fd-hint">Noch keine Tags vorhanden.</p>`
               : html`
                   <div class="fd-chip-row fd-chip-row--scroll">
                     ${this._allTags.map(
@@ -2332,13 +2386,15 @@ export class FrickeldaveStorePanel extends LitElement {
           <p class="fd-muted">
             ${this._hasActiveFilters()
               ? "Bitte Suche oder Filter anpassen."
-              : "Es sind noch keine Produkte angelegt."}
+              : "Es sind noch keine Produkte vorhanden."}
           </p>
           ${this._hasActiveFilters()
             ? html`<button type="button" class="fd-button" @click=${() => this._resetFilters()}>
                 Filter zurücksetzen
               </button>`
-            : ""}
+            : html`<button type="button" class="fd-button fd-button--primary" @click=${() => this._openCreate()}>
+                Produkt erstellen
+              </button>`}
         </div>
       `;
     }
@@ -2426,7 +2482,7 @@ export class FrickeldaveStorePanel extends LitElement {
               : html`
                   <button
                     type="button"
-                    class="fd-button fd-button--danger"
+                    class="fd-button"
                     @click=${() => this._requestArchive(product)}
                     aria-label=${`${productLabel} archivieren`}
                   >
@@ -2491,7 +2547,7 @@ export class FrickeldaveStorePanel extends LitElement {
     return html`
       <dialog
         id="fd-editor-dialog"
-        class="fd-dialog"
+        class="fd-dialog${editor.shake ? " fd-dialog--shake" : ""}"
         aria-labelledby="fd-editor-title"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closeEditor())}
         @click=${(event) => {
@@ -2501,28 +2557,38 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
-            <h2 id="fd-editor-title">${isCreate ? "Neues Produkt" : "Produkt bearbeiten"}</h2>
+          <button
+            type="button"
+            class="fd-icon-button fd-dialog-close"
+            @click=${() => this._closeEditor()}
+            ?disabled=${editor.saving}
+            aria-label="Dialog schließen"
+            title="Dialog schließen"
+          >
+            ✕
+          </button>
+          <div class="fd-dialog-title">
+            <h2 id="fd-editor-title">${isCreate ? "Produkt erstellen" : "Produkt bearbeiten"}</h2>
             ${isCreate
               ? html`<p class="fd-muted fd-small">Die Artikelnummer wird automatisch vergeben.</p>`
               : html`<p class="fd-muted fd-small">Artikelnummer ${editor.articleNumber}</p>`}
           </div>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeEditor()}
-            aria-label="Dialog schließen"
-          >
-            ✕
-          </button>
         </div>
 
-        <form class="fd-dialog-body" @submit=${(event) => this._saveEditor(event)} novalidate>
+        <form class="fd-dialog-form" @submit=${(event) => this._saveEditor(event)} novalidate>
+          <div class="fd-dialog-body">
           ${editor.error ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.error}</div>` : ""}
+          ${editor.shake
+            ? html`<p class="fd-hint" role="status" aria-live="polite">
+                Nicht gespeicherte Änderungen. Mit „Abbrechen“ verwerfen.
+              </p>`
+            : ""}
 
           <div class="fd-form-grid">
             <div class="fd-field">
-              <label class="fd-label" for="fd-editor-name">Name *</label>
+              <label class="fd-label" for="fd-editor-name">
+                Name <span class="fd-required" aria-hidden="true">*</span>
+              </label>
               <input
                 id="fd-editor-name"
                 data-field="name"
@@ -2530,13 +2596,16 @@ export class FrickeldaveStorePanel extends LitElement {
                 class="fd-input"
                 type="text"
                 maxlength="200"
+                required
+                aria-required="true"
                 .value=${editor.name}
                 aria-invalid=${errors.name ? "true" : "false"}
+                aria-describedby=${errors.name ? "fd-editor-name-error" : "fd-editor-name-hint"}
                 @input=${(event) => this._setEditorField("name", event.target.value)}
               />
               ${errors.name
-                ? html`<p class="fd-error-text">${errors.name}</p>`
-                : html`<p class="fd-hint">Pflichtfeld.</p>`}
+                ? html`<p class="fd-error-text" id="fd-editor-name-error">${errors.name}</p>`
+                : html`<p class="fd-hint" id="fd-editor-name-hint">Pflichtfeld.</p>`}
             </div>
 
             <div class="fd-field">
@@ -2566,28 +2635,33 @@ export class FrickeldaveStorePanel extends LitElement {
                   `}
               <p class="fd-hint">
                 ${isCreate
-                  ? "Die Kategorie kann nach dem Anlegen nicht geändert werden."
-                  : "Die Kategorie ist unveränderlich. Für einen Wechsel bitte ein neues Produkt anlegen."}
+                  ? "Die Kategorie kann nach dem Erstellen nicht geändert werden."
+                  : "Die Kategorie ist unveränderlich. Für einen Wechsel bitte ein neues Produkt erstellen."}
               </p>
               ${errors.category ? html`<p class="fd-error-text">${errors.category}</p>` : ""}
             </div>
 
             <div class="fd-field">
-              <label class="fd-label" for="fd-editor-price">Preis (EUR) *</label>
+              <label class="fd-label" for="fd-editor-price">
+                Preis (EUR) <span class="fd-required" aria-hidden="true">*</span>
+              </label>
               <input
                 id="fd-editor-price"
                 data-field="price"
                 class="fd-input"
                 type="text"
                 inputmode="decimal"
+                required
+                aria-required="true"
                 placeholder="z. B. 12,50"
                 .value=${editor.price}
                 aria-invalid=${errors.price ? "true" : "false"}
+                aria-describedby=${errors.price ? "fd-editor-price-error" : "fd-editor-price-hint"}
                 @input=${(event) => this._setEditorField("price", event.target.value)}
               />
               ${errors.price
-                ? html`<p class="fd-error-text">${errors.price}</p>`
-                : html`<p class="fd-hint">Dezimal mit Komma oder Punkt.</p>`}
+                ? html`<p class="fd-error-text" id="fd-editor-price-error">${errors.price}</p>`
+                : html`<p class="fd-hint" id="fd-editor-price-hint">Dezimal mit Komma oder Punkt.</p>`}
             </div>
 
             <div class="fd-field">
@@ -2632,7 +2706,7 @@ export class FrickeldaveStorePanel extends LitElement {
                       </span>
                     `
                   : html`<span class="fd-hint">
-                      Ein KI-Vorschlag ist verfügbar, sobald das Produkt angelegt ist.
+                      Ein KI-Vorschlag ist verfügbar, sobald das Produkt erstellt ist.
                     </span>`}
               </div>
 
@@ -2753,12 +2827,23 @@ export class FrickeldaveStorePanel extends LitElement {
               </div>
             </div>
           </div>
+          </div>
 
           <footer class="fd-dialog-foot">
-            <button type="button" class="fd-button" @click=${() => this._closeEditor()} ?disabled=${editor.saving}>
+            <button
+              type="button"
+              class="fd-button fd-button--plain"
+              @click=${() => this._discardEditor()}
+              ?disabled=${editor.saving}
+            >
               Abbrechen
             </button>
-            <button type="submit" class="fd-button fd-button--primary" ?disabled=${editor.saving}>
+            <button
+              type="submit"
+              class="fd-button fd-button--primary"
+              ?disabled=${editor.saving}
+              aria-busy=${editor.saving ? "true" : "false"}
+            >
               ${editor.saving ? "Speichern …" : "Speichern"}
             </button>
           </footer>
@@ -2806,21 +2891,22 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
+          <button
+            type="button"
+            class="fd-icon-button fd-dialog-close"
+            @click=${() => this._closeImages()}
+            ?disabled=${dialog.busy}
+            aria-label="Dialog schließen"
+            title="Dialog schließen"
+          >
+            ✕
+          </button>
+          <div class="fd-dialog-title">
             <h2 id="fd-images-title">Bilder – ${productLabel}</h2>
             <p class="fd-muted fd-small">
               ${count} von ${MAX_IMAGES} Bildern · Artikelnummer ${product.articleNumber}
             </p>
           </div>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeImages()}
-            ?disabled=${dialog.busy}
-            aria-label="Dialog schließen"
-          >
-            ✕
-          </button>
         </div>
 
         <div class="fd-dialog-body">
@@ -2857,7 +2943,10 @@ export class FrickeldaveStorePanel extends LitElement {
             : ""}
 
           ${!dialog.loading && count === 0
-            ? html`<p class="fd-state fd-state--inline">Noch keine Bilder hinterlegt.</p>`
+            ? html`<div class="fd-state fd-state--inline">
+                <h3>Noch keine Bilder hinterlegt</h3>
+                <p class="fd-hint">Laden Sie bis zu zehn Bilder hoch. Das erste Bild ist das Hauptbild.</p>
+              </div>`
             : ""}
 
           <ul class="fd-image-grid" role="list" aria-label="Bilder in Reihenfolge">
@@ -2932,7 +3021,12 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
 
         <div class="fd-dialog-foot">
-          <button type="button" class="fd-button" @click=${() => this._closeImages()} ?disabled=${dialog.busy}>
+          <button
+            type="button"
+            class="fd-button fd-button--plain"
+            @click=${() => this._closeImages()}
+            ?disabled=${dialog.busy}
+          >
             Schließen
           </button>
         </div>
@@ -2973,22 +3067,24 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
-            <h2 id="fd-stock-title">Bestandsbuchung</h2>
-            <p class="fd-muted fd-small">${productLabel} · Artikelnummer ${product.articleNumber}</p>
-          </div>
           <button
             type="button"
-            class="fd-icon-button"
+            class="fd-icon-button fd-dialog-close"
             @click=${() => this._closeStock()}
             ?disabled=${dialog.saving}
             aria-label="Dialog schließen"
+            title="Dialog schließen"
           >
             ✕
           </button>
+          <div class="fd-dialog-title">
+            <h2 id="fd-stock-title">Bestandsbuchung</h2>
+            <p class="fd-muted fd-small">${productLabel} · Artikelnummer ${product.articleNumber}</p>
+          </div>
         </div>
 
-        <form class="fd-dialog-body" @submit=${(event) => this._saveStock(event)} novalidate>
+        <form class="fd-dialog-form" @submit=${(event) => this._saveStock(event)} novalidate>
+          <div class="fd-dialog-body">
           ${dialog.error ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>` : ""}
 
           <dl class="fd-stock-summary">
@@ -3017,19 +3113,25 @@ export class FrickeldaveStorePanel extends LitElement {
             </div>
 
             <div class="fd-field">
-              <label class="fd-label" for="fd-stock-quantity">Menge *</label>
+              <label class="fd-label" for="fd-stock-quantity">
+                Menge <span class="fd-required" aria-hidden="true">*</span>
+              </label>
               <input
                 id="fd-stock-quantity"
                 data-autofocus
                 class="fd-input"
                 type="number"
-                min="0"
+                min="1"
                 step="1"
                 inputmode="numeric"
+                required
+                aria-required="true"
+                aria-invalid=${dialog.error ? "true" : "false"}
+                aria-describedby="fd-stock-quantity-hint"
                 .value=${dialog.quantity}
                 @input=${(event) => this._patchStock({ quantity: event.target.value })}
               />
-              <p class="fd-hint">Ganze Zahl, mindestens 1.</p>
+              <p class="fd-hint" id="fd-stock-quantity-hint">Ganze Zahl, mindestens 1.</p>
             </div>
 
             <div class="fd-field fd-field--full">
@@ -3050,12 +3152,23 @@ export class FrickeldaveStorePanel extends LitElement {
             Buchungen werden mit Zeitstempel und auslösendem Home-Assistant-Benutzer erfasst.
             Personalisierbare Produkte werden durch Verkäufe nicht automatisch abgebucht.
           </p>
+          </div>
 
           <div class="fd-dialog-foot">
-            <button type="button" class="fd-button" @click=${() => this._closeStock()} ?disabled=${dialog.saving}>
+            <button
+              type="button"
+              class="fd-button fd-button--plain"
+              @click=${() => this._closeStock()}
+              ?disabled=${dialog.saving}
+            >
               Abbrechen
             </button>
-            <button type="submit" class="fd-button fd-button--primary" ?disabled=${dialog.saving}>
+            <button
+              type="submit"
+              class="fd-button fd-button--primary"
+              ?disabled=${dialog.saving}
+              aria-busy=${dialog.saving ? "true" : "false"}
+            >
               ${dialog.saving ? "Buchen …" : "Buchen"}
             </button>
           </div>
@@ -3081,6 +3194,7 @@ export class FrickeldaveStorePanel extends LitElement {
         id="fd-archive-dialog"
         class="fd-dialog"
         aria-labelledby="fd-archive-title"
+        aria-describedby="fd-archive-description"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closeArchive())}
         @click=${(event) => {
           if (event.target === event.currentTarget) {
@@ -3089,43 +3203,42 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
+          <div class="fd-dialog-title">
             <h2 id="fd-archive-title">Produkt archivieren</h2>
             <p class="fd-muted fd-small">${productLabel} · Artikelnummer ${product.articleNumber}</p>
           </div>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeArchive()}
-            ?disabled=${dialog.saving}
-            aria-label="Dialog schließen"
-          >
-            ✕
-          </button>
         </div>
 
         <div class="fd-dialog-body">
           ${dialog.error ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>` : ""}
-          <div class="fd-banner fd-banner--warning" role="note">
+          <div class="fd-banner fd-banner--warning" role="note" id="fd-archive-description">
             <p>
               Das Produkt verschwindet aus der Website und aus dem Export. Die Daten und Bilder bleiben
               erhalten und können über „Archivierte anzeigen“ weiterhin eingesehen werden.
             </p>
           </div>
           <p class="fd-hint">Ein endgültiges Löschen ist nicht vorgesehen.</p>
-          <div class="fd-dialog-foot">
-            <button type="button" class="fd-button" @click=${() => this._closeArchive()} ?disabled=${dialog.saving}>
-              Abbrechen
-            </button>
-            <button
-              type="button"
-              class="fd-button fd-button--danger"
-              @click=${() => this._confirmArchive()}
-              ?disabled=${dialog.saving}
-            >
-              ${dialog.saving ? "Archivieren …" : "Archivieren"}
-            </button>
-          </div>
+        </div>
+
+        <div class="fd-dialog-foot">
+          <button
+            type="button"
+            class="fd-button fd-button--plain"
+            data-autofocus
+            @click=${() => this._closeArchive()}
+            ?disabled=${dialog.saving}
+          >
+            Abbrechen
+          </button>
+          <button
+            type="button"
+            class="fd-button fd-button--primary"
+            @click=${() => this._confirmArchive()}
+            ?disabled=${dialog.saving}
+            aria-busy=${dialog.saving ? "true" : "false"}
+          >
+            ${dialog.saving ? "Archivieren …" : "Archivieren"}
+          </button>
         </div>
       </dialog>
     `;
@@ -3157,19 +3270,20 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
-            <h2 id="fd-import-title">Katalog importieren</h2>
-            <p class="fd-muted fd-small">Produkte der Live-Website übernehmen</p>
-          </div>
           <button
             type="button"
-            class="fd-icon-button"
+            class="fd-icon-button fd-dialog-close"
             @click=${() => this._closeImport()}
             ?disabled=${running}
             aria-label="Dialog schließen"
+            title="Dialog schließen"
           >
             ✕
           </button>
+          <div class="fd-dialog-title">
+            <h2 id="fd-import-title">Katalog importieren</h2>
+            <p class="fd-muted fd-small">Produkte der Live-Website übernehmen</p>
+          </div>
         </div>
 
         <div class="fd-dialog-body">
@@ -3218,8 +3332,9 @@ export class FrickeldaveStorePanel extends LitElement {
             : ""}
 
           ${result ? this._renderImportResult(result) : ""}
+        </div>
 
-          <div class="fd-dialog-foot">
+        <div class="fd-dialog-foot">
             ${dialog.phase === "result"
               ? html`
                   <button type="button" class="fd-button fd-button--primary" @click=${() => this._closeImport()}>
@@ -3229,7 +3344,7 @@ export class FrickeldaveStorePanel extends LitElement {
               : html`
                   <button
                     type="button"
-                    class="fd-button"
+                    class="fd-button fd-button--plain"
                     @click=${() => this._closeImport()}
                     ?disabled=${running}
                     data-autofocus
@@ -3241,11 +3356,11 @@ export class FrickeldaveStorePanel extends LitElement {
                     class="fd-button fd-button--primary"
                     @click=${() => this._startImport()}
                     ?disabled=${running}
+                    aria-busy=${running ? "true" : "false"}
                   >
                     ${running ? "Import läuft …" : dialog.phase === "error" ? "Erneut versuchen" : "Import starten"}
                   </button>
                 `}
-          </div>
         </div>
       </dialog>
     `;
@@ -3348,19 +3463,20 @@ export class FrickeldaveStorePanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
-            <h2 id="fd-tags-title">Tags verwalten</h2>
-            <p class="fd-muted fd-small">Tags sind öffentliche Filter der Website.</p>
-          </div>
           <button
             type="button"
-            class="fd-icon-button"
+            class="fd-icon-button fd-dialog-close"
             @click=${() => this._closeTags()}
             ?disabled=${dialog.busy}
             aria-label="Dialog schließen"
+            title="Dialog schließen"
           >
             ✕
           </button>
+          <div class="fd-dialog-title">
+            <h2 id="fd-tags-title">Tags verwalten</h2>
+            <p class="fd-muted fd-small">Tags sind öffentliche Filter der Website.</p>
+          </div>
         </div>
 
         <div class="fd-dialog-body">
@@ -3379,12 +3495,15 @@ export class FrickeldaveStorePanel extends LitElement {
               .value=${dialog.draft}
               @input=${(event) => this._setTagDraft(event.target.value)}
             />
-            <button type="submit" class="fd-button fd-button--primary" ?disabled=${dialog.busy}>Anlegen</button>
+            <button type="submit" class="fd-button fd-button--primary" ?disabled=${dialog.busy} aria-busy=${dialog.busy ? "true" : "false"}>Erstellen</button>
           </form>
 
           ${dialog.loading ? html`<p class="fd-muted" role="status">Tags werden geladen …</p>` : ""}
           ${!dialog.loading && dialog.tags.length === 0
-            ? html`<p class="fd-state fd-state--inline">Noch keine Tags angelegt.</p>`
+            ? html`<div class="fd-state fd-state--inline">
+                <h3>Noch keine Tags vorhanden</h3>
+                <p class="fd-hint">Erstellen Sie oben den ersten Tag.</p>
+              </div>`
             : ""}
 
           <ul class="fd-tag-manage-list" role="list">
@@ -3408,7 +3527,12 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
 
         <div class="fd-dialog-foot">
-          <button type="button" class="fd-button" @click=${() => this._closeTags()} ?disabled=${dialog.busy}>
+          <button
+            type="button"
+            class="fd-button fd-button--plain"
+            @click=${() => this._closeTags()}
+            ?disabled=${dialog.busy}
+          >
             Schließen
           </button>
         </div>
@@ -3432,47 +3556,74 @@ export class FrickeldaveStorePanel extends LitElement {
     :host {
       display: block;
       min-height: 100%;
-      color: var(--primary-text-color, #212121);
-      background-color: var(--primary-background-color, transparent);
+      color: var(--ha-color-text-primary, var(--primary-text-color, #212121));
+      background-color: var(--ha-color-surface-lower, var(--primary-background-color, transparent));
       font-family: var(
-        --paper-font-body1_-_font-family,
-        var(--ha-font-family-body, Roboto, "Helvetica Neue", Arial, sans-serif)
+        --ha-font-family-body,
+        var(--paper-font-body1_-_font-family, Roboto, "Helvetica Neue", Arial, sans-serif)
       );
       font-size: var(--ha-font-size-m, 14px);
-      line-height: 1.5;
+      line-height: var(--fd-line-height, 1.6);
 
-      --fd-space-1: 4px;
-      --fd-space-2: 8px;
-      --fd-space-3: 12px;
-      --fd-space-4: 16px;
-      --fd-space-6: 24px;
-      --fd-space-8: 32px;
+      --fd-space-1: var(--ha-space-1, 4px);
+      --fd-space-2: var(--ha-space-2, 8px);
+      --fd-space-3: var(--ha-space-3, 12px);
+      --fd-space-4: var(--ha-space-4, 16px);
+      --fd-space-6: var(--ha-space-6, 24px);
+      --fd-space-8: var(--ha-space-8, 32px);
 
-      --fd-radius-lg: var(--ha-card-border-radius, 12px);
-      --fd-radius: var(--ha-card-border-radius, 12px);
-      --fd-radius-sm: 8px;
+      --fd-radius-lg: var(--ha-border-radius-lg, var(--ha-card-border-radius, 12px));
+      --fd-radius: var(--ha-border-radius-md, 8px);
+      --fd-radius-sm: var(--ha-border-radius-md, 8px);
+      --fd-radius-pill: var(--ha-border-radius-pill, 999px);
+      --fd-radius-dialog: var(--ha-border-radius-xl, 16px);
 
-      --fd-surface: var(--ha-card-background, var(--card-background-color, #ffffff));
-      --fd-surface-alt: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
-      --fd-text: var(--primary-text-color, #212121);
-      --fd-text-muted: var(--secondary-text-color, #6b6b6b);
-      --fd-accent: var(--primary-color, #03a9f4);
-      --fd-on-accent: var(--text-primary-color, #ffffff);
-      --fd-error: var(--error-color, #c62828);
-      --fd-warning: var(--warning-color, #ff9800);
-      --fd-success: var(--success-color, #2e7d32);
-      --fd-divider: var(--divider-color, rgba(0, 0, 0, 0.12));
+      --fd-surface: var(--ha-color-surface-default, var(--card-background-color, #ffffff));
+      --fd-surface-alt: var(--ha-color-surface-low, var(--secondary-background-color, rgba(127, 127, 127, 0.08)));
+      --fd-text: var(--ha-color-text-primary, var(--primary-text-color, #212121));
+      --fd-text-muted: var(--ha-color-text-secondary, var(--secondary-text-color, #6b6b6b));
+      --fd-divider: var(--ha-color-border-neutral-quiet, var(--divider-color, rgba(0, 0, 0, 0.12)));
+      --fd-border-strong: var(--ha-color-border-neutral-normal, var(--fd-divider));
+      --fd-accent: var(--ha-color-fill-primary-loud-resting, var(--primary-color, #03a9f4));
+      --fd-accent-hover: var(--ha-color-fill-primary-loud-hover, var(--fd-accent));
+      --fd-accent-active: var(--ha-color-fill-primary-loud-active, var(--fd-accent));
+      --fd-on-accent: var(--ha-color-on-primary-loud, var(--text-primary-color, #ffffff));
+      --fd-accent-soft: var(--ha-color-fill-primary-normal-resting, var(--fd-surface-alt));
+      --fd-on-accent-soft: var(--ha-color-on-primary-normal, var(--fd-text));
+      --fd-neutral-soft: var(--ha-color-fill-neutral-normal-resting, var(--fd-surface-alt));
+      --fd-error: var(--ha-color-on-danger-quiet, var(--error-color, #c62828));
+      --fd-error-fill: var(--ha-color-fill-danger-quiet-resting, var(--fd-surface-alt));
+      --fd-error-border: var(--ha-color-border-danger-normal, var(--fd-error));
+      --fd-error-strong: var(--ha-color-fill-danger-loud-resting, var(--fd-error));
+      --fd-on-error-strong: var(--ha-color-on-danger-loud, #ffffff);
+      --fd-warning: var(--ha-color-on-warning-quiet, var(--warning-color, #ff9800));
+      --fd-warning-fill: var(--ha-color-fill-warning-quiet-resting, var(--fd-surface-alt));
+      --fd-warning-border: var(--ha-color-border-warning-normal, var(--fd-warning));
+      --fd-success: var(--ha-color-on-success-quiet, var(--success-color, #2e7d32));
+      --fd-success-fill: var(--ha-color-fill-success-quiet-resting, var(--fd-surface-alt));
+      --fd-success-border: var(--ha-color-border-success-normal, var(--fd-success));
       --fd-shadow: var(--ha-card-box-shadow, none);
       --fd-shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.35);
 
-      --fd-font-small: var(--ha-font-size-s, 13px);
-      --fd-focus-ring: 2px solid var(--fd-accent);
+      --fd-font-small: var(--ha-font-size-s, 12px);
+      --fd-focus: var(--ha-color-focus, var(--primary-color, #03a9f4));
+      --fd-focus-ring: 2px solid var(--fd-focus);
+      --fd-line-height: 1.6;
+      --fd-line-height-heading: 1.2;
+      --fd-duration-fast: var(--ha-animation-duration-fast, 150ms);
+      --fd-duration-normal: var(--ha-animation-duration-normal, 250ms);
     }
 
     *,
     *::before,
     *::after {
       box-sizing: border-box;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: var(--fd-line-height-heading, 1.2);
     }
 
     :where(button, input, select, textarea, [tabindex]):focus-visible {
@@ -3552,7 +3703,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-bar-icon:hover:not(:disabled) {
-      background: var(--secondary-background-color, rgba(127, 127, 127, 0.16));
+      background: var(--ha-color-fill-neutral-quiet-hover, var(--secondary-background-color, rgba(127, 127, 127, 0.16)));
     }
 
     .fd-bar-icon:disabled {
@@ -3603,6 +3754,7 @@ export class FrickeldaveStorePanel extends LitElement {
       font: inherit;
       text-align: left;
       cursor: pointer;
+      transition: background-color var(--fd-duration-fast);
     }
 
     .fd-menu-item:hover,
@@ -3637,7 +3789,8 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-state h1,
-    .fd-state h2 {
+    .fd-state h2,
+    .fd-state h3 {
       margin: 0;
       font-weight: 500;
     }
@@ -3669,6 +3822,10 @@ export class FrickeldaveStorePanel extends LitElement {
       color: var(--fd-text-muted);
       font-size: var(--fd-font-small);
       font-weight: 500;
+    }
+
+    .fd-required {
+      color: var(--fd-error);
     }
 
     .fd-hint {
@@ -3709,11 +3866,12 @@ export class FrickeldaveStorePanel extends LitElement {
       width: 100%;
       min-height: 44px;
       padding: 10px 12px;
-      border: 1px solid var(--fd-divider);
+      border: 1px solid var(--fd-border-strong);
       border-radius: var(--fd-radius-sm);
       background: var(--fd-surface);
       color: var(--fd-text);
       font: inherit;
+      transition: border-color var(--fd-duration-fast);
     }
 
     .fd-input:focus-visible {
@@ -3796,24 +3954,52 @@ export class FrickeldaveStorePanel extends LitElement {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
-      min-height: 44px;
-      padding: 8px 14px;
-      border: 1px solid var(--fd-divider);
-      border-radius: var(--fd-radius-sm);
-      background: var(--fd-surface);
+      gap: var(--fd-space-2);
+      min-height: 40px;
+      padding: 8px 16px;
+      border: 1px solid var(--fd-border-strong);
+      border-radius: var(--fd-radius-pill);
+      background: transparent;
       color: var(--fd-text);
       font: inherit;
+      font-size: var(--ha-font-size-m, 14px);
       cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        border-color var(--fd-duration-fast),
+        color var(--fd-duration-fast);
     }
 
     .fd-button:hover:not(:disabled) {
-      background: var(--fd-surface-alt);
+      background: var(--ha-color-fill-neutral-quiet-hover, var(--fd-surface-alt));
+    }
+
+    .fd-button:active:not(:disabled) {
+      background: var(--ha-color-fill-neutral-quiet-active, var(--fd-surface-alt));
     }
 
     .fd-button:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
+      cursor: default;
+      opacity: 0.5;
+    }
+
+    .fd-button[aria-busy="true"] {
+      position: relative;
+      color: transparent;
+    }
+
+    .fd-button[aria-busy="true"]::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 18px;
+      height: 18px;
+      margin: -9px 0 0 -9px;
+      border: 2px solid var(--fd-text);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: fd-spin 0.9s linear infinite;
     }
 
     .fd-button--primary {
@@ -3823,20 +4009,83 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-button--primary:hover:not(:disabled) {
-      background: var(--fd-accent);
-      filter: brightness(1.08);
+      background: var(--fd-accent-hover);
+    }
+
+    .fd-button--primary:active:not(:disabled) {
+      background: var(--fd-accent-active);
+    }
+
+    .fd-button--filled {
+      border-color: transparent;
+      background: var(--fd-neutral-soft);
+      color: var(--fd-text);
+    }
+
+    .fd-button--plain {
+      border-color: transparent;
+      background: transparent;
+      color: var(--fd-text-muted);
+    }
+
+    .fd-button--plain:hover:not(:disabled) {
+      background: var(--fd-surface-alt);
+      color: var(--fd-text);
     }
 
     .fd-button--danger {
-      border-color: var(--fd-error);
-      color: var(--fd-error);
+      border-color: var(--fd-error-border);
       background: transparent;
+      color: var(--fd-error);
+    }
+
+    .fd-button--danger:hover:not(:disabled) {
+      background: var(--fd-error-fill);
+    }
+
+    .fd-button--danger-filled {
+      border-color: transparent;
+      background: var(--fd-error-strong);
+      color: var(--fd-on-error-strong);
+    }
+
+    .fd-button--primary[aria-busy="true"]::after,
+    .fd-button--danger-filled[aria-busy="true"]::after {
+      border-color: var(--fd-on-accent);
+      border-top-color: transparent;
+    }
+
+    .fd-button--danger[aria-busy="true"]::after {
+      border-color: var(--fd-error);
+      border-top-color: transparent;
+    }
+
+    .fd-button--success {
+      border-color: var(--fd-success-border);
+      background: transparent;
+      color: var(--fd-success);
+    }
+
+    .fd-button--success:hover:not(:disabled) {
+      background: var(--fd-success-fill);
     }
 
     .fd-button--small {
-      min-height: 30px;
-      padding: 4px 8px;
+      min-height: 32px;
+      padding: 4px 12px;
       font-size: var(--fd-font-small);
+    }
+
+    .fd-button--xs {
+      min-height: 24px;
+      padding: 2px 8px;
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-button--large {
+      min-height: 48px;
+      padding: 8px 16px;
+      font-size: var(--ha-font-size-l, 16px);
     }
 
     .fd-icon-button {
@@ -3853,6 +4102,9 @@ export class FrickeldaveStorePanel extends LitElement {
       color: var(--fd-text-muted);
       font: inherit;
       cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        color var(--fd-duration-fast);
     }
 
     .fd-icon-button:hover:not(:disabled) {
@@ -3899,12 +4151,16 @@ export class FrickeldaveStorePanel extends LitElement {
       min-height: 34px;
       padding: 6px 12px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-surface);
       color: var(--fd-text);
       font: inherit;
       font-size: var(--fd-font-small);
       cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        border-color var(--fd-duration-fast),
+        color var(--fd-duration-fast);
     }
 
     .fd-chip:hover {
@@ -3917,13 +4173,18 @@ export class FrickeldaveStorePanel extends LitElement {
       color: var(--fd-on-accent);
     }
 
+    .fd-chip[aria-pressed="true"]::before {
+      content: "✓";
+      margin-inline-end: 4px;
+    }
+
     .fd-selected-tag {
       display: inline-flex;
       align-items: center;
       gap: 4px;
       padding: 4px 4px 4px 12px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-surface-alt);
       font-size: var(--fd-font-small);
     }
@@ -3961,15 +4222,29 @@ export class FrickeldaveStorePanel extends LitElement {
     /* Banner und Status --------------------------------------------------- */
 
     .fd-banner {
+      position: relative;
       display: flex;
       flex-wrap: wrap;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: var(--fd-space-2);
-      padding: var(--fd-space-3);
+      padding: var(--fd-space-3) var(--fd-space-3) var(--fd-space-3) var(--fd-space-8);
+      border: 1px solid var(--fd-divider);
       border-left: 4px solid var(--fd-divider);
       border-radius: var(--fd-radius);
       background: var(--fd-surface-alt);
+    }
+
+    .fd-banner::before {
+      content: "";
+      position: absolute;
+      inset-inline-start: var(--fd-space-3);
+      top: var(--fd-space-3);
+      width: 18px;
+      height: 18px;
+      background-color: var(--fd-text);
+      mask: var(--fd-banner-icon) center / contain no-repeat;
+      -webkit-mask: var(--fd-banner-icon) center / contain no-repeat;
     }
 
     .fd-banner p {
@@ -3977,15 +4252,33 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-banner--error {
-      border-left-color: var(--fd-error);
+      border-color: var(--fd-error-border);
+      background: var(--fd-error-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--error::before {
+      background-color: var(--fd-error);
     }
 
     .fd-banner--warning {
-      border-left-color: var(--fd-warning);
+      border-color: var(--fd-warning-border);
+      background: var(--fd-warning-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--warning::before {
+      background-color: var(--fd-warning);
     }
 
     .fd-banner--success {
-      border-left-color: var(--fd-success);
+      border-color: var(--fd-success-border);
+      background: var(--fd-success-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--success::before {
+      background-color: var(--fd-success);
     }
 
     .fd-inline-actions {
@@ -3998,7 +4291,7 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-status {
       padding: 4px 10px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       font-size: var(--fd-font-small);
     }
 
@@ -4135,9 +4428,9 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-product-title {
       margin: 0;
-      font-size: 1rem;
-      font-weight: 600;
-      line-height: 1.3;
+      font-size: var(--ha-font-size-l, 16px);
+      font-weight: 500;
+      line-height: var(--fd-line-height-heading, 1.2);
     }
 
     .fd-price {
@@ -4165,7 +4458,7 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-badge {
       padding: 2px 8px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-surface-alt);
       color: var(--fd-text-muted);
       font-size: 11px;
@@ -4226,7 +4519,7 @@ export class FrickeldaveStorePanel extends LitElement {
       max-height: calc(100vh - 48px);
       padding: 0;
       border: none;
-      border-radius: var(--fd-radius-lg);
+      border-radius: var(--fd-radius-dialog);
       background: var(--fd-surface);
       color: var(--fd-text);
       box-shadow: var(--fd-shadow-dialog);
@@ -4247,35 +4540,80 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-dialog-head {
       display: flex;
+      flex: none;
       align-items: flex-start;
-      justify-content: space-between;
       gap: var(--fd-space-3);
-      padding: var(--fd-space-3) var(--fd-space-4);
+      padding: var(--fd-space-4) var(--fd-space-6) var(--fd-space-3);
       border-bottom: 1px solid var(--fd-divider);
+    }
+
+    .fd-dialog-title {
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
     .fd-dialog-head h2 {
       margin: 0;
-      font-size: 1.15rem;
+      font-size: var(--ha-font-size-xl, 1.5rem);
       font-weight: 500;
+      line-height: var(--fd-line-height-heading, 1.2);
+    }
+
+    .fd-dialog-close {
+      margin-inline-start: calc(-1 * var(--fd-space-2));
+    }
+
+    .fd-dialog-form {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      min-height: 0;
     }
 
     .fd-dialog-body {
       display: flex;
       flex: 1;
       flex-direction: column;
-      gap: var(--fd-space-4);
-      padding: var(--fd-space-4);
+      gap: var(--fd-space-3);
+      padding: 0 var(--fd-space-6) var(--fd-space-6);
       overflow-y: auto;
     }
 
     .fd-dialog-foot {
       display: flex;
+      flex: none;
       flex-wrap: wrap;
       justify-content: flex-end;
-      gap: var(--fd-space-2);
-      padding: var(--fd-space-3) var(--fd-space-4);
+      gap: var(--fd-space-3);
+      padding: var(--fd-space-4);
       border-top: 1px solid var(--fd-divider);
+    }
+
+    .fd-dialog--shake {
+      animation: fd-shake var(--fd-duration-normal) ease-in-out;
+    }
+
+    @keyframes fd-shake {
+      0%,
+      100% {
+        transform: translateX(0);
+      }
+
+      20% {
+        transform: translateX(-6px);
+      }
+
+      40% {
+        transform: translateX(6px);
+      }
+
+      60% {
+        transform: translateX(-4px);
+      }
+
+      80% {
+        transform: translateX(4px);
+      }
     }
 
     /* Katalogimport -------------------------------------------------------- */
@@ -4523,7 +4861,7 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-toast {
       max-width: min(560px, calc(100vw - 32px));
       padding: 10px 18px;
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-accent);
       color: var(--fd-on-accent);
       box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
@@ -4577,11 +4915,10 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .fd-spinner {
-        animation: none;
-      }
-
-      * {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
         transition: none !important;
       }
     }

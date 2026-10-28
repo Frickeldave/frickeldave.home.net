@@ -145,6 +145,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     };
 
     this._toast = null;
+    this._roleDialogSnapshot = "";
+    this._roleShakeTimer = undefined;
 
     this._forwardAvailable = false;
     this._awaitingForwardPopstate = false;
@@ -183,6 +185,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
     this._controllers.clear();
     clearTimeout(this._toastTimer);
+    clearTimeout(this._roleShakeTimer);
     window.removeEventListener("popstate", this._onPopState);
   }
 
@@ -509,8 +512,12 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   /* --------------------------------------------------------------------- */
 
   _captureFocus() {
-    const active = this.renderRoot?.activeElement;
-    this._focusReturn = active && typeof active.focus === "function" ? active : null;
+    try {
+      const active = this.renderRoot?.activeElement;
+      this._focusReturn = active && typeof active.focus === "function" ? active : null;
+    } catch {
+      this._focusReturn = null;
+    }
   }
 
   _restoreFocus() {
@@ -576,7 +583,9 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       rightSelection: [],
       busy: false,
       error: "",
+      shake: false,
     };
+    this._roleDialogSnapshot = this._roleDialogState();
   }
 
   _openEditDialog(user) {
@@ -595,17 +604,54 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       rightSelection: [],
       busy: false,
       error: "",
+      shake: false,
     };
+    this._roleDialogSnapshot = this._roleDialogState();
   }
 
-  _closeRoleDialog() {
+  _roleDialogState() {
+    const dialog = this._roleDialog;
+    if (!dialog) {
+      return "";
+    }
+    return JSON.stringify({ userId: dialog.userId, roles: dialog.roles });
+  }
+
+  _roleDialogHasChanges() {
+    return Boolean(this._roleDialog) && this._roleDialogSnapshot !== this._roleDialogState();
+  }
+
+  _shakeRoleDialog() {
+    if (!this._roleDialog) {
+      return;
+    }
+    clearTimeout(this._roleShakeTimer);
+    this._updateRoleDialog({ shake: true });
+    this._roleShakeTimer = setTimeout(() => {
+      if (this._roleDialog) {
+        this._updateRoleDialog({ shake: false });
+      }
+    }, 600);
+  }
+
+  _closeRoleDialog({ force = false } = {}) {
     if (this._roleDialog?.busy) {
       return;
     }
+    if (!force && this._roleDialogHasChanges()) {
+      this._shakeRoleDialog();
+      return;
+    }
+    clearTimeout(this._roleShakeTimer);
+    this._roleDialogSnapshot = "";
     this._roleDialog = null;
     this._addUserFilter = "";
     this._addUserSelection = "";
     this._restoreFocus();
+  }
+
+  _discardRoleDialog() {
+    this._closeRoleDialog({ force: true });
   }
 
   _updateRoleDialog(patch) {
@@ -1080,7 +1126,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     if (!this._usersLoading && !this._usersError && this._data.users.length === 0) {
       return html`
         <div class="fd-empty-state">
-          <p>Noch keine Benutzer freigegeben.</p>
+          <h3>Noch keine Benutzer freigegeben</h3>
           <p class="fd-muted fd-small">
             Fügen Sie über „Benutzer hinzufügen“ einen Home-Assistant-Benutzer hinzu.
           </p>
@@ -1182,7 +1228,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     return html`
       <dialog
         id="fd-role-dialog"
-        class="fd-dialog"
+        class="fd-dialog${dialog.shake ? " fd-dialog--shake" : ""}"
         aria-labelledby="fd-role-dialog-title"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closeRoleDialog())}
         @click=${(event) => {
@@ -1192,7 +1238,17 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <div>
+          <button
+            type="button"
+            class="fd-icon-button fd-dialog-close"
+            @click=${() => this._closeRoleDialog()}
+            ?disabled=${dialog.busy}
+            aria-label="Dialog schließen"
+            title="Dialog schließen"
+          >
+            ✕
+          </button>
+          <div class="fd-dialog-title">
             <h2 id="fd-role-dialog-title">${title}</h2>
             <p class="fd-muted fd-small">
               ${isAdd
@@ -1200,20 +1256,16 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                 : "Rollen des freigegebenen Benutzers anpassen."}
             </p>
           </div>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeRoleDialog()}
-            aria-label="Dialog schließen"
-            ?disabled=${dialog.busy}
-          >
-            ✕
-          </button>
         </div>
 
         <div class="fd-dialog-body">
           ${dialog.error
             ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>`
+            : ""}
+          ${dialog.shake
+            ? html`<p class="fd-hint" role="status" aria-live="polite">
+                Nicht gespeicherte Änderungen. Mit „Abbrechen“ verwerfen.
+              </p>`
             : ""}
 
           ${isAdd ? this._renderAddUserPicker(dialog, availableUsers, hasAvailable) : this._renderFixedUser(dialog)}
@@ -1285,8 +1337,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         <div class="fd-dialog-foot">
           <button
             type="button"
-            class="fd-button"
-            @click=${() => this._closeRoleDialog()}
+            class="fd-button fd-button--plain"
+            @click=${() => this._discardRoleDialog()}
             ?disabled=${dialog.busy}
           >
             Abbrechen
@@ -1296,6 +1348,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             class="fd-button fd-button--primary"
             @click=${() => this._saveRoleDialog()}
             ?disabled=${saveDisabled}
+            aria-busy=${dialog.busy ? "true" : "false"}
           >
             ${dialog.busy ? "Speichern …" : "Speichern"}
           </button>
@@ -1326,12 +1379,16 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         />
       </div>
       <div class="fd-field">
-        <label class="fd-label" for="fd-add-user-select">Home-Assistant-Benutzer</label>
+        <label class="fd-label" for="fd-add-user-select">
+          Home-Assistant-Benutzer <span class="fd-required" aria-hidden="true">*</span>
+        </label>
         <select
           id="fd-add-user-select"
           class="fd-input fd-select"
           size="6"
           data-autofocus
+          required
+          aria-required="true"
           ?disabled=${dialog.busy}
           @change=${(event) => this._onAddUserChange(event)}
         >
@@ -1379,6 +1436,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         id="fd-delete-dialog"
         class="fd-dialog fd-dialog--narrow"
         aria-labelledby="fd-delete-dialog-title"
+        aria-describedby="fd-delete-dialog-description"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closeDeleteDialog())}
         @click=${(event) => {
           if (event.target === event.currentTarget && !dialog.busy) {
@@ -1387,22 +1445,16 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         }}
       >
         <div class="fd-dialog-head">
-          <h2 id="fd-delete-dialog-title">Benutzer entfernen</h2>
-          <button
-            type="button"
-            class="fd-icon-button"
-            @click=${() => this._closeDeleteDialog()}
-            aria-label="Dialog schließen"
-            ?disabled=${dialog.busy}
-          >
-            ✕
-          </button>
+          <div class="fd-dialog-title">
+            <h2 id="fd-delete-dialog-title">Benutzer entfernen</h2>
+            <p class="fd-muted fd-small">Die Freigabe kann jederzeit wieder hinzugefügt werden.</p>
+          </div>
         </div>
         <div class="fd-dialog-body">
           ${dialog.error
             ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>`
             : ""}
-          <p>
+          <p id="fd-delete-dialog-description">
             Soll die Freigabe für <strong>${dialog.name}</strong> wirklich entfernt werden? Der
             Benutzer verliert damit den Zugriff auf den Frickeldave Store.
           </p>
@@ -1410,7 +1462,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         <div class="fd-dialog-foot">
           <button
             type="button"
-            class="fd-button"
+            class="fd-button fd-button--plain"
             data-autofocus
             @click=${() => this._closeDeleteDialog()}
             ?disabled=${dialog.busy}
@@ -1422,6 +1474,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             class="fd-button fd-button--danger"
             @click=${() => this._confirmDelete()}
             ?disabled=${dialog.busy}
+            aria-busy=${dialog.busy ? "true" : "false"}
           >
             ${dialog.busy ? "Entfernen …" : "Entfernen"}
           </button>
@@ -1522,7 +1575,12 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
           <div class="fd-field fd-field--full">
             <div class="fd-inline-actions">
-              <button type="submit" class="fd-button fd-button--primary" ?disabled=${ai.saving || ai.loading}>
+              <button
+                type="submit"
+                class="fd-button fd-button--primary"
+                ?disabled=${ai.saving || ai.loading}
+                aria-busy=${ai.saving ? "true" : "false"}
+              >
                 ${ai.saving ? "Speichern …" : "Speichern"}
               </button>
               <span class="fd-status ${keySet ? "fd-status--ok" : "fd-status--warn"}">
@@ -1551,47 +1609,74 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     :host {
       display: block;
       min-height: 100%;
-      color: var(--primary-text-color, #212121);
-      background-color: var(--primary-background-color, transparent);
+      color: var(--ha-color-text-primary, var(--primary-text-color, #212121));
+      background-color: var(--ha-color-surface-lower, var(--primary-background-color, transparent));
       font-family: var(
-        --paper-font-body1_-_font-family,
-        var(--ha-font-family-body, Roboto, "Helvetica Neue", Arial, sans-serif)
+        --ha-font-family-body,
+        var(--paper-font-body1_-_font-family, Roboto, "Helvetica Neue", Arial, sans-serif)
       );
       font-size: var(--ha-font-size-m, 14px);
-      line-height: 1.5;
+      line-height: var(--fd-line-height, 1.6);
 
-      --fd-space-1: 4px;
-      --fd-space-2: 8px;
-      --fd-space-3: 12px;
-      --fd-space-4: 16px;
-      --fd-space-6: 24px;
-      --fd-space-8: 32px;
+      --fd-space-1: var(--ha-space-1, 4px);
+      --fd-space-2: var(--ha-space-2, 8px);
+      --fd-space-3: var(--ha-space-3, 12px);
+      --fd-space-4: var(--ha-space-4, 16px);
+      --fd-space-6: var(--ha-space-6, 24px);
+      --fd-space-8: var(--ha-space-8, 32px);
 
-      --fd-radius-lg: var(--ha-card-border-radius, 12px);
-      --fd-radius: var(--ha-card-border-radius, 12px);
-      --fd-radius-sm: 8px;
+      --fd-radius-lg: var(--ha-border-radius-lg, var(--ha-card-border-radius, 12px));
+      --fd-radius: var(--ha-border-radius-md, 8px);
+      --fd-radius-sm: var(--ha-border-radius-md, 8px);
+      --fd-radius-pill: var(--ha-border-radius-pill, 999px);
+      --fd-radius-dialog: var(--ha-border-radius-xl, 16px);
 
-      --fd-surface: var(--ha-card-background, var(--card-background-color, #ffffff));
-      --fd-surface-alt: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
-      --fd-text: var(--primary-text-color, #212121);
-      --fd-text-muted: var(--secondary-text-color, #6b6b6b);
-      --fd-accent: var(--primary-color, #03a9f4);
-      --fd-on-accent: var(--text-primary-color, #ffffff);
-      --fd-error: var(--error-color, #c62828);
-      --fd-warning: var(--warning-color, #ff9800);
-      --fd-success: var(--success-color, #2e7d32);
-      --fd-divider: var(--divider-color, rgba(0, 0, 0, 0.12));
+      --fd-surface: var(--ha-color-surface-default, var(--card-background-color, #ffffff));
+      --fd-surface-alt: var(--ha-color-surface-low, var(--secondary-background-color, rgba(127, 127, 127, 0.08)));
+      --fd-text: var(--ha-color-text-primary, var(--primary-text-color, #212121));
+      --fd-text-muted: var(--ha-color-text-secondary, var(--secondary-text-color, #6b6b6b));
+      --fd-divider: var(--ha-color-border-neutral-quiet, var(--divider-color, rgba(0, 0, 0, 0.12)));
+      --fd-border-strong: var(--ha-color-border-neutral-normal, var(--fd-divider));
+      --fd-accent: var(--ha-color-fill-primary-loud-resting, var(--primary-color, #03a9f4));
+      --fd-accent-hover: var(--ha-color-fill-primary-loud-hover, var(--fd-accent));
+      --fd-accent-active: var(--ha-color-fill-primary-loud-active, var(--fd-accent));
+      --fd-on-accent: var(--ha-color-on-primary-loud, var(--text-primary-color, #ffffff));
+      --fd-accent-soft: var(--ha-color-fill-primary-normal-resting, var(--fd-surface-alt));
+      --fd-on-accent-soft: var(--ha-color-on-primary-normal, var(--fd-text));
+      --fd-neutral-soft: var(--ha-color-fill-neutral-normal-resting, var(--fd-surface-alt));
+      --fd-error: var(--ha-color-on-danger-quiet, var(--error-color, #c62828));
+      --fd-error-fill: var(--ha-color-fill-danger-quiet-resting, var(--fd-surface-alt));
+      --fd-error-border: var(--ha-color-border-danger-normal, var(--fd-error));
+      --fd-error-strong: var(--ha-color-fill-danger-loud-resting, var(--fd-error));
+      --fd-on-error-strong: var(--ha-color-on-danger-loud, #ffffff);
+      --fd-warning: var(--ha-color-on-warning-quiet, var(--warning-color, #ff9800));
+      --fd-warning-fill: var(--ha-color-fill-warning-quiet-resting, var(--fd-surface-alt));
+      --fd-warning-border: var(--ha-color-border-warning-normal, var(--fd-warning));
+      --fd-success: var(--ha-color-on-success-quiet, var(--success-color, #2e7d32));
+      --fd-success-fill: var(--ha-color-fill-success-quiet-resting, var(--fd-surface-alt));
+      --fd-success-border: var(--ha-color-border-success-normal, var(--fd-success));
       --fd-shadow: var(--ha-card-box-shadow, none);
       --fd-shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.35);
 
-      --fd-font-small: var(--ha-font-size-s, 13px);
-      --fd-focus-ring: 2px solid var(--fd-accent);
+      --fd-font-small: var(--ha-font-size-s, 12px);
+      --fd-focus: var(--ha-color-focus, var(--primary-color, #03a9f4));
+      --fd-focus-ring: 2px solid var(--fd-focus);
+      --fd-line-height: 1.6;
+      --fd-line-height-heading: 1.2;
+      --fd-duration-fast: var(--ha-animation-duration-fast, 150ms);
+      --fd-duration-normal: var(--ha-animation-duration-normal, 250ms);
     }
 
     *,
     *::before,
     *::after {
       box-sizing: border-box;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: var(--fd-line-height-heading, 1.2);
     }
 
     :where(button, input, select, textarea, [tabindex]):focus-visible {
@@ -1665,7 +1750,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
 
     .fd-bar-icon:hover:not(:disabled) {
-      background: var(--secondary-background-color, rgba(127, 127, 127, 0.16));
+      background: var(--ha-color-fill-neutral-quiet-hover, var(--secondary-background-color, rgba(127, 127, 127, 0.16)));
     }
 
     .fd-bar-icon:disabled {
@@ -1705,6 +1790,10 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       font: inherit;
       font-weight: 500;
       cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        border-color var(--fd-duration-fast),
+        color var(--fd-duration-fast);
     }
 
     .fd-tab:hover {
@@ -1778,8 +1867,14 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       text-align: center;
     }
 
+    .fd-empty-state h3 {
+      margin: 0 0 var(--fd-space-1);
+      font-size: var(--ha-font-size-l, 16px);
+      font-weight: 500;
+    }
+
     .fd-empty-state p {
-      margin: 0 0 4px;
+      margin: 0 0 var(--fd-space-1);
     }
 
     .fd-spinner {
@@ -1806,7 +1901,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       gap: var(--fd-space-2);
       list-style: none;
       margin: 0;
-      padding: 0;
+      padding: var(--fd-space-2) 0;
     }
 
     .fd-user-row {
@@ -1814,7 +1909,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       grid-template-columns: minmax(160px, 1.2fr) minmax(180px, 2fr) auto;
       align-items: center;
       gap: var(--fd-space-3);
-      padding: var(--fd-space-3);
+      min-height: 64px;
+      padding: var(--fd-space-2) var(--fd-space-3);
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius);
     }
@@ -1856,7 +1952,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       min-height: 26px;
       padding: 2px 10px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-surface-alt);
       color: var(--fd-text);
       font-size: var(--fd-font-small);
@@ -1869,6 +1965,10 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       color: var(--fd-text-muted);
       font-size: var(--fd-font-small);
       font-weight: 500;
+    }
+
+    .fd-required {
+      color: var(--fd-error);
     }
 
     .fd-hint {
@@ -1890,11 +1990,12 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       width: 100%;
       min-height: 44px;
       padding: 10px 12px;
-      border: 1px solid var(--fd-divider);
+      border: 1px solid var(--fd-border-strong);
       border-radius: var(--fd-radius-sm);
       background: var(--fd-surface);
       color: var(--fd-text);
       font: inherit;
+      transition: border-color var(--fd-duration-fast);
     }
 
     .fd-input:focus-visible {
@@ -1989,24 +2090,52 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
-      min-height: 44px;
-      padding: 8px 14px;
-      border: 1px solid var(--fd-divider);
-      border-radius: var(--fd-radius-sm);
-      background: var(--fd-surface);
+      gap: var(--fd-space-2);
+      min-height: 40px;
+      padding: 8px 16px;
+      border: 1px solid var(--fd-border-strong);
+      border-radius: var(--fd-radius-pill);
+      background: transparent;
       color: var(--fd-text);
       font: inherit;
+      font-size: var(--ha-font-size-m, 14px);
       cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        border-color var(--fd-duration-fast),
+        color var(--fd-duration-fast);
     }
 
     .fd-button:hover:not(:disabled) {
-      background: var(--fd-surface-alt);
+      background: var(--ha-color-fill-neutral-quiet-hover, var(--fd-surface-alt));
+    }
+
+    .fd-button:active:not(:disabled) {
+      background: var(--ha-color-fill-neutral-quiet-active, var(--fd-surface-alt));
     }
 
     .fd-button:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
+      cursor: default;
+      opacity: 0.5;
+    }
+
+    .fd-button[aria-busy="true"] {
+      position: relative;
+      color: transparent;
+    }
+
+    .fd-button[aria-busy="true"]::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 18px;
+      height: 18px;
+      margin: -9px 0 0 -9px;
+      border: 2px solid var(--fd-text);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: fd-spin 0.9s linear infinite;
     }
 
     .fd-button--primary {
@@ -2016,20 +2145,83 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
 
     .fd-button--primary:hover:not(:disabled) {
-      background: var(--fd-accent);
-      filter: brightness(1.08);
+      background: var(--fd-accent-hover);
+    }
+
+    .fd-button--primary:active:not(:disabled) {
+      background: var(--fd-accent-active);
+    }
+
+    .fd-button--filled {
+      border-color: transparent;
+      background: var(--fd-neutral-soft);
+      color: var(--fd-text);
+    }
+
+    .fd-button--plain {
+      border-color: transparent;
+      background: transparent;
+      color: var(--fd-text-muted);
+    }
+
+    .fd-button--plain:hover:not(:disabled) {
+      background: var(--fd-surface-alt);
+      color: var(--fd-text);
     }
 
     .fd-button--danger {
-      border-color: var(--fd-error);
-      color: var(--fd-error);
+      border-color: var(--fd-error-border);
       background: transparent;
+      color: var(--fd-error);
+    }
+
+    .fd-button--danger:hover:not(:disabled) {
+      background: var(--fd-error-fill);
+    }
+
+    .fd-button--danger-filled {
+      border-color: transparent;
+      background: var(--fd-error-strong);
+      color: var(--fd-on-error-strong);
+    }
+
+    .fd-button--primary[aria-busy="true"]::after,
+    .fd-button--danger-filled[aria-busy="true"]::after {
+      border-color: var(--fd-on-accent);
+      border-top-color: transparent;
+    }
+
+    .fd-button--danger[aria-busy="true"]::after {
+      border-color: var(--fd-error);
+      border-top-color: transparent;
+    }
+
+    .fd-button--success {
+      border-color: var(--fd-success-border);
+      background: transparent;
+      color: var(--fd-success);
+    }
+
+    .fd-button--success:hover:not(:disabled) {
+      background: var(--fd-success-fill);
     }
 
     .fd-button--small {
-      min-height: 30px;
-      padding: 4px 8px;
+      min-height: 32px;
+      padding: 4px 12px;
       font-size: var(--fd-font-small);
+    }
+
+    .fd-button--xs {
+      min-height: 24px;
+      padding: 2px 8px;
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-button--large {
+      min-height: 48px;
+      padding: 8px 16px;
+      font-size: var(--ha-font-size-l, 16px);
     }
 
     .fd-icon-button {
@@ -2071,27 +2263,59 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     /* Banner und Status --------------------------------------------------- */
 
     .fd-banner {
+      position: relative;
       display: flex;
       flex-wrap: wrap;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: var(--fd-space-2);
-      padding: var(--fd-space-3);
+      padding: var(--fd-space-3) var(--fd-space-3) var(--fd-space-3) var(--fd-space-8);
+      border: 1px solid var(--fd-divider);
       border-left: 4px solid var(--fd-divider);
       border-radius: var(--fd-radius);
       background: var(--fd-surface-alt);
     }
 
+    .fd-banner::before {
+      content: "";
+      position: absolute;
+      inset-inline-start: var(--fd-space-3);
+      top: var(--fd-space-3);
+      width: 18px;
+      height: 18px;
+      background-color: var(--fd-text);
+      mask: var(--fd-banner-icon) center / contain no-repeat;
+      -webkit-mask: var(--fd-banner-icon) center / contain no-repeat;
+    }
+
     .fd-banner--error {
-      border-left-color: var(--fd-error);
+      border-color: var(--fd-error-border);
+      background: var(--fd-error-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--error::before {
+      background-color: var(--fd-error);
     }
 
     .fd-banner--warning {
-      border-left-color: var(--fd-warning);
+      border-color: var(--fd-warning-border);
+      background: var(--fd-warning-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--warning::before {
+      background-color: var(--fd-warning);
     }
 
     .fd-banner--success {
-      border-left-color: var(--fd-success);
+      border-color: var(--fd-success-border);
+      background: var(--fd-success-fill);
+      --fd-banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z'/%3E%3C/svg%3E");
+    }
+
+    .fd-banner--success::before {
+      background-color: var(--fd-success);
     }
 
     .fd-inline-actions {
@@ -2104,7 +2328,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     .fd-status {
       padding: 4px 10px;
       border: 1px solid var(--fd-divider);
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       font-size: var(--fd-font-small);
     }
 
@@ -2123,7 +2347,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       max-height: calc(100vh - 48px);
       padding: 0;
       border: none;
-      border-radius: var(--fd-radius-lg);
+      border-radius: var(--fd-radius-dialog);
       background: var(--fd-surface);
       color: var(--fd-text);
       box-shadow: var(--fd-shadow-dialog);
@@ -2144,35 +2368,73 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     .fd-dialog-head {
       display: flex;
+      flex: none;
       align-items: flex-start;
-      justify-content: space-between;
       gap: var(--fd-space-3);
-      padding: var(--fd-space-3) var(--fd-space-4);
+      padding: var(--fd-space-4) var(--fd-space-6) var(--fd-space-3);
       border-bottom: 1px solid var(--fd-divider);
+    }
+
+    .fd-dialog-title {
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
     .fd-dialog-head h2 {
       margin: 0;
-      font-size: 1.15rem;
+      font-size: var(--ha-font-size-xl, 1.5rem);
       font-weight: 500;
+      line-height: var(--fd-line-height-heading, 1.2);
+    }
+
+    .fd-dialog-close {
+      margin-inline-start: calc(-1 * var(--fd-space-2));
     }
 
     .fd-dialog-body {
       display: flex;
       flex: 1;
       flex-direction: column;
-      gap: var(--fd-space-4);
-      padding: var(--fd-space-4);
+      gap: var(--fd-space-3);
+      padding: 0 var(--fd-space-6) var(--fd-space-6);
       overflow-y: auto;
     }
 
     .fd-dialog-foot {
       display: flex;
+      flex: none;
       flex-wrap: wrap;
       justify-content: flex-end;
-      gap: var(--fd-space-2);
-      padding: var(--fd-space-3) var(--fd-space-4);
+      gap: var(--fd-space-3);
+      padding: var(--fd-space-4);
       border-top: 1px solid var(--fd-divider);
+    }
+
+    .fd-dialog--shake {
+      animation: fd-shake var(--fd-duration-normal) ease-in-out;
+    }
+
+    @keyframes fd-shake {
+      0%,
+      100% {
+        transform: translateX(0);
+      }
+
+      20% {
+        transform: translateX(-6px);
+      }
+
+      40% {
+        transform: translateX(6px);
+      }
+
+      60% {
+        transform: translateX(-4px);
+      }
+
+      80% {
+        transform: translateX(4px);
+      }
     }
 
     /* Toast --------------------------------------------------------------- */
@@ -2190,7 +2452,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     .fd-toast {
       max-width: min(560px, calc(100vw - 32px));
       padding: 10px 18px;
-      border-radius: 999px;
+      border-radius: var(--fd-radius-pill);
       background: var(--fd-accent);
       color: var(--fd-on-accent);
       box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
@@ -2253,11 +2515,10 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .fd-spinner {
-        animation: none;
-      }
-
-      * {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
         transition: none !important;
       }
     }

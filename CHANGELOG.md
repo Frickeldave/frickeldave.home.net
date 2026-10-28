@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-28
+
+### Changed
+
+- **Design-Review nach der offiziellen Home-Assistant-Design-Dokumentation:**
+  semantische `--ha-color-*`-Tokens (mit Legacy-Fallbacks für ältere HA-Versionen),
+  Typografie-, Spacing-, Radius- und Motion-Tokens, HA-Button-Größen und -Varianten,
+  Dialog-Anatomie (Schließen oben links, Footer unten rechts, destruktive
+  Bestätigungen mit Fokus auf „Abbrechen“), Listen- und Formular-Patterns,
+  Empty-/Loading-/Error-Zustände, UI-Text (Erstellen/Hinzufügen,
+  Entfernen/Löschen, Archivieren), Fokusringe und Reduced Motion.
+- Produkte werden weiterhin ausschließlich archiviert (kein Hard-Delete);
+  dauerhaft gelöscht werden nur Dateien und Tags.
+
 ## [0.1.6] - 2026-10-28
 
 ### Changed
