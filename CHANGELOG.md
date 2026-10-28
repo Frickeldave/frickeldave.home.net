@@ -6,6 +6,18 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-28
+
+### Fixed
+
+- **Panel-Module werden mit Versions-Query geladen:** Beide Module
+  (`frickeldave-store-panel.js`, `frickeldave-store-config-panel.js`) hängen jetzt
+  `?v=<VERSION>` an die URL an, damit Browser und Home Assistant nach einem
+  HACS-Update nicht die alte, gecachte Modulversion ausliefern. Bisher blieb nach
+  dem Update die alte Panel-Oberfläche sichtbar.
+- Die vollbreite App-Bar folgt automatisch aus dem aktualisierten Modul, sobald
+  der Cache nicht mehr greift.
+
 ## [0.1.7] - 2026-10-28
 
 ### Changed
