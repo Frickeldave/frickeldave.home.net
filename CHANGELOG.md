@@ -6,7 +6,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
-## [0.1.7] - 2026-10-28
+## [0.1.8] - 2026-10-28
+
+### Added
+
+- **Konfigurierbarer Speicherort (`data_path`) mit Migration:** Der Katalog liegt
+  wahlweise unter `config/frickeldave_store` (Standard), `/share/frickeldave_store`
+  oder `/media/frickeldave_store`. `share`/`media` sind vom Home-Assistant-Backup
+  ausgeschlossen; `config` bleibt der Standard und ist weiterhin im Backup enthalten.
+  Beim Wechsel werden Store-Datei, Bilder und Snapshots kopiert, die alte Kopie
+  bleibt erhalten; ein belegtes Ziel wird mit `409 conflict` abgelehnt. Freie Pfade
+  und fehlende Mounts werden mit einer klaren Meldung abgelehnt.
+- **Settings-API:** `GET /settings` liefert `storage` mit `data_path`,
+  `effective_path`, `backup_included`, `exclude_from_backup`, `paths` und `choices`;
+  `PATCH /settings` akzeptiert `{"storage": {"data_path": ...}}` und meldet
+  `reload_required`.
+- **Options-Flow:** Auswahlfeld `data_path` als Rückfallebene zum Konfigurationspanel.
+
 
 ### Changed
 

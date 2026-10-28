@@ -69,6 +69,9 @@ async def test_options_flow_schema_is_serialisable(
     users = _users_field(fields)
     assert users["type"] == "string"
     assert users["default"] == "user-1: product"
+    data_path = [field for field in fields if field.get("name") == "data_path"]
+    assert data_path, f"data_path field missing in serialised schema: {fields}"
+    assert data_path[0]["default"] == "config"
 
 
 async def test_config_flow_invalid_users_shows_error(

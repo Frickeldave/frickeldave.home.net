@@ -13,7 +13,12 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from . import FrickeldaveStoreRuntime, _async_apply_entry_config, runtime_for
+from . import (
+    FrickeldaveStoreRuntime,
+    _async_apply_entry_config,
+    async_set_data_path,
+    runtime_for,
+)
 from .ai import AIError
 from .const import (
     API_PREFIX,
@@ -39,6 +44,7 @@ from .permissions import (
     normalise_roles,
 )
 from .products import ProductFilter
+from .storage import data_path_from_entry, storage_payload
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -557,6 +563,19 @@ class UserView(HomeAssistantView):
             return _error_response(err)
 
 
+def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> dict[str, Any]:
+    """Gemeinsames Antwortformat für GET und PATCH ``/settings``."""
+
+    payload = runtime.store.public_settings()
+    payload["users"] = [
+        {"user_id": grant.user_id, "name": grant.name, "roles": list(grant.roles)}
+        for grant in runtime.permissions.grants().values()
+    ]
+    payload["export_path"] = str(runtime.export_path)
+    payload["storage"] = storage_payload(hass, data_path_from_entry(runtime.entry))
+    return payload
+
+
 class SettingsView(HomeAssistantView):
     name = "api:frickeldave_store:settings"
     url = f"{API_PREFIX}/settings"
@@ -565,33 +584,53 @@ class SettingsView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         try:
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
-            payload = runtime.store.public_settings()
-            payload["users"] = [
-                {"user_id": grant.user_id, "name": grant.name, "roles": list(grant.roles)}
-                for grant in runtime.permissions.grants().values()
-            ]
-            payload["export_path"] = str(runtime.export_path)
-            return web.json_response(payload)
+            return web.json_response(_settings_payload(_hass(request), runtime))
         except StoreError as err:
             return _error_response(err)
 
     async def patch(self, request: web.Request) -> web.Response:
         try:
+            hass = _hass(request)
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
             payload = await _json_body(request)
-            unknown = set(payload) - {"ai"}
+            unknown = set(payload) - {"ai", "storage"}
             if unknown:
                 raise ValidationError(
                     f"Unbekannte Felder: {', '.join(sorted(unknown))}. "
                     "Benutzerfreigaben werden über den Options-Flow verwaltet.",
                 )
+
             changes = dict(payload)
+            storage_changes = changes.pop("storage", None)
+            new_data_path: str | None = None
+            if storage_changes is not None:
+                if not isinstance(storage_changes, dict):
+                    raise ValidationError("storage muss ein Objekt sein.")
+                unknown_storage = set(storage_changes) - {"data_path"}
+                if unknown_storage:
+                    raise ValidationError(
+                        f"Unbekannte storage-Felder: {', '.join(sorted(unknown_storage))}"
+                    )
+                if "data_path" not in storage_changes:
+                    raise ValidationError("storage.data_path fehlt.")
+                new_data_path = str(storage_changes["data_path"])
+
             ai_changes = changes.get("ai")
             if isinstance(ai_changes, dict) and not ai_changes.get("api_key"):
                 ai_changes.pop("api_key", None)
             runtime.store.update_settings(changes)
             await runtime.store.async_save()
-            return web.json_response(runtime.store.public_settings())
+
+            reload_required = False
+            if new_data_path is not None:
+                entry = runtime.entry
+                if entry is None:  # pragma: no cover - Runtime ohne Entry nur in Tests
+                    raise NotLoadedError("Die Integration ist nicht eingerichtet.")
+                reload_required = await async_set_data_path(hass, entry, new_data_path)
+
+            response = _settings_payload(hass, runtime)
+            response["reload_required"] = reload_required
+            return web.json_response(response)
         except StoreError as err:
             return _error_response(err)
 

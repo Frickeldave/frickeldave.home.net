@@ -29,7 +29,8 @@
           "ai_model": "KI-Modell",
           "ai_api_key": "KI-API-Key",
           "ai_prompt": "Prompt für Beschreibungen",
-          "export_path": "Exportverzeichnis (relativ zu config/)"
+          "export_path": "Exportverzeichnis (relativ zu config/)",
+          "data_path": "Speicherort der Daten"
         },
         "data_description": {
           "users": "Eine Zeile pro Benutzer, zum Beispiel `ha_user_id: product,finance,app_admin`.",
@@ -37,12 +38,15 @@
           "ai_model": "Standard: deepseek-flash (akzeptiert Bilder).",
           "ai_api_key": "Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um den gespeicherten Key zu behalten.",
           "ai_prompt": "Initial: „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“",
-          "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis."
+          "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis.",
+          "data_path": "config: im Home-Assistant-Backup enthalten (Standard). share/media: vom Backup ausgeschlossen, separates Backup nötig; das Verzeichnis muss eingebunden sein."
         }
       }
     },
     "error": {
-      "invalid_users": "Ungültige Freigaben. Eine Zeile pro Benutzer im Format `ha_user_id: role,role` mit den Rollen product, finance oder app_admin."
+      "invalid_users": "Ungültige Freigaben. Eine Zeile pro Benutzer im Format `ha_user_id: role,role` mit den Rollen product, finance oder app_admin.",
+      "invalid_data_path": "Der Speicherort ist nicht verfügbar oder nicht beschreibbar. Für share/media muss das Verzeichnis als Volume eingebunden sein.",
+      "target_not_empty": "Im Zielordner liegen bereits Katalogdaten. Bitte leeren oder einen anderen Speicherort wählen."
     }
   }
 }

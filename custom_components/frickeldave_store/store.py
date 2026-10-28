@@ -1,9 +1,10 @@
 """Persistenzschicht: HA-Store, Bildablage, Migrationen und Snapshots.
 
-Metadaten liegen als JSON unter ``config/frickeldave_store/`` (HA-``Store``-Helper,
-atomar, versioniert). Bilder liegen als Dateien unter
-``config/frickeldave_store/images/<artikelnummer>/``. Beide Pfade sind Teil des
-HA-Container-Backups.
+Metadaten liegen als JSON unter ``<data_dir>/frickeldave_store.data`` (HA-``Store``-
+Helper, atomar, versioniert), Bilder unter ``<data_dir>/images/<artikelnummer>/``
+und Snapshots unter ``<data_dir>/backups/``. ``data_dir`` wird von
+:mod:`custom_components.frickeldave_store.storage` aufgelöst und ist standardmäßig
+``config/frickeldave_store`` (im HA-Backup enthalten).
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from .const import (
     IMAGES_DIR_NAME,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
-    STORAGE_PATH,
     STORAGE_VERSION,
 )
 from .models import (
@@ -208,14 +208,15 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 class HassStoreBackend:
     """HA-``Store``-Backend mit Migration und Snapshot vor der Migration."""
 
-    def __init__(self, hass: Any, snapshot_dir: Path) -> None:
+    def __init__(self, hass: Any, data_dir: Path, snapshot_dir: Path) -> None:
         self._hass = hass
+        self._data_dir = Path(data_dir)
         self._snapshot_dir = snapshot_dir
         self._store = self._build_store()
 
     @property
     def path(self) -> Path:
-        return Path(self._hass.config.path(STORAGE_PATH, STORAGE_KEY))
+        return self._data_dir / STORAGE_KEY
 
     def _build_store(self) -> Any:
         # Import im Methodenkörper: Tests und das Export-CLI nutzen die reine Dateiablage.
@@ -224,7 +225,7 @@ class HassStoreBackend:
         from homeassistant.helpers.storage import Store
 
         backend = self
-        storage_path = Path(self._hass.config.path(STORAGE_PATH))
+        storage_path = self._data_dir
         storage_file = storage_path / STORAGE_KEY
         supports_path = "path" in inspect.signature(Store.__init__).parameters
 
@@ -378,7 +379,7 @@ class CatalogStore:
             if hass is None:
                 backend = FileBackend(self.data_dir / STORAGE_KEY)
             else:
-                backend = HassStoreBackend(hass, self.backup_dir)
+                backend = HassStoreBackend(hass, self.data_dir, self.backup_dir)
         self._backend = backend
         self._data: dict[str, Any] = new_payload()
         self._lock = asyncio.Lock()

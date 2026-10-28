@@ -52,6 +52,7 @@ Die stabile HA-Benutzer-ID findet man in Home Assistant unter **Einstellungen �
 | Option | Bedeutung |
 | --- | --- |
 | `users` | Freigaben im Format `<ha_user_id>: role,role` |
+| `data_path` | Datenordner: `config` (Standard, im Backup), `share` oder `media` (vom Backup ausgeschlossen) |
 | `ai_endpoint` | Vollständige URL der Chat-Completions-API (Standard: DeepSeek) |
 | `ai_model` | Modellname, Standard `deepseek-flash` (akzeptiert Bilder) |
 | `ai_api_key` | Zugangsschlüssel; wird nie zurückgegeben, geloggt oder exportiert |
@@ -107,16 +108,32 @@ fehlt eine Datei, bleiben Integration und API vollständig funktionsfähig.
 
 ## Daten, Speicherort und Backup
 
-| Inhalt | Pfad |
+Der Datenordner ist über `data_path` wählbar: `config` (Standard),
+`share` oder `media`. Freie Pfade werden abgelehnt; fehlt der Mount, schlägt
+die Auswahl mit einer klaren Meldung fehl.
+
+| Inhalt | Pfad bei `data_path = config` |
 | --- | --- |
 | Metadaten (JSON) | `config/frickeldave_store/frickeldave_store.data` |
 | Bilder | `config/frickeldave_store/images/<artikelnummer>/<artikelnummer>-NN.jpg` |
 | Snapshots vor Migration | `config/frickeldave_store/backups/` |
 | Export (konfigurierbar) | `config/frickeldave_store/export/public/data/handmade.json` und `src/assets/handmade/` |
 
-Alle Pfade liegen unter `config/` und sind damit in Home-Assistant-Container-Backups
-enthalten. Schreibvorgänge sind atomar (temporäre Datei + `os.replace`), Datei-I/O läuft
-im Executor. Details: [docs/backup-restore.md](docs/backup-restore.md).
+Bei `share` bzw. `media` liegt derselbe Aufbau unter
+`/share/frickeldave_store/` bzw. `/media/frickeldave_store/`.
+
+**Backup:** Ein HA-Backup mit „Home Assistant settings“ archiviert das gesamte
+Config-Verzeichnis und damit `config/frickeldave_store` automatisch. Eine Ausnahme
+für einzelne Unterordner ist in HA nicht möglich. Wer den Katalog nicht im
+HA-Backup haben will, wählt `share` oder `media` und sichert den Ordner selbst
+(Docker: Volume für `/share` bzw. `/media` einbinden). Der Exportpfad ist davon
+unabhängig und kann ebenfalls außerhalb von `config` liegen.
+
+Beim Wechsel werden Store-Datei, Bilder und Snapshots kopiert; der alte Ordner
+bleibt als Sicherheitskopie erhalten. Ist der Zielordner bereits belegt, bricht
+der Wechsel mit `409 conflict` ab. Schreibvorgänge sind atomar (temporäre Datei +
+`os.replace`), Datei-I/O läuft im Executor.
+Details: [docs/backup-restore.md](docs/backup-restore.md).
 
 ## Katalogexport
 
@@ -222,6 +239,14 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`, `in_cabinet`, `visibility=visible|invisible`, `archived`,
 `sort=name|price`, `order=asc|desc`, `limit`, `offset`.
+
+`GET /settings` liefert neben `ai`, `users` und `export_path` den Abschnitt
+`storage` mit `data_path`, `effective_path`, `backup_included`,
+`exclude_from_backup`, `paths` (Metadaten, Bilder, Snapshots) und `choices`.
+`PATCH /settings` akzeptiert `{"ai": {...}}` und `{"storage": {"data_path":
+"config|share|media"}}`; nach einer erfolgreichen Migration enthält die Antwort
+`"reload_required": true`. Ungültige Werte oder unbekannte Felder → `400`, ein
+belegtes Ziel → `409`.
 
 `GET /users` liefert `users` (Freigaben mit `user_id`, `name`, `roles`, `role_labels`),
 `available_users` (aktive, noch nicht freigegebene HA-Benutzer – nur ID und Name) sowie

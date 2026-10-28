@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover - HA <= 2026.9
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     CONFIG_ENTRY_TITLE,
@@ -30,6 +35,13 @@ from .const import (
 )
 from .models import StoreError
 from .permissions import format_user_grants, parse_user_grants
+from .storage import (
+    DATA_PATH_CONFIG,
+    DATA_PATH_LABELS,
+    DATA_PATH_VALUES,
+    data_path_from_entry,
+    normalise_data_path,
+)
 
 VERSION = 1
 MINOR_VERSION = 1
@@ -61,6 +73,7 @@ class FrickeldaveStoreConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[cal
                     data={"users": users},
                     options={
                         "users": users,
+                        "data_path": DATA_PATH_CONFIG,
                         "ai_endpoint": DEFAULT_AI_ENDPOINT,
                         "ai_model": DEFAULT_AI_MODEL,
                         "ai_prompt": DEFAULT_AI_PROMPT,
@@ -101,6 +114,7 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         entry = self.entry
         current = {**entry.data, **entry.options}
+        current_data_path = data_path_from_entry(entry)
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -109,24 +123,46 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
             except StoreError:
                 errors["users"] = "invalid_users"
             else:
-                api_key = str(user_input.get("ai_api_key", "") or "")
-                options: dict[str, Any] = {
-                    "users": format_user_grants(grants),
-                    "ai_endpoint": str(user_input.get("ai_endpoint") or DEFAULT_AI_ENDPOINT),
-                    "ai_model": str(user_input.get("ai_model") or DEFAULT_AI_MODEL),
-                    "ai_prompt": str(user_input.get("ai_prompt") or DEFAULT_AI_PROMPT),
-                    "export_path": str(user_input.get("export_path") or DEFAULT_EXPORT_PATH),
-                }
-                if api_key:
-                    options["ai_api_key"] = api_key
+                try:
+                    data_path = normalise_data_path(user_input.get("data_path", current_data_path))
+                    from . import async_set_data_path
+
+                    # Migration vor dem Speichern: ein Konflikt wird im Formular gemeldet,
+                    # statt die Option auf einen fremden Ordner zu setzen.
+                    await async_set_data_path(self.hass, entry, data_path, persist=False)
+                except StoreError as err:
+                    errors["data_path"] = (
+                        "target_not_empty" if err.code == "conflict" else "invalid_data_path"
+                    )
                 else:
-                    # Leeres Feld behält den gespeicherten Key; er wird nie angezeigt.
-                    options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
-                return self.async_create_entry(title="", data=options)
+                    api_key = str(user_input.get("ai_api_key", "") or "")
+                    options: dict[str, Any] = {
+                        "users": format_user_grants(grants),
+                        "data_path": data_path,
+                        "ai_endpoint": str(user_input.get("ai_endpoint") or DEFAULT_AI_ENDPOINT),
+                        "ai_model": str(user_input.get("ai_model") or DEFAULT_AI_MODEL),
+                        "ai_prompt": str(user_input.get("ai_prompt") or DEFAULT_AI_PROMPT),
+                        "export_path": str(user_input.get("export_path") or DEFAULT_EXPORT_PATH),
+                    }
+                    if api_key:
+                        options["ai_api_key"] = api_key
+                    else:
+                        # Leeres Feld behält den gespeicherten Key; er wird nie angezeigt.
+                        options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
+                    return self.async_create_entry(title="", data=options)
 
         schema = schema_lib.Schema(
             {
                 schema_lib.Optional("users", default=str(current.get("users", ""))): str,
+                schema_lib.Optional("data_path", default=current_data_path): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            {"value": value, "label": DATA_PATH_LABELS[value]}
+                            for value in DATA_PATH_VALUES
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 schema_lib.Optional(
                     "ai_endpoint", default=str(current.get("ai_endpoint", DEFAULT_AI_ENDPOINT))
                 ): str,

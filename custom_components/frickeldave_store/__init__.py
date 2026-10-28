@@ -15,6 +15,7 @@ from homeassistant.helpers import config_validation as cv
 from .ai import AIService
 from .const import (
     CONFIG_ENTRY_TITLE,
+    DATA_DIR_NAME,
     DEFAULT_AI_ENDPOINT,
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
@@ -24,6 +25,15 @@ from .const import (
 from .models import StoreError
 from .permissions import PermissionManager, parse_user_grants
 from .products import ProductService
+from .storage import (
+    async_migrate_data_dir,
+    async_prepare_data_dir,
+    base_dir_for,
+    data_path_for_dir,
+    data_path_from_entry,
+    normalise_data_path,
+    resolve_data_dir,
+)
 from .store import CatalogStore, copy_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,6 +52,8 @@ class FrickeldaveStoreRuntime:
     permissions: PermissionManager
     ai: AIService
     export_path: Path
+    #: Ziel einer bereits durchgeführten Datenmigration (Reload steht noch aus).
+    migrated_to: Path | None = None
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -57,7 +69,16 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Config Entry laden: Store öffnen, Rechte anwenden, Panel registrieren."""
 
-    store = CatalogStore(hass)
+    data_path = data_path_from_entry(entry)
+    try:
+        data_dir = resolve_data_dir(hass, data_path)
+        await async_prepare_data_dir(hass, data_dir, base_dir_for(data_path))
+    except StoreError as err:
+        raise ConfigEntryError(
+            f"Frickeldave Store: Speicherort '{data_path}' ist nicht verfügbar: {err.message}"
+        ) from err
+
+    store = CatalogStore(hass, data_dir=data_dir)
     try:
         await store.async_load()
     except StoreError as err:
@@ -102,8 +123,12 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         return False
 
-    snapshot_dir = Path(hass.config.path(DOMAIN)) / "backups"
-    source = Path(hass.config.path(DOMAIN, "frickeldave_store.data"))
+    try:
+        data_dir = resolve_data_dir(hass, data_path_from_entry(entry))
+    except StoreError:  # pragma: no cover - defekte Option, Setup scheitert ohnehin
+        data_dir = Path(hass.config.path(DATA_DIR_NAME))
+    snapshot_dir = data_dir / "backups"
+    source = data_dir / "frickeldave_store.data"
     await hass.async_add_executor_job(
         copy_snapshot, source, snapshot_dir, f"pre-entry-migration-v{entry.version}"
     )
@@ -123,8 +148,93 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
     runtime = hass.data.get(DOMAIN)
     if not isinstance(runtime, FrickeldaveStoreRuntime):
         return
+    if await _async_handle_storage_change(hass, entry, runtime):
+        return
     await _async_apply_entry_config(hass, entry, runtime)
     _LOGGER.debug("Frickeldave Store: Optionen neu angewendet")
+
+
+async def _async_handle_storage_change(
+    hass: HomeAssistant, entry: ConfigEntry, runtime: FrickeldaveStoreRuntime
+) -> bool:
+    """Speicherort-Option übernehmen: kopieren, Options schreiben, Reload planen.
+
+    Gibt ``True`` zurück, wenn ein Reload aussteht (Aufrufer darf keine weiteren
+    Einstellungen auf den alten Store anwenden).
+    """
+
+    try:
+        value = data_path_from_entry(entry)
+        target = resolve_data_dir(hass, value)
+    except StoreError as err:
+        _LOGGER.error("Ungültiger Speicherort in den Optionen: %s", err.message)
+        await _async_revert_storage_option(hass, entry, runtime)
+        return False
+
+    if target == runtime.store.data_dir:
+        return False
+
+    if runtime.migrated_to != target:
+        try:
+            await runtime.store.async_save()
+            await async_prepare_data_dir(hass, target, base_dir_for(value))
+            await async_migrate_data_dir(hass, runtime.store.data_dir, target)
+        except StoreError as err:
+            _LOGGER.error("Speicherort '%s' nicht übernommen: %s", target, err.message)
+            await _async_revert_storage_option(hass, entry, runtime)
+            return False
+        runtime.migrated_to = target
+
+    hass.config_entries.async_schedule_reload(entry.entry_id)
+    _LOGGER.info("Frickeldave Store: Speicherort wechselt zu %s (Reload)", target)
+    return True
+
+
+async def _async_revert_storage_option(
+    hass: HomeAssistant, entry: ConfigEntry, runtime: FrickeldaveStoreRuntime
+) -> None:
+    """Option auf den tatsächlich geöffneten Datenordner zurücksetzen."""
+
+    current = data_path_for_dir(hass, runtime.store.data_dir)
+    options = dict(getattr(entry, "options", None) or {})
+    if options.get("data_path") == current:
+        return
+    options["data_path"] = current
+    hass.config_entries.async_update_entry(entry, options=options)
+
+
+async def async_set_data_path(
+    hass: HomeAssistant, entry: ConfigEntry, value: str, *, persist: bool = True
+) -> bool:
+    """Speicherort validieren, Daten kopieren und optional Option schreiben.
+
+    Gibt ``True`` zurück, wenn ein Reload erforderlich ist. Der alte Ordner bleibt
+    unverändert (manuelle Bereinigung).
+    """
+
+    normalised = normalise_data_path(value)
+    target = resolve_data_dir(hass, normalised)
+    await async_prepare_data_dir(hass, target, base_dir_for(normalised))
+
+    runtime = runtime_for(hass)
+    reload_required = False
+    if runtime is not None and target != runtime.store.data_dir:
+        if runtime.migrated_to != target:
+            await runtime.store.async_save()
+            await async_migrate_data_dir(hass, runtime.store.data_dir, target)
+            runtime.migrated_to = target
+        reload_required = True
+
+    updated = False
+    if persist:
+        options = dict(getattr(entry, "options", None) or {})
+        if options.get("data_path") != normalised:
+            options["data_path"] = normalised
+            hass.config_entries.async_update_entry(entry, options=options)
+            updated = True
+    if reload_required and persist and not updated:
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+    return reload_required
 
 
 async def _async_apply_entry_config(
@@ -180,6 +290,7 @@ __all__ = [
     "DOMAIN",
     "FrickeldaveStoreRuntime",
     "async_migrate_entry",
+    "async_set_data_path",
     "async_setup",
     "async_setup_entry",
     "async_unload_entry",

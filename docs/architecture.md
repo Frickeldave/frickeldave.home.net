@@ -22,6 +22,8 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
 - **`products.py`** – Fachlogik: Artikelnummern, Filter, Sortierung, Bilder, Buchungen.
 - **`store.py`** – Persistenz: HA-`Store` (atomar, versioniert), Bilddateien, Migrationen,
   Snapshots. Reine Dateiablage (`FileBackend`) für CLI und Tests ohne HA.
+- **`storage.py`** – Auflösung und Migration des Datenordners (`config`, `share`,
+  `media`), Schreibbarkeitsprüfung und Backup-Kennzeichnung für die API.
 - **`permissions.py`** – Rollen, Default Deny, Prüfung je Anfrage.
 - **`ai.py`** – Anbieter-Abstraktion, DeepSeek-Client, Metadaten-Bereinigung.
 - **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen).
@@ -76,8 +78,9 @@ und der Options-Flow bleibt als Rückfallebene funktionsfähig. Die Sicherheitsr
 
 | Entscheidung | Begründung |
 | --- | --- |
-| Metadaten über HA-`Store`, Datei unter `config/frickeldave_store/` | im Container-Backup enthalten, keine zusätzliche Datenbank, atomare Schreibvorgänge |
-| Bilder als Dateien unter `config/frickeldave_store/images/` | nicht in `.storage`, nicht in `/media` oder `/share`; Backup inklusive |
+| Metadaten über HA-`Store`, Datei unter `<data_dir>/frickeldave_store.data` | keine zusätzliche Datenbank, atomare Schreibvorgänge; `data_dir` ist konfigurierbar |
+| Bilder als Dateien unter `<data_dir>/images/` | nicht in `.storage`; Store-Datei und Bilder liegen immer gemeinsam |
+| Standard `data_path = config` | im Container-Backup enthalten; `share`/`media` sind bewusst vom Backup ausnehmbar |
 | Keine YAML-Konfiguration | Einrichtung ausschließlich über Config Flow; Einstellungen primär über das Konfigurationspanel, Options Flow als Rückfallebene |
 | `users`-Option bleibt Quelle der Wahrheit | Panel-UI und Options Flow schreiben dasselbe Format; sofortige Anwendung je Mutation |
 | `require_admin=False` | `require_admin` steuert nur die Sichtbarkeit, nie den Datenzugriff |
@@ -91,13 +94,73 @@ und der Options-Flow bleibt als Rückfallebene funktionsfähig. Die Sicherheitsr
 | Import-Quellen nur `https` + Host-Allowlist | verhindert SSRF über `source_url`/`image_base_url`; eigene Quellen nur für `app_admin` |
 | Bildimport über dasselbe `ImageStorage`-Layout | Panel, Export und Import teilen sich einen Bildbestand |
 
+## Speicherort und Backup-Ausschluss
+
+Die Option `data_path` bestimmt den Datenordner; erlaubt sind ausschließlich
+`config` (Standard), `share` und `media`. Freie Pfade werden abgelehnt.
+
+| Wert | Auflösung | Backup |
+| --- | --- | --- |
+| `config` | `hass.config.path("frickeldave_store")` | enthalten |
+| `share` | `/share/frickeldave_store` | ausgeschlossen |
+| `media` | `/media/frickeldave_store` | ausgeschlossen |
+
+`resolve_data_dir()` in `storage.py` löst den Wert auf; die Basis-Mounts sind
+modulweite Konstanten (`SHARE_ROOT`, `MEDIA_ROOT`), die Tests auf `tmp_path`
+setzen – echtes `/share`/`/media` wird nie berührt. Vor dem Speichern legt
+`ensure_data_dir_sync()` den Ordner an und prüft die Schreibbarkeit. Fehlt der
+Mount, schlägt das Setup mit `ConfigEntryError` fehl; es gibt **keinen** stillen
+Fallback auf `config`.
+
+`GET /settings` liefert den Abschnitt:
+
+```json
+{
+  "storage": {
+    "data_path": "config",
+    "effective_path": "/config/frickeldave_store",
+    "backup_included": true,
+    "exclude_from_backup": false,
+    "paths": [
+      {"label": "Metadaten", "path": "/config/frickeldave_store/frickeldave_store.data"},
+      {"label": "Bilder", "path": "/config/frickeldave_store/images"},
+      {"label": "Snapshots", "path": "/config/frickeldave_store/backups"}
+    ],
+    "choices": [
+      {"id": "config", "label": "Konfigurationsordner (config)", "description": "...", "backup_included": true}
+    ]
+  }
+}
+```
+
+`PATCH /settings` akzeptiert zusätzlich `{"storage": {"data_path": "share"}}`
+(unbekannte Felder → `400`). Nach einer erfolgreichen Migration antwortet die
+Route mit dem aktualisierten Payload und `"reload_required": true`.
+
+**Migration:** Sind alter und neuer Ordner verschieden, kopiert
+`migrate_data_sync()` Store-Datei, `images/` und `backups/` in den Zielordner.
+Ein Ziel mit vorhandener `frickeldave_store.data` oder nicht-leerem `images/`
+wird mit `409 conflict` abgelehnt. Die Quelle bleibt erhalten. Danach wird die
+Option über `hass.config_entries.async_update_entry` geschrieben und der Entry
+per `async_schedule_reload` neu geladen. Der Update-Listener erkennt zusätzlich
+Änderungen aus dem Options-Flow (`runtime.store.data_dir != resolve_data_dir()`),
+migriert idempotent (Marker `runtime.migrated_to`) und plant den Reload. Schlägt
+eine externe Änderung fehl, wird die Option auf den tatsächlich geöffneten
+Ordner zurückgesetzt, damit nie ein leerer Store geöffnet wird.
+
 ### Speicherort des HA-`Store`
 
 Der `Store`-Helper erhält den Schlüssel `frickeldave_store.data` (Version 1,
-Minor-Version 1). Ältere HA-Versionen (bis 2025.1) kennen keinen `path`-Parameter;
-dort überschreibt eine kleine Subclass die `path`-Property, sodass die Datei ebenfalls
-unter `config/frickeldave_store/` liegt. Ab HA-Versionen mit `path`-Parameter wird dieser
-direkt gesetzt. Der Dateiname und der Speicherort bleiben in beiden Fällen identisch.
+Minor-Version 1) und den aufgelösten `data_dir`-Pfad. Ältere HA-Versionen (bis
+2025.1) kennen keinen `path`-Parameter; dort überschreibt eine kleine Subclass
+die `path`-Property, sodass die Datei ebenfalls unter
+`<data_dir>/frickeldave_store.data` liegt. Ab HA-Versionen mit `path`-Parameter
+wird dieser direkt gesetzt. Der Dateiname bleibt in beiden Fällen identisch.
+
+Konsequenz für Backups: Home Assistant archiviert bei „Home Assistant settings“
+den gesamten Config-Ordner ohne Ausnahmen für Unterordner. `config` ist damit
+automatisch gesichert; `share`/`media` müssen separat gesichert werden
+(siehe [Backup & Restore](backup-restore.md)).
 
 ## Betriebsgrenzen
 

@@ -63,6 +63,7 @@ async def test_config_flow_creates_single_entry(hass: Any, enable_custom_integra
     entries = hass.config_entries.async_entries(DOMAIN)
     assert len(entries) == 1
     assert entries[0].state is ConfigEntryState.LOADED
+    assert entries[0].options["data_path"] == "config"
 
     runtime = hass.data[DOMAIN]
     assert isinstance(runtime, FrickeldaveStoreRuntime)
