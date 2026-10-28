@@ -6,6 +6,18 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-28
+
+### Changed
+
+- **Tags-Filter jetzt ODER-verknüpft**: Bei `GET /products` und den WebSocket-Filtern
+  genügt ein Produkt einem der gewählten Tags, statt alle erfüllen zu müssen; die
+  Verknüpfung entspricht damit der Kategorieauswahl. Groß-/Kleinschreibung bleibt
+  unerheblich, eine leere Tag-Auswahl filtert weiterhin nicht, und alle übrigen
+  Filter bleiben UND-verknüpft.
+- **Panel-Topbar**: Burger-Menü und Drei-Punkte-Menü ersetzen die bisherigen Tabs.
+  Einstellungen (KI) und Tag-Verwaltung liegen jetzt im Menü.
+
 ## [0.1.3] - 2026-10-27
 
 ### Added

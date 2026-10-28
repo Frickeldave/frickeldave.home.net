@@ -151,7 +151,8 @@ entfernt es aus allen Produkten und aktualisiert deren `updatedAt`.
 ## Filter- und Sortierregeln
 
 - `category` – Komma-Liste, **ODER**-Verknüpfung
-- `tags` – Komma-Liste, **UND**-Verknüpfung (case-insensitiv)
+- `tags` – Komma-Liste, **ODER**-Verknüpfung (case-insensitiv); ein Produkt genügt
+  einem der gewählten Tags
 - `search` – Teilstring über Name, Beschreibung, Artikelnummer und Tags
 - `customizable`, `in_stock` (`stock > 0`), `in_cabinet` (`salesCabinet > 0`),
   `visibility`, `archived` – jeweils **UND**

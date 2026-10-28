@@ -48,7 +48,7 @@ def generate_article_number(category: str) -> str:
 
 @dataclass(slots=True)
 class ProductFilter:
-    """Filter- und Sortierregeln (Kategorie ODER, Tags UND, Rest UND)."""
+    """Filter- und Sortierregeln (Kategorie ODER, Tags ODER, Rest UND)."""
 
     search: str = ""
     categories: list[str] = field(default_factory=list)
@@ -117,14 +117,14 @@ class ProductFilter:
 
 
 def product_matches(product: Product, filters: ProductFilter) -> bool:
-    """Alle Filterregeln anwenden (Kategorie ODER, Tags UND, übrige UND)."""
+    """Alle Filterregeln anwenden (Kategorie ODER, Tags ODER, übrige UND)."""
 
     if product.archived != filters.archived:
         return False
     if filters.categories and product.category not in filters.categories:
         return False
     product_tags = {tag.casefold() for tag in product.tags}
-    if filters.tags and not all(tag.casefold() in product_tags for tag in filters.tags):
+    if filters.tags and not any(tag.casefold() in product_tags for tag in filters.tags):
         return False
     if filters.search:
         needle = filters.search.casefold()

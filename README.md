@@ -193,7 +193,7 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | POST | `/export` (nur `app_admin`) |
 | POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
 
-Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = UND),
+Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`, `in_cabinet`, `visibility=visible|invisible`, `archived`,
 `sort=name|price`, `order=asc|desc`, `limit`, `offset`.
 

@@ -100,7 +100,7 @@ async def test_soft_delete_only(tmp_path: Path) -> None:
         await service.async_get(product.article_number)
 
 
-async def test_filters_category_or_tags_and_rest_and(tmp_path: Path) -> None:
+async def test_filters_category_or_tags_or_rest_and(tmp_path: Path) -> None:
     _, service = await _service(tmp_path)
     a = await _create(service, name="Lampe", category="LA", tags=["Deko", "Holz"], stock=1)
     b = await _create(service, name="Vase", category="EP", tags=["Deko"], stock=0)
@@ -116,9 +116,13 @@ async def test_filters_category_or_tags_and_rest_and(tmp_path: Path) -> None:
         c.article_number,
     }
 
-    tags_and, total = await service.async_list(ProductFilter(tags=["Deko", "Holz"]))
-    assert total == 1
-    assert tags_and[0].article_number == a.article_number
+    tags_or, total = await service.async_list(ProductFilter(tags=["Deko", "Holz"]))
+    assert total == 3
+    assert {item.article_number for item in tags_or} == {
+        a.article_number,
+        b.article_number,
+        c.article_number,
+    }
 
     combined, total = await service.async_list(
         ProductFilter(categories=["LA"], tags=["Holz"], in_stock=True)
@@ -133,6 +137,42 @@ async def test_filters_category_or_tags_and_rest_and(tmp_path: Path) -> None:
     search, total = await service.async_list(ProductFilter(search="vase"))
     assert total == 1
     assert search[0].article_number == b.article_number
+
+
+async def test_tag_filter_matches_any_selected_tag(tmp_path: Path) -> None:
+    _, service = await _service(tmp_path)
+    both = await _create(service, name="Beides", tags=["a", "b"], stock=1)
+    only_a = await _create(service, name="Nur A", tags=["a"], stock=1)
+    only_b = await _create(service, name="Nur B", tags=["B"], stock=1)
+    neither = await _create(service, name="Keins", tags=["c"], stock=1)
+
+    any_tag, total = await service.async_list(ProductFilter(tags=["a", "b"]))
+    assert total == 3
+    assert {item.article_number for item in any_tag} == {
+        both.article_number,
+        only_a.article_number,
+        only_b.article_number,
+    }
+    assert neither.article_number not in {item.article_number for item in any_tag}
+
+    single, total = await service.async_list(ProductFilter(tags=["b"]))
+    assert total == 2
+    assert {item.article_number for item in single} == {
+        both.article_number,
+        only_b.article_number,
+    }
+
+    without_stock = await _create(service, name="Ohne Bestand", category="EP", tags=["a"])
+    combined, total = await service.async_list(
+        ProductFilter(categories=["LA"], tags=["a", "b"], in_stock=True)
+    )
+    assert total == 3
+    assert {item.article_number for item in combined} == {
+        both.article_number,
+        only_a.article_number,
+        only_b.article_number,
+    }
+    assert without_stock.article_number not in {item.article_number for item in combined}
 
 
 async def test_sorting_is_stable_and_bidirectional(tmp_path: Path) -> None:
@@ -169,7 +209,11 @@ def test_filter_combination_semantics_directly() -> None:
     assert product_matches(product, ProductFilter(categories=["LA"]))
     assert not product_matches(product, ProductFilter(categories=["EP"]))
     assert product_matches(product, ProductFilter(tags=["holz", "HOCHZEIT"]))
-    assert not product_matches(product, ProductFilter(tags=["Holz", "Deko"]))
+    assert product_matches(product, ProductFilter(tags=["holz"]))
+    assert product_matches(product, ProductFilter(tags=["Deko", "Holz"]))
+    assert not product_matches(product, ProductFilter(tags=["Deko"]))
+    assert not product_matches(product, ProductFilter(tags=["Deko", "Metall"]))
+    assert not product_matches(product, ProductFilter(tags=["Metall"]))
     rules = ProductFilter(sort="name", order="asc")
     assert sort_products([product], rules.sort, rules.order) == [product]
 
