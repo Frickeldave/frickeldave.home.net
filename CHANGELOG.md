@@ -4,6 +4,42 @@ Alle nennenswerten Änderungen an diesem Projekt werden hier festgehalten.
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.1.17] - 2026-11-02
+
+### Changed
+
+- **Panel nutzt die generischen Feature-Routen (#289).** Publish und Import
+  senden jetzt an `POST /api/frickeldave_store/features/publish` bzw.
+  `.../features/import`. Die alten Pfade `/publish` und `/import/catalog`
+  verschwinden in 0.2.0 und werden nicht mehr verwendet; Payload, Antwort und
+  Normalisierung bleiben unverändert.
+- **Sichtbarkeit folgt dem Feature-Status (#289).** Die Topbar-Icons für
+  „Nach dev/prod veröffentlichen“ und „Katalog importieren“ erscheinen nur,
+  wenn die jeweilige Fähigkeit vorhanden ist. Ist sie vorhanden, aber nicht
+  verfügbar, bleibt das Icon dezent ausgegraut (`aria-disabled`, kein
+  `disabled`) und nennt die deutsche Begründung über `aria-describedby`; ein
+  Klick auf den fokussierbaren Button zeigt sie als Statusmeldung. Eine ältere
+  Basis ohne Feature-Angabe behält das bisherige Verhalten.
+- **Einstellungen-Tab „Veröffentlichen“ folgt dem Anbieter (#289).** Beim
+  eingebauten Fallback (`provider: frickeldave_store`) bleibt der Tab
+  unverändert. Meldet die Erweiterung `frickeldave_store_syncfd`, wird der Tab
+  ausgeblendet und ein Hinweis verweist auf Einstellungen → Geräte & Dienste →
+  Frickeldave Store Sync; dort wird das Token gepflegt, nie mehr im Basis-Panel.
+  Fehlt die Fähigkeit ganz, erscheint der Hinweis, dass die Synchronisation
+  nicht installiert ist.
+- **Live-Aktualisierung über `frickeldave_store_features_changed` (#289).**
+  Seiten- und Konfigurationspanel abonnieren das Event über
+  `hass.connection.subscribeEvents`, entprellen es und laden nur `/me`
+  (Seitenpanel) bzw. `/settings` (Konfigurationspanel) neu. Produktliste,
+  Filter und offene Dialoge bleiben unangetastet; nicht mehr verfügbare
+  Publish-/Import-Dialoge werden beendet. Die Subscription wird beim
+  Disconnect abgemeldet.
+- **Fehlerfälle der Feature-Routen (#289).** `feature_unavailable` (409) und
+  `not_registered` (404) zeigen die deutsche `error.message`;
+  `feature_unknown` erklärt, dass die Basis die Fähigkeit nicht kennt und die
+  Erweiterung vermutlich veraltet ist. Der Token-Hinweis nennt bei der
+  Erweiterung den Weg über Geräte & Dienste.
+
 ## [0.1.16] - 2026-11-02
 
 ### Added

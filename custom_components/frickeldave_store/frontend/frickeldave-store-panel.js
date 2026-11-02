@@ -26,6 +26,11 @@ const REQUEST_TIMEOUT_MS = 30000;
 // Der Katalogimport lädt Produkte und Bilder von der Website und darf länger laufen.
 const IMPORT_TIMEOUT_MS = 180000;
 
+// Event der Basis, sobald sich registrierte Erweiterungen ändern (Contract 1).
+const FEATURES_EVENT = "frickeldave_store_features_changed";
+// Fehler der generischen Feature-Route: deuten auf einen veralteten Stand hin.
+const FEATURE_ERROR_CODES = new Set(["feature_unavailable", "not_registered", "feature_unknown"]);
+
 const CATEGORY_LABELS = Object.freeze({
   "3D": "3D-Druck",
   EP: "Epoxidharz",
@@ -173,6 +178,33 @@ const productPath = (articleNumber) =>
 
 const toggleInList = (list, value) =>
   list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value];
+
+/**
+ * Feature-Status aus `/me`: `null` bedeutet, die Basis liefert die Angabe noch
+ * nicht (ältere Version). In diesem Fall bleibt das bisherige Verhalten aktiv.
+ */
+const normalizeFeatures = (raw) => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const features = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const contractVersion = Number(entry.contract_version);
+    features[name] = {
+      available: Boolean(entry.available),
+      reason: typeof entry.reason === "string" ? entry.reason.trim() : "",
+      provider: typeof entry.provider === "string" ? entry.provider : "",
+      contractVersion: Number.isFinite(contractVersion) ? contractVersion : 0,
+    };
+  }
+  return features;
+};
+
+const isFeatureError = (error) =>
+  error instanceof ApiError && FEATURE_ERROR_CODES.has(String(error.code || ""));
 
 const normalizeTagNames = (data) => {
   const raw = Array.isArray(data)
@@ -361,6 +393,7 @@ export class FrickeldaveStorePanel extends LitElement {
     _accessState: { state: true },
     _accessError: { state: true },
     _me: { state: true },
+    _features: { state: true },
 
     _menuOpen: { state: true },
     _filtersOpen: { state: true },
@@ -417,6 +450,11 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessState = "idle";
     this._accessError = "";
     this._me = null;
+    this._features = null;
+    this._featureUnsubscribe = null;
+    this._featureConnection = null;
+    this._featureSubscribing = false;
+    this._featuresTimer = undefined;
     this._menuOpen = false;
     this._filtersOpen = readStoredFiltersOpen();
 
@@ -498,6 +536,8 @@ export class FrickeldaveStorePanel extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
     this._detachMenuListeners();
+    this._unsubscribeFeatureEvents();
+    clearTimeout(this._featuresTimer);
     clearTimeout(this._searchTimer);
     clearTimeout(this._toastTimer);
     clearTimeout(this._editorShakeTimer);
@@ -544,6 +584,163 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _can(permission) {
     return Boolean(this._me?.can?.[permission]);
+  }
+
+  /**
+   * Status einer Fähigkeit. `legacy` kennzeichnet eine Basis ohne Feature-Angabe:
+   * dort bleibt die Fähigkeit nutzbar, damit ältere Versionen weiterlaufen.
+   */
+  _featureInfo(name) {
+    if (this._features === null) {
+      return {
+        legacy: true,
+        present: false,
+        available: true,
+        reason: "",
+        provider: "",
+        contractVersion: 0,
+      };
+    }
+    const feature = this._features?.[name];
+    if (!feature) {
+      return {
+        legacy: false,
+        present: false,
+        available: false,
+        reason: "",
+        provider: "",
+        contractVersion: 0,
+      };
+    }
+    return { legacy: false, present: true, ...feature };
+  }
+
+  _featureHint(info, fallback) {
+    return info.reason || `${fallback} ist derzeit nicht verfügbar.`;
+  }
+
+  _ensureFeatureSubscription() {
+    const connection = this.hass?.connection;
+    if (!connection || typeof connection.subscribeEvents !== "function" || !this._token()) {
+      return;
+    }
+    if (
+      this._featureConnection === connection &&
+      (this._featureSubscribing || this._featureUnsubscribe)
+    ) {
+      return;
+    }
+    this._unsubscribeFeatureEvents();
+    this._featureConnection = connection;
+    this._featureSubscribing = true;
+
+    let pending;
+    try {
+      pending = connection.subscribeEvents(
+        () => this._scheduleFeatureRefresh(),
+        FEATURES_EVENT,
+      );
+    } catch {
+      this._featureSubscribing = false;
+      this._featureConnection = null;
+      return;
+    }
+
+    Promise.resolve(pending)
+      .then((unsubscribe) => {
+        this._featureSubscribing = false;
+        if (this._featureConnection !== connection || !this.isConnected) {
+          if (typeof unsubscribe === "function") {
+            unsubscribe();
+          }
+          return;
+        }
+        this._featureUnsubscribe = unsubscribe;
+      })
+      .catch(() => {
+        this._featureSubscribing = false;
+      });
+  }
+
+  _unsubscribeFeatureEvents() {
+    this._featureSubscribing = false;
+    this._featureConnection = null;
+    const unsubscribe = this._featureUnsubscribe;
+    this._featureUnsubscribe = null;
+    if (typeof unsubscribe === "function") {
+      try {
+        unsubscribe();
+      } catch {
+        // Die Verbindung kann beim Trennen bereits geschlossen sein.
+      }
+    }
+  }
+
+  _scheduleFeatureRefresh() {
+    clearTimeout(this._featuresTimer);
+    this._featuresTimer = setTimeout(() => {
+      this._featuresTimer = undefined;
+      this._reloadFeatures();
+    }, 150);
+  }
+
+  /**
+   * Nur Identität und Fähigkeiten neu laden. Produktliste, Filter und offene
+   * Dialoge bleiben unangetastet; nicht mehr verfügbare Dialoge werden beendet.
+   */
+  async _reloadFeatures() {
+    if (!this.hass || !this._token() || this._accessState !== "ready") {
+      return;
+    }
+    try {
+      const me = await this._api(`${API_ROOT}/me`);
+      this._applyMe(me);
+
+      const publish = this._featureInfo("publish");
+      if (this._publishDialog && !this._publishDialog.busy && !publish.available) {
+        this._publishDialog = null;
+        this._restoreFocus();
+        this._showToast(this._featureHint(publish, "Veröffentlichen"));
+      }
+      const importFeature = this._featureInfo("import");
+      if (this._importDialog && !this._importDialog.busy && !importFeature.available) {
+        this._importDialog = null;
+        this._restoreFocus();
+        this._showToast(this._featureHint(importFeature, "Der Katalogimport"));
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        this._accessState = "denied";
+        this._accessError = this._errorText(error);
+        this._products = [];
+        this._total = 0;
+        this._allTags = [];
+      }
+    }
+  }
+
+  _applyMe(me) {
+    const user = me && typeof me === "object" ? me : {};
+    const can = {
+      product: Boolean(user?.can?.product),
+      finance: Boolean(user?.can?.finance),
+      app_admin: Boolean(user?.can?.app_admin),
+    };
+    this._me = {
+      userId: user.user_id || "",
+      name: typeof user.name === "string" ? user.name : this._me?.name || "",
+      roles: Array.isArray(user.roles)
+        ? user.roles.filter((role) => typeof role === "string")
+        : [],
+      can,
+      version: typeof user.version === "string" ? user.version : this._me?.version || "",
+    };
+    this._features = normalizeFeatures(user.features);
+    this._accessUserId = this.hass?.user?.id ?? null;
+    return can;
   }
 
   _httpFallbackMessage(status) {
@@ -694,6 +891,7 @@ export class FrickeldaveStorePanel extends LitElement {
       // Home Assistant liefert die Sitzung kurz nach dem ersten Render nach.
       return;
     }
+    this._ensureFeatureSubscription();
     if (this._accessState !== "idle") {
       return;
     }
@@ -708,6 +906,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessState = "idle";
     this._accessError = "";
     this._me = null;
+    this._features = null;
     this._products = [];
     this._total = 0;
     this._allTags = [];
@@ -730,19 +929,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessError = "";
     try {
       const me = await this._api(`${API_ROOT}/me`);
-      const can = {
-        product: Boolean(me?.can?.product),
-        finance: Boolean(me?.can?.finance),
-        app_admin: Boolean(me?.can?.app_admin),
-      };
-      this._me = {
-        userId: me?.user_id || "",
-        name: typeof me?.name === "string" ? me.name : "",
-        roles: Array.isArray(me?.roles) ? me.roles.filter((role) => typeof role === "string") : [],
-        can,
-        version: typeof me?.version === "string" ? me.version : "",
-      };
-      this._accessUserId = this.hass?.user?.id ?? null;
+      const can = this._applyMe(me);
 
       if (can.product || can.app_admin) {
         this._accessState = "ready";
@@ -773,18 +960,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     try {
       const me = await this._api(`${API_ROOT}/me`);
-      const can = {
-        product: Boolean(me?.can?.product),
-        finance: Boolean(me?.can?.finance),
-        app_admin: Boolean(me?.can?.app_admin),
-      };
-      this._me = {
-        userId: me?.user_id || "",
-        name: typeof me?.name === "string" ? me.name : this._me?.name || "",
-        roles: Array.isArray(me?.roles) ? me.roles.filter((role) => typeof role === "string") : [],
-        can,
-        version: typeof me?.version === "string" ? me.version : this._me?.version || "",
-      };
+      const can = this._applyMe(me);
       if (!can.product && !can.app_admin) {
         this._accessState = "denied";
         this._accessError = "";
@@ -2382,6 +2558,11 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!this._can("product")) {
       return;
     }
+    const feature = this._featureInfo("import");
+    if (!feature.available) {
+      this._showToast(this._featureHint(feature, "Der Katalogimport"));
+      return;
+    }
     this._captureFocus();
     this._importDialog = {
       phase: "confirm",
@@ -2434,7 +2615,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._importDialog = { ...dialog, previewLoading: true, previewError: "", error: "" };
 
     try {
-      const data = await this._api(`${API_ROOT}/import/catalog`, {
+      const data = await this._api(`${API_ROOT}/features/import`, {
         method: "POST",
         body: { dry_run: true, overwrite, import_images: true },
         timeoutMs: IMPORT_TIMEOUT_MS,
@@ -2461,6 +2642,9 @@ export class FrickeldaveStorePanel extends LitElement {
         preview: null,
         previewError: this._importErrorText(error),
       };
+      if (isFeatureError(error)) {
+        this._reloadFeatures();
+      }
       if (error instanceof ApiError && (error.status === 403 || error.status === 401)) {
         this._revalidateAccess();
       }
@@ -2478,8 +2662,29 @@ export class FrickeldaveStorePanel extends LitElement {
       .catch(() => {});
   }
 
+  _featureErrorText(error, action) {
+    if (!(error instanceof ApiError)) {
+      return "";
+    }
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    if (error.code === "feature_unavailable") {
+      return message || `${action} ist derzeit nicht verfügbar.`;
+    }
+    if (error.code === "not_registered") {
+      return message || `${action} ist nicht eingerichtet. Bitte die Erweiterung installieren.`;
+    }
+    if (error.code === "feature_unknown") {
+      return `${action} ist dieser Basis unbekannt. Vermutlich ist die Erweiterung veraltet; bitte Frickeldave Store und die Erweiterung aktualisieren.`;
+    }
+    return "";
+  }
+
   _importErrorText(error) {
     if (error instanceof ApiError) {
+      const featureText = this._featureErrorText(error, "Der Katalogimport");
+      if (featureText) {
+        return featureText;
+      }
       if (error.status === 403) {
         return "Keine Berechtigung für den Katalogimport.";
       }
@@ -2536,7 +2741,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._focusImport("#fd-import-status");
 
     try {
-      const data = await this._api(`${API_ROOT}/import/catalog`, {
+      const data = await this._api(`${API_ROOT}/features/import`, {
         method: "POST",
         body: {
           dry_run: false,
@@ -2573,6 +2778,9 @@ export class FrickeldaveStorePanel extends LitElement {
         result: null,
       };
       this._focusImport("#fd-import-error");
+      if (isFeatureError(error)) {
+        this._reloadFeatures();
+      }
       if (error instanceof ApiError && (error.status === 403 || error.status === 401)) {
         this._revalidateAccess();
       }
@@ -2936,6 +3144,10 @@ export class FrickeldaveStorePanel extends LitElement {
   _renderMain() {
     const canProduct = this._can("product");
     const canPublish = this._can("app_admin");
+    const publishFeature = this._featureInfo("publish");
+    const importFeature = this._featureInfo("import");
+    const showPublish = canPublish && (publishFeature.legacy || publishFeature.present);
+    const showImport = canProduct && (importFeature.legacy || importFeature.present);
 
     return html`
       <div class="fd-app">
@@ -2952,7 +3164,7 @@ export class FrickeldaveStorePanel extends LitElement {
             </svg>
           </button>
           <h1 id="fd-main-heading" class="fd-bar-title" tabindex="-1">Frickeldave Store</h1>
-          ${canProduct || canPublish
+          ${canProduct || showPublish
             ? html`
                 <div class="fd-bar-actions">
                   ${canProduct
@@ -2971,18 +3183,24 @@ export class FrickeldaveStorePanel extends LitElement {
                             />
                           </svg>
                         </button>
-                        <button
-                          type="button"
-                          class="fd-bar-icon"
-                          @click=${() => this._openImport()}
-                          ?disabled=${Boolean(this._importDialog?.busy)}
-                          aria-label="Katalog importieren"
-                          title="Katalog importieren"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
-                          </svg>
-                        </button>
+                        ${showImport
+                          ? html`
+                              <button
+                                type="button"
+                                class="fd-bar-icon"
+                                @click=${() => this._openImport()}
+                                ?disabled=${Boolean(this._importDialog?.busy)}
+                                aria-disabled=${importFeature.available ? "false" : "true"}
+                                aria-describedby=${importFeature.available ? undefined : "fd-feature-import-reason"}
+                                aria-label="Katalog importieren"
+                                title="Katalog importieren"
+                              >
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                  <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
+                                </svg>
+                              </button>
+                            `
+                          : ""}
                         <button
                           type="button"
                           class="fd-bar-icon"
@@ -2996,7 +3214,7 @@ export class FrickeldaveStorePanel extends LitElement {
                         </button>
                       `
                     : ""}
-                  ${canPublish
+                  ${showPublish
                     ? html`
                         <span class="fd-bar-divider" aria-hidden="true"></span>
                         <button
@@ -3004,6 +3222,8 @@ export class FrickeldaveStorePanel extends LitElement {
                           class="fd-bar-icon"
                           @click=${() => this._openPublish("dev")}
                           ?disabled=${Boolean(this._publishDialog?.busy)}
+                          aria-disabled=${publishFeature.available ? "false" : "true"}
+                          aria-describedby=${publishFeature.available ? undefined : "fd-feature-publish-reason"}
                           aria-label="Nach dev veröffentlichen"
                           title="Nach dev veröffentlichen"
                         >
@@ -3019,6 +3239,8 @@ export class FrickeldaveStorePanel extends LitElement {
                           class="fd-bar-icon"
                           @click=${() => this._openPublish("prod")}
                           ?disabled=${Boolean(this._publishDialog?.busy)}
+                          aria-disabled=${publishFeature.available ? "false" : "true"}
+                          aria-describedby=${publishFeature.available ? undefined : "fd-feature-publish-reason"}
                           aria-label="Nach prod veröffentlichen"
                           title="Nach prod veröffentlichen"
                         >
@@ -3030,6 +3252,16 @@ export class FrickeldaveStorePanel extends LitElement {
                           <span class="fd-bar-badge" aria-hidden="true">prd</span>
                         </button>
                       `
+                    : ""}
+                  ${showImport && !importFeature.available
+                    ? html`<span id="fd-feature-import-reason" class="fd-sr-only">
+                        ${this._featureHint(importFeature, "Der Katalogimport")}
+                      </span>`
+                    : ""}
+                  ${showPublish && !publishFeature.available
+                    ? html`<span id="fd-feature-publish-reason" class="fd-sr-only">
+                        ${this._featureHint(publishFeature, "Veröffentlichen")}
+                      </span>`
                     : ""}
                 </div>
                 ${canProduct
@@ -4542,6 +4774,11 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!this._can("app_admin") || !PUBLISH_TARGET_LABELS[target]) {
       return;
     }
+    const feature = this._featureInfo("publish");
+    if (!feature.available) {
+      this._showToast(this._featureHint(feature, "Veröffentlichen"));
+      return;
+    }
     this._captureFocus();
     this._publishDialog = {
       target,
@@ -4591,9 +4828,17 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   _publishErrorText(error) {
+    const featureText = this._featureErrorText(error, "Das Veröffentlichen");
+    if (featureText) {
+      return featureText;
+    }
     const text = this._errorText(error);
     if (error instanceof ApiError) {
       if (error.code === "publish_token_missing" || error.code === "publish_not_configured") {
+        const provider = this._featureInfo("publish").provider;
+        if (provider === "frickeldave_store_syncfd") {
+          return `${text} Hinterlege das Token in den Einstellungen der Erweiterung „Frickeldave Store Sync“ unter Geräte & Dienste.`;
+        }
         return `${text} Hinterlege das Token unter Einstellungen → Frickeldave Store → Veröffentlichen.`;
       }
       if (error.code === "internal_error") {
@@ -4652,7 +4897,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     const message = dialog.message.trim();
     try {
-      const data = await this._api(`${API_ROOT}/publish`, {
+      const data = await this._api(`${API_ROOT}/features/publish`, {
         method: "POST",
         body: {
           target: dialog.target,
@@ -4697,6 +4942,9 @@ export class FrickeldaveStorePanel extends LitElement {
       }
       if (!this._publishDialog) {
         return;
+      }
+      if (isFeatureError(error)) {
+        this._reloadFeatures();
       }
       const code = error instanceof ApiError ? error.code : "";
       const emptyCatalog = !dryRun && code === "publish_empty_catalog";
@@ -5771,13 +6019,20 @@ export class FrickeldaveStorePanel extends LitElement {
       user-select: none;
     }
 
-    .fd-bar-icon:hover:not(:disabled) {
+    .fd-bar-icon:hover:not(:disabled):not([aria-disabled="true"]) {
       background: var(--ha-color-fill-neutral-quiet-hover, var(--secondary-background-color, rgba(127, 127, 127, 0.16)));
     }
 
     .fd-bar-icon:disabled {
       opacity: 0.38;
       cursor: default;
+    }
+
+    /* Fähigkeit vorhanden, aber derzeit nicht verfügbar: sichtbar ausgegraut,
+       Begründung über aria-describedby. Der Button bleibt fokussierbar. */
+    .fd-bar-icon[aria-disabled="true"] {
+      opacity: 0.38;
+      cursor: not-allowed;
     }
 
     .fd-bar-icon svg {

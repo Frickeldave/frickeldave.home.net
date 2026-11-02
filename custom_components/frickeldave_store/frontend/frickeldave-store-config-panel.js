@@ -19,6 +19,10 @@ import { LitElement, html, css } from "./lit.js";
 const API_ROOT = "/api/frickeldave_store";
 const REQUEST_TIMEOUT_MS = 30000;
 const TOAST_TIMEOUT_MS = 6000;
+// Event der Basis, sobald sich registrierte Erweiterungen ändern (Contract 1).
+const FEATURES_EVENT = "frickeldave_store_features_changed";
+const BASE_PROVIDER = "frickeldave_store";
+const SYNC_PROVIDER = "frickeldave_store_syncfd";
 
 const TABS = Object.freeze([
   { id: "general", label: "Allgemeine Einstellungen", panelId: "fd-config-panel-general" },
@@ -157,6 +161,40 @@ const normalizeStorage = (data) => {
   };
 };
 
+const normalizeFeatureStatus = (entry) => {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return null;
+  }
+  const contractVersion = Number(entry.contract_version);
+  return {
+    available: Boolean(entry.available),
+    reason: asText(entry.reason).trim(),
+    provider: asText(entry.provider),
+    contractVersion: Number.isFinite(contractVersion) ? contractVersion : 0,
+    title: asText(entry.title),
+    requiredRole: asText(entry.required_role),
+    providesPanelRoutes: Boolean(entry.provides_panel_routes),
+  };
+};
+
+/**
+ * Feature-Status aus `/me` bzw. `/settings`. `null` bedeutet: die Basis liefert
+ * die Angabe noch nicht (ältere Version); dann bleibt der eingebaute Tab aktiv.
+ */
+const normalizeFeatures = (raw) => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const features = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    const normalized = normalizeFeatureStatus(entry);
+    if (normalized) {
+      features[name] = normalized;
+    }
+  }
+  return features;
+};
+
 const normalizeSettingsPayload = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : payload;
@@ -171,6 +209,7 @@ const normalizeSettingsPayload = (data) => {
     locations: normalizeLocations(payload.locations),
     publish: normalizePublish(payload.publish),
     storage: normalizeStorage(payload.storage),
+    features: normalizeFeatures(payload.features),
   };
 };
 
@@ -181,6 +220,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     _accessState: { state: true },
     _accessError: { state: true },
     _me: { state: true },
+    _features: { state: true },
+    _featureDetails: { state: true },
 
     _tab: { state: true },
 
@@ -214,6 +255,12 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     this._accessState = "idle";
     this._accessError = "";
     this._me = null;
+    this._features = null;
+    this._featureDetails = null;
+    this._featureUnsubscribe = null;
+    this._featureConnection = null;
+    this._featureSubscribing = false;
+    this._featuresTimer = undefined;
 
     this._tab = "users";
 
@@ -306,6 +353,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    this._unsubscribeFeatureEvents();
+    clearTimeout(this._featuresTimer);
     for (const controller of this._controllers) {
       controller.abort();
     }
@@ -486,6 +535,141 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     return Boolean(this._me?.can?.[permission]);
   }
 
+  /**
+   * Fähigkeit `publish` inklusive Anbieter. `legacy` gilt für eine Basis, die
+   * noch keine Feature-Angabe liefert; dort bleibt der eingebaute Tab sichtbar.
+   */
+  _publishFeature() {
+    if (this._features === null) {
+      return {
+        legacy: true,
+        present: false,
+        available: true,
+        reason: "",
+        provider: BASE_PROVIDER,
+        contractVersion: 0,
+      };
+    }
+    const feature = this._features?.publish;
+    if (!feature) {
+      return {
+        legacy: false,
+        present: false,
+        available: false,
+        reason: "",
+        provider: "",
+        contractVersion: 0,
+      };
+    }
+    return { legacy: false, present: true, ...feature };
+  }
+
+  _showPublishTab() {
+    const feature = this._publishFeature();
+    return feature.legacy || (feature.present && feature.provider === BASE_PROVIDER);
+  }
+
+  _visibleTabs() {
+    return this._showPublishTab() ? TABS : TABS.filter((tab) => tab.id !== "publish");
+  }
+
+  _publishHint() {
+    const feature = this._publishFeature();
+    if (feature.legacy || (feature.present && feature.provider === BASE_PROVIDER)) {
+      return "";
+    }
+    if (!feature.present) {
+      return "Die Frickeldave-Synchronisation ist nicht installiert. Veröffentlichen ist erst nach Installation der Erweiterung „Frickeldave Store Sync“ verfügbar; Token und Ziele werden dort gepflegt.";
+    }
+    if (feature.provider === SYNC_PROVIDER) {
+      return "Veröffentlichen wird von der Erweiterung „Frickeldave Store Sync“ verwaltet. Token und Ziel-Repository pflegst du unter Einstellungen → Geräte & Dienste → Frickeldave Store Sync; im Basis-Panel wird kein Token mehr gespeichert.";
+    }
+    return `Veröffentlichen wird vom Anbieter „${feature.provider || "Erweiterung"}“ verwaltet. Die Einstellungen dazu liegen in der jeweiligen Erweiterung.`;
+  }
+
+  _ensureValidTab() {
+    const tabs = this._visibleTabs();
+    if (!tabs.some((tab) => tab.id === this._tab)) {
+      this._tab = tabs[0]?.id || "users";
+    }
+  }
+
+  _ensureFeatureSubscription() {
+    const connection = this.hass?.connection;
+    if (!connection || typeof connection.subscribeEvents !== "function" || !this._token()) {
+      return;
+    }
+    if (
+      this._featureConnection === connection &&
+      (this._featureSubscribing || this._featureUnsubscribe)
+    ) {
+      return;
+    }
+    this._unsubscribeFeatureEvents();
+    this._featureConnection = connection;
+    this._featureSubscribing = true;
+
+    let pending;
+    try {
+      pending = connection.subscribeEvents(
+        () => this._scheduleFeatureRefresh(),
+        FEATURES_EVENT,
+      );
+    } catch {
+      this._featureSubscribing = false;
+      this._featureConnection = null;
+      return;
+    }
+
+    Promise.resolve(pending)
+      .then((unsubscribe) => {
+        this._featureSubscribing = false;
+        if (this._featureConnection !== connection || !this.isConnected) {
+          if (typeof unsubscribe === "function") {
+            unsubscribe();
+          }
+          return;
+        }
+        this._featureUnsubscribe = unsubscribe;
+      })
+      .catch(() => {
+        this._featureSubscribing = false;
+      });
+  }
+
+  _unsubscribeFeatureEvents() {
+    this._featureSubscribing = false;
+    this._featureConnection = null;
+    const unsubscribe = this._featureUnsubscribe;
+    this._featureUnsubscribe = null;
+    if (typeof unsubscribe === "function") {
+      try {
+        unsubscribe();
+      } catch {
+        // Die Verbindung kann beim Trennen bereits geschlossen sein.
+      }
+    }
+  }
+
+  _scheduleFeatureRefresh() {
+    clearTimeout(this._featuresTimer);
+    this._featuresTimer = setTimeout(() => {
+      this._featuresTimer = undefined;
+      this._reloadFeatures();
+    }, 150);
+  }
+
+  /** Nur `/settings` neu laden, damit der Anbieterwechsel ohne Formularverlust sichtbar wird. */
+  async _reloadFeatures() {
+    if (!this.hass || !this._token() || this._accessState !== "ready" || !this._can("app_admin")) {
+      return;
+    }
+    if (this._ai.loading || this._publish.saving) {
+      return;
+    }
+    await this._loadSettings();
+  }
+
   /* --------------------------------------------------------------------- */
   /* Zugriff und Tabs                                                       */
   /* --------------------------------------------------------------------- */
@@ -494,6 +678,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     if (!this.hass || !this._token()) {
       return;
     }
+    this._ensureFeatureSubscription();
     if (this._accessState !== "idle") {
       return;
     }
@@ -516,6 +701,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         },
         version: typeof me?.version === "string" ? me.version : "",
       };
+      this._features = normalizeFeatures(me?.features);
       if (this._can("app_admin")) {
         this._accessState = "ready";
         this._loadUsers();
@@ -547,7 +733,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   _selectTab(tab) {
-    if (!TABS.some((entry) => entry.id === tab) || this._tab === tab) {
+    const tabs = this._visibleTabs();
+    if (!tabs.some((entry) => entry.id === tab) || this._tab === tab) {
       return;
     }
     this._tab = tab;
@@ -563,21 +750,22 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   _onTabKeydown(event) {
-    const currentIndex = TABS.findIndex((entry) => entry.id === this._tab);
+    const tabs = this._visibleTabs();
+    const currentIndex = tabs.findIndex((entry) => entry.id === this._tab);
     let nextIndex = currentIndex;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      nextIndex = (currentIndex + 1) % TABS.length;
+      nextIndex = (currentIndex + 1) % tabs.length;
     } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = TABS.length - 1;
+      nextIndex = tabs.length - 1;
     } else {
       return;
     }
     event.preventDefault();
-    const next = TABS[nextIndex];
+    const next = tabs[nextIndex];
     this._selectTab(next.id);
     this.updateComplete
       .then(() => {
@@ -1000,6 +1188,9 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
   _applySettingsPayload(data) {
     const normalized = normalizeSettingsPayload(data);
+    this._features = normalized.features ?? this._features;
+    this._featureDetails = normalizeFeatures(data?.feature_details) ?? this._featureDetails;
+    this._ensureValidTab();
     this._ai = {
       ...this._ai,
       loading: false,
@@ -1461,6 +1652,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   _renderMain() {
+    const publishHint = this._publishHint();
     return html`
       <div class="fd-app">
         <header class="fd-app-bar">
@@ -1493,7 +1685,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
         <div class="fd-shell">
           <div class="fd-tabs" role="tablist" aria-label="Konfigurationsbereiche">
-            ${TABS.map((tab) => {
+            ${this._visibleTabs().map((tab) => {
               const active = this._tab === tab.id;
               return html`
                 <button
@@ -1512,6 +1704,17 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
               `;
             })}
           </div>
+
+          ${publishHint
+            ? html`
+                <div class="fd-banner fd-config-feature-hint">
+                  <div>
+                    <strong>Veröffentlichen</strong>
+                    <p class="fd-hint">${publishHint}</p>
+                  </div>
+                </div>
+              `
+            : ""}
 
           ${this._tab === "general"
             ? this._renderGeneralTab()
@@ -2708,6 +2911,15 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       min-height: 0;
       color: var(--fd-text-muted);
       font-size: var(--fd-font-small);
+    }
+
+    /* Hinweis, wenn eine Fähigkeit von einer Erweiterung statt der Basis kommt. */
+    .fd-config-feature-hint {
+      margin-bottom: var(--fd-space-3);
+    }
+
+    .fd-config-feature-hint p {
+      margin-top: var(--fd-space-1);
     }
 
     .fd-empty-state {
