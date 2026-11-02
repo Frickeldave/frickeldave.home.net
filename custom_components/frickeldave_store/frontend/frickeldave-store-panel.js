@@ -4279,7 +4279,12 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     const allowEmpty = !dryRun && Boolean(dialog.allowEmpty);
     if (!dryRun) {
-      this._publishDialog = { ...dialog, busy: true, error: "" };
+      // Beim bestätigten Leeren bleibt die Ablehnung sichtbar, bis die Antwort da ist.
+      this._publishDialog = {
+        ...dialog,
+        busy: true,
+        error: dialog.emptyCatalog ? dialog.error : "",
+      };
     }
     const message = dialog.message.trim();
     try {
