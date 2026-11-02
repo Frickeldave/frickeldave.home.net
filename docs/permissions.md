@@ -17,9 +17,9 @@
 
 | Rolle | Bedeutung | Endpunkte |
 | --- | --- | --- |
-| `product` | Produktpflege | `/products*`, `/tags*`, `/products/*/stock`, `/products/*/description/suggest`, `/import/catalog` (Standardquellen, auch `dry_run`/`overwrite`) |
+| `product` | Produktpflege | `/products*`, `/tags*`, `/locations`, `/products/*/stock`, `/products/*/description/suggest` |
 | `finance` | Finanzen (spätere Ausbaustufe) | derzeit keine Endpunkte |
-| `app_admin` | Anwendungsverwaltung | `/settings`, `/export`, `/import/catalog` mit eigener Quelle |
+| `app_admin` | Anwendungsverwaltung | `/settings`, `/export` |
 
 Rollen sind beliebig kombinierbar.
 
@@ -43,7 +43,7 @@ Rollen sind beliebig kombinierbar.
 | `/api/frickeldave_store/users/{user_id}` | PUT, DELETE | `app_admin` |
 | `/api/frickeldave_store/settings` | GET, PATCH | `app_admin` |
 | `/api/frickeldave_store/export` | POST | `app_admin` |
-| `/api/frickeldave_store/import/catalog` | POST | `product` ohne eigene Quelle (auch `dry_run`/`overwrite`), sonst `app_admin` |
+| `/api/frickeldave_store/features/{feature}` | POST | Rolle aus der Registrierung der Erweiterung (`publish`: `app_admin`, `import`: `product` mit `app_admin` für eigene Quellen); ohne Erweiterung `409 feature_unavailable` |
 | `frickeldave_store/me` | WS | nur Anmeldung |
 | `frickeldave_store/products` | WS | `product` |
 | `frickeldave_store/subscribe` | WS | `product` (bei jedem Push erneut geprüft) |
@@ -53,8 +53,8 @@ Rollen sind beliebig kombinierbar.
 ### Oberfläche (primär)
 
 Das Zahnrad am Eintrag **Einstellungen → Geräte & Dienste → Frickeldave Store** öffnet
-das Konfigurationspanel mit den Tabs **Benutzerverwaltung** und **KI-Einstellungen**
-(`/frickeldave-store-config?config_entry=<id>`). Die JavaScript-Oberfläche nutzt
+das Konfigurationspanel mit den Tabs **Benutzerverwaltung**, **Lagerstätten** und
+**KI-Einstellungen** (`/frickeldave-store-config?config_entry=<id>`). Die JavaScript-Oberfläche nutzt
 ausschließlich die Endpunkte `/users` und `/users/{user_id}`; das Backend ist damit auch
 ohne Frontend testbar.
 

@@ -24,8 +24,8 @@ Richtung: Erweiterung → Basis.
 - das Event `frickeldave_store_features_changed`.
 
 Privat und ausdrücklich **nicht** Teil des Vertrags sind alle übrigen Module der Basis:
-`store`, `products`, `views`, `permissions`, `models`, `const`, `export`, `importer`,
-`panel`, `frontend/` sowie die Laufzeit (`FrickeldaveStoreRuntime`, `runtime_for`,
+`store`, `products`, `views`, `permissions`, `models`, `const`, `export`,
+`batch_import`, `panel`, `frontend/` sowie die Laufzeit (`FrickeldaveStoreRuntime`, `runtime_for`,
 `hass.data["frickeldave_store"]`), der Datenordner, `frickeldave_store.data`, Bilder
 und Snapshots.
 
@@ -200,11 +200,18 @@ mit optionalen Bilddaten. Archivierte Produkte bleiben unangetastet; `overwrite`
 
 - Ist eine Erweiterung für diesen Namen registriert, prüft die Basis
   `required_role`, baut eine benutzergebundene Fassade und ruft den Handler auf.
-- Ohne Erweiterung bedient die Basis `publish` und `import` selbst (Fallback,
-  unverändertes Verhalten von 0.1.15).
+- **Ab 0.2.0 gibt es keinen eingebauten Fallback mehr.** Für die reservierten
+  Namen `publish` und `import` ohne Registrierung antwortet die Route mit
+  `409 feature_unavailable` und der Meldung „Die Synchronisation ist nicht
+  installiert. Installiere Frickeldave Store Sync über HACS.“
 - Unbekannte Namen: `404 feature_unknown`.
 - `ready=False`: `409 feature_unavailable` mit der deutschen `reason`.
 - Ungültige Handler-Antwort: `502 handler_failed`.
+
+Der frühere Fallback (Basis bediente `publish`/`import` über `publish.py`,
+`importer.py`, `POST /publish` und `POST /import/catalog` selbst) ist in 0.1.x
+enthalten und mit 0.2.0 **entfernt**; die Module und Routen existieren nicht
+mehr.
 
 Fehlerformat wie im Rest der API: `{"error": {"code": ..., "message": ...}}`.
 
@@ -220,27 +227,30 @@ Payloads der reservierten Features:
 `GET /api/frickeldave_store/me` und `GET/PATCH /api/frickeldave_store/settings` enthalten
 zusätzlich:
 
+Ohne registrierte Erweiterung:
+
 ```json
 {
   "features": {
     "publish": {
-      "available": true,
-      "reason": "",
-      "provider": "frickeldave_store",
+      "available": false,
+      "reason": "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS.",
+      "provider": "",
       "contract_version": 1
     },
     "import": {
-      "available": true,
-      "reason": "",
-      "provider": "frickeldave_store",
+      "available": false,
+      "reason": "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS.",
+      "provider": "",
       "contract_version": 1
     }
   }
 }
 ```
 
-`provider` ist der Name der Erweiterung oder `frickeldave_store` für den
-eingebauten Fallback. `/settings` (nur `app_admin`) liefert zusätzlich
+Mit registrierter Erweiterung kommen `available`, `reason` und `provider` aus der
+Registrierung (`provider` = HA-Domain der Erweiterung, z. B.
+`frickeldave_store_syncfd`). `/settings` (nur `app_admin`) liefert zusätzlich
 `feature_details` mit `name`, `title`, `required_role`, `provides_panel_routes`,
 `available`, `reason`, `provider` und `contract_version` – die Grundlage für das
 Feature-Gating im Panel.
@@ -270,14 +280,25 @@ Registrierungsreihenfolge.
 | `already_registered` | 409 | Name bereits mit abweichender Registrierung belegt |
 | `not_registered` | 404 | Abmeldung für einen unbekannten Namen |
 | `invalid_registration` | 400 | Registrierung unvollständig (Name, Titel, Rolle, Feature-Name) |
-| `feature_unknown` | 404 | Feature weder registriert noch eingebaut |
+| `feature_unknown` | 404 | Feature weder registriert noch reserviert |
 | `feature_unavailable` | 409 | Feature installiert, aber nicht eingerichtet bzw. ohne Handler |
 | `handler_failed` | 502 | Handler lieferte keine `FeatureResponse` |
 | `invalid_request` | 400 | Vom Handler gemeldeter fachlicher Fehler (Beispielcode) |
 
 ## Grenzen dieser Version
 
-`0.1.16` ist die additive Brücke: `publish.py` und `importer.py` bleiben in der Basis,
-die eingebauten Endpunkte `POST /publish` und `POST /import/catalog` funktionieren
-unverändert weiter. Erst `0.2.0` entfernt die frickeldave-spezifischen Handler; dann
-bleiben `features` und `feature_details` als Gating-Instrument und der Fallback entfällt.
+`0.2.0` hat die frickeldave-spezifischen Handler entfernt: `publish.py`, `importer.py`,
+`POST /publish` und `POST /import/catalog` existieren nicht mehr. `features` und
+`feature_details` bleiben als Gating-Instrument; die reservierten Namen `publish` und
+`import` werden ausschließlich von einer registrierten Erweiterung bedient.
+
+Der generische Batch-Schreibpfad der Fassade (`async_apply_import_batch`) bleibt Teil
+von Contract 1; er liegt jetzt im privaten Modul `batch_import.py`. Namen, Signaturen
+und Verhalten sind unverändert.
+
+Bekannte Einschränkung: `extension.feature_status()`/`async_get_feature_status()` führen
+die reservierten Namen weiterhin als eingebaute Fähigkeiten mit `provider:
+frickeldave_store` (Contract 1, unverändert). Die HTTP-Antworten von `/me` und
+`/settings` korrigieren das auf `available: false`. Direkte Aufrufer der Funktion
+innerhalb der Basis sollten die HTTP-Schicht nutzen; die Auflösung folgt mit dem
+nächsten Contract-Bump.

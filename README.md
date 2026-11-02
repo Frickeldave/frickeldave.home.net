@@ -4,8 +4,13 @@
 
 Home-Assistant-Custom-Integration für die Verwaltung des Frickeldave-Handmade-Katalogs:
 Produkte, Bilder, Tags, Bestände, Berechtigungen und KI-Beschreibungsvorschläge – alles
-in einem deutschen Panel in Home Assistant. Der Katalogexport versorgt die Website,
-der Katalogimport übernimmt den bestehenden Bestand zurück in die Verwaltung.
+in einem deutschen Panel in Home Assistant. Der Katalogexport versorgt die Website.
+
+Veröffentlichen nach `dev`/`prod` und der Katalogimport liegen seit **0.2.0** in der
+zweiten Custom Integration
+[`Frickeldave/homeassistant-frickeldave-store-syncfd`](https://github.com/Frickeldave/homeassistant-frickeldave-store-syncfd).
+Diese Basis ist ohne sie vollständig nutzbar (Produkte, Bilder, Lagerstätten, Export,
+Rechte, KI); die Synchronisation ist ein optionales Paket.
 
 Die Integration läuft mit **Home Assistant Container** – ohne Supervisor, Add-on oder
 zusätzlichen Anwendungscontainer. Es gibt keine `hassio`- oder Supervisor-Aufrufe.
@@ -27,6 +32,13 @@ zusätzlichen Anwendungscontainer. Es gibt keine `hassio`- oder Supervisor-Aufru
    Kategorie **Integration** wählen.
 3. „Frickeldave Store“ installieren.
 4. Home Assistant neu starten.
+
+**Installationsreihenfolge mit Synchronisation:** immer zuerst diese Basis, danach
+`Frickeldave/homeassistant-frickeldave-store-syncfd` als zweites benutzerdefiniertes
+Repository (ebenfalls Kategorie **Integration**). HACS löst keine Abhängigkeiten
+zwischen Custom-Integrationen auf; die Erweiterung verweigert den Start, wenn die Basis
+fehlt oder älter als Contract 1 ist. Erst nach der Registrierung erscheinen im Panel die
+Schaltflächen „Nach dev/prod veröffentlichen“ und „Katalog importieren“.
 
 Manuelle Installation ohne HACS: Ordner `custom_components/frickeldave_store/` nach
 `config/custom_components/` kopieren und Home Assistant neu starten.
@@ -59,10 +71,10 @@ Die stabile HA-Benutzer-ID findet man in Home Assistant unter **Einstellungen �
 | `ai_prompt` | Prompt, Standard „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“ |
 | `export_path` | Exportverzeichnis relativ zu `config/` (Standard `frickeldave_store/export`) |
 | `stock_locations` | Lagerstätten, eine pro Zeile (Standard: `Lager` und `Verkaufsschrank`); Zeile 1 → `stock`, Zeile 2 → `salesCabinet` im Website-Export |
-| `github_repository` | Website-Repository, Standard `Frickeldave/frickeldave.github.io` |
-| `github_dev_branch` | Integrationsbranch, Standard `dev` |
-| `github_prod_workflow` | Produktions-Workflow, Standard `fd-deploy-prd.yml` |
-| `github_token` | Fine-grained Token mit `Contents: write` und `Actions: write`; wird nie zurückgegeben, geloggt oder exportiert |
+
+Repository, Branches, Workflow und GitHub-Token sind **keine** Optionen dieser Integration
+mehr; sie werden im Options-Flow der Erweiterung gepflegt (siehe
+[docs/migration-0.2.md](docs/migration-0.2.md)).
 
 YAML-Konfiguration wird nicht unterstützt (`config_entry_only_config_schema`).
 
@@ -70,7 +82,8 @@ YAML-Konfiguration wird nicht unterstützt (`config_entry_only_config_schema`).
 
 Das Zahnrad am Eintrag **Einstellungen → Geräte & Dienste → Frickeldave Store** öffnet
 das tabbed Konfigurationspanel (`/frickeldave-store-config?config_entry=<id>`) mit den
-Tabs **Benutzerverwaltung** und **KI-Einstellungen**. Dort lassen sich Freigaben bequem
+Tabs **Allgemeine Einstellungen**, **Benutzerverwaltung**, **Lagerstätten** und
+**KI-Einstellungen**. Dort lassen sich Freigaben bequem
 über echte HA-Benutzernamen anlegen, bearbeiten und löschen; die Rollenauswahl nutzt die
 Labels `Produktpflege`, `Finanzen` und `Anwendungsverwaltung`.
 
@@ -93,7 +106,7 @@ sodass ein Rechteentzug ohne Neustart greift.
 | --- | --- |
 | `product` | Produkte, Bilder, Tags, Bestände, Sichtbarkeit, Archivierung, KI-Vorschläge |
 | `finance` | spätere Finanzfunktionen (in dieser Ausbaustufe keine Endpunkte) |
-| `app_admin` | Einstellungen, Export, Veröffentlichen (dev/prod), Benutzerfreigaben |
+| `app_admin` | Einstellungen, Export, Benutzerfreigaben; Veröffentlichen/Import nur, wenn die Erweiterung die Fähigkeit mit dieser Rolle registriert |
 
 Rollen sind kombinierbar. Finanzrechte folgen **nie** implizit aus `product` oder
 `app_admin`. Jede geschützte HTTP- und WebSocket-Route prüft serverseitig pro Anfrage;
@@ -191,166 +204,53 @@ python -m custom_components.frickeldave_store.export \
   config/frickeldave_store/frickeldave_store.data ./export
 ```
 
-## Katalogimport
+## Veröffentlichen und Katalogimport (Erweiterung)
 
-Der Import übernimmt den bestehenden Website-Katalog
-(`https://frickeldave.de/data/handmade.json`) samt Bildern in den Store. Er ist für die
-Übernahme des Altbestands gedacht und bleibt gefahrlos wiederholbar:
+Beide Fähigkeiten sind seit **0.2.0** ausgelagert:
 
-- Zuordnung ausschließlich über die `articleNumber`. Ohne `overwrite` werden bereits
-  vorhandene Produkte **nie überschrieben** (Zähler `skipped`), doppelte Artikelnummern
-  im gelieferten Dokument gelten als `failed`. Ein Import löscht nichts (kein
-  Hard-Delete-Pfad).
-- `dry_run: true` lädt den Katalog und liefert eine vollständige Vorschau, schreibt aber
-  nichts: kein Store-Schreibzugriff, keine Bilddatei, kein Snapshot, kein `updatedAt`.
-  Der Plan trennt `would_create`, `would_overwrite` und `unchanged`.
-- `overwrite: true` überschreibt vorhandene, nicht archivierte Produkte mit dem
-  Katalogstand (Zähler `overwritten`). Übernommen werden `name`, `description`, `price`,
-  `size`, `tags`, `visible`, `customizable` und `stock`/`salesCabinet`. Lokal bleiben
-  Artikelnummer, `createdAt`, Bilder, Buchungen und der Archiv-Status; die Kategorie
-  bleibt ebenfalls lokal, weil die Artikelnummer sie kodiert. Archivierte Produkte
-  werden nie reaktiviert, sondern als `skipped` gemeldet. Vorhandene Bilder werden
-  nicht überschrieben, nur fehlende ergänzt. Der Bestand wird auf den Katalogstand
-  gesetzt; die Buchungshistorie bleibt dabei erhalten, sodass sie vom neuen Bestand
-  abweichen kann.
-- Übernommen werden alle Felder des Live-Schemas: `name`, `description`, `category`,
-  `price`, `size`, `tags`, `visible`, `customizable`, `stock`, `salesCabinet`. Neue
-  Produkte erhalten `archived=false`, `schemaVersion=2` sowie `createdAt`/`updatedAt`
-  des Imports.
-- Bilder werden aus dem Website-Repository geladen
-  (`<image_base_url>/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg`, `NN` = 01…10,
-  zuerst `.jpg`, dann `.jpeg`) und im selben Layout wie Panel-Uploads abgelegt
-  (`config/frickeldave_store/images/<artikelnummer>/`); das erste gefundene Bild ist
-  das Hauptbild. Geprüft werden alle Indizes 01…10, Lücken (z. B. 01, 03, 05, 08) werden
-  übersprungen; höchstens zehn Bilder je Produkt.
-- Bildfehler brechen den Produktimport nicht ab, sondern erscheinen in `errors`. Nur ein
-  nicht lesbares oder strukturell ungültiges Katalogdokument lehnt die Anfrage
-  vollständig ab – dann bleibt der Store unverändert.
-- Bildabrufe laufen mit höchstens fünf parallelen Anfragen und je 30 s Zeitlimit; es
-  wird nie im Event-Loop blockierend gelesen oder geschrieben. Geprüft wird die
-  Dateisignatur (JPEG, PNG, WebP, GIF), nicht der Content-Type – GitHub liefert große
-  Binärdateien als `application/octet-stream`. Der Import akzeptiert bis 25 MB pro Bild,
-  weil der Altbestand eine ~12-MB-Datei enthält; Panel-Uploads bleiben bei 10 MB.
+| Fähigkeit | Endpunkt | Anbieter |
+| --- | --- | --- |
+| `publish` | `POST /api/frickeldave_store/features/publish` | `frickeldave_store_syncfd` |
+| `import` | `POST /api/frickeldave_store/features/import` | `frickeldave_store_syncfd` |
 
-```bash
-curl -sS -X POST http://homeassistant.local:8123/api/frickeldave_store/import/catalog \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
+Die Basis validiert nichts mehr selbst: Sie authentifiziert, prüft die Rolle und leitet
+den Aufruf an den Handler der Erweiterung weiter. Payload, Antwortformat und die
+fachlichen Regeln (Dry-Run, `allow_empty`, `confirm_removals`, `overwrite`, die
+SSRF-Allowlist für `source_url`/`image_base_url` sowie der Löschschutz) sind unverändert
+und in der Erweiterung dokumentiert.
 
-Beispielantwort für den aktuellen Bestand (63 Produkte):
+Ohne installierte Erweiterung melden `GET /me` und `GET /settings`:
 
 ```json
 {
-  "created": 63,
-  "skipped": 0,
-  "failed": 0,
-  "images_imported": 170,
-  "products_total": 63,
-  "errors": [],
-  "dry_run": false,
-  "would_create": 0,
-  "would_overwrite": 0,
-  "overwritten": 0,
-  "unchanged": 0,
-  "summary": "Import abgeschlossen: 63 neu angelegt, 0 überschrieben, 0 unverändert, 0 fehlerhaft, 170 Bilder importiert."
+  "features": {
+    "publish": {
+      "available": false,
+      "reason": "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS.",
+      "provider": "",
+      "contract_version": 1
+    },
+    "import": {
+      "available": false,
+      "reason": "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS.",
+      "provider": "",
+      "contract_version": 1
+    }
+  }
 }
 ```
 
-Vorschau desselben Laufs:
+`POST /features/publish` und `POST /features/import` antworten dann mit
+`409 feature_unavailable` und derselben deutschen Meldung; unbekannte Namen mit
+`404 feature_unknown`. Sobald die Erweiterung registriert ist, kommen `available: true`
+und `provider: frickeldave_store_syncfd` aus der Registrierung. Das Panel gated die
+Schaltflächen über `features.*.available`: fehlt die Fähigkeit ganz, erscheint kein Icon;
+ist sie vorhanden, aber nicht verfügbar, bleibt das Icon ausgegraut (`aria-disabled`) und
+nennt die Begründung beim Fokus beziehungsweise Klick.
 
-```json
-{
-  "created": 0,
-  "skipped": 58,
-  "failed": 0,
-  "images_imported": 4,
-  "products_total": 63,
-  "errors": [],
-  "dry_run": true,
-  "would_create": 2,
-  "would_overwrite": 3,
-  "overwritten": 0,
-  "unchanged": 58,
-  "summary": "Vorschau: 63 Produkte im Katalog, 2 neu, 3 zu überschreiben, 58 unverändert, 0 fehlerhaft, 4 Bilder würden importiert. Es wurde nichts geschrieben."
-}
-```
-
-Alle Felder im Anfragekörper sind optional: `source_url`, `image_base_url`,
-`import_images` (Standard `true`), `dry_run` (Standard `false`) und `overwrite`
-(Standard `false`). Nicht-boolesche Werte für `dry_run`/`overwrite` lehnt der Endpunkt
-mit einer deutschen `validation_error` ab. Die Standardquellen genügen der Rolle
-`product`; wer eigene `source_url` oder `image_base_url` angibt, braucht `app_admin`.
-Auch `overwrite: true` bleibt bei `product`, weil es ein Sammel-Update auf Daten ist,
-die diese Rolle einzeln ändern darf; der Store legt vor dem ersten Schreiben einen
-Snapshot an. Erlaubt sind ausschließlich `https`-URLs auf `frickeldave.de` und
-`raw.githubusercontent.com` (SSRF-Schutz).
-
-## Veröffentlichen nach dev und prod
-
-`POST /publish` (`app_admin`) überträgt den Export über die GitHub-Daten-API in das
-Website-Repository und löst das passende Deployment aus:
-
-| Ziel | Ablauf |
-| --- | --- |
-| `dev` | Commit auf den Integrationsbranch `dev` → `fd-ci` → `fd-deploy-dev` (Pre-Release `dev-v<version>`) |
-| `prod` | Commit auf `dev`, danach `workflow_dispatch` von `fd-deploy-prd` – der einzige Weg, `main` zu aktualisieren (Merge `dev` → `main`, Pages-Deploy, stabiles Release) |
-
-Ein direkter Commit auf `main` ist im Website-Repository unzulässig und wird von der
-Integration nie versucht. Ist der Stand bereits identisch, entsteht kein zweiter Commit;
-`prod` dispatcht dennoch, damit ein liegengebliebener Stand promotet werden kann.
-
-Mit `"dry_run": true` liefert derselbe Endpunkt einen vollständigen Plan je Datei
-(`added`/`changed`/`removed`/`unchanged`), Zählungen für Produkte und Bilder,
-Zielbranch, Deployment-Hinweis und eine deutsche Zusammenfassung. Der Dry-Run liest
-ausschließlich: kein Commit, kein Workflow-Dispatch, kein Store-Schreibzugriff.
-
-Jede Antwort enthält `warning` (`string|null`). Ist der lokale Store leer (oder
-enthält nur archivierte Produkte), würde eine Veröffentlichung den kompletten
-Website-Katalog löschen. Deshalb:
-
-| Fall | Verhalten |
-| --- | --- |
-| `dry_run: true`, leerer Store | `200` mit vollständiger Vorschau, `warning` gesetzt, Hinweis in `summary`; es wird nichts geschrieben |
-| Veröffentlichen, leerer Store | `409 publish_empty_catalog`, kein Commit |
-| Veröffentlichen mit `"allow_empty": true` | Commit wie angefordert (Katalog wird geleert), `warning` bleibt gesetzt |
-
-`allow_empty` ist ein boolescher Notausgang (Standard `false`) und nur über
-`POST /publish` mit `app_admin` erreichbar. Die Oberfläche muss ihn bewusst
-bestätigen lassen. Fehlt eine Bilddatei oder ist sie nicht lesbar, antwortet der
-Endpunkt mit `409 publish_artifacts_unavailable` und nennt Artikelnummer und
-Datei, statt still Bilder aus dem Katalog zu entfernen.
-
-### Löschschutz
-
-Eine Veröffentlichung entfernt nur, was diese Integration selbst verantwortet:
-`public/data/handmade.json` und Produktbilder im Muster
-`src/assets/handmade/<Kategorie>/<Artikelnummer>/<Artikelnummer>-NN.<Endung>`
-(Kategorien `3D`, `EP`, `LA`, `SB`, `WO`). Alles andere unter
-`src/assets/handmade` – etwa die 3D-Modellquellen unter `3dmodels/**` oder eine
-`.gitkeep` – gehört der Website und wird nie als entfernt gemeldet.
-
-Zusätzlich gilt ein Löschschutz: würde ein Lauf mehr als 10 Bilder oder mehr als
-ein Drittel des bestehenden Bildbestands entfernen (und mindestens 3), bricht er
-mit `409 publish_removals_blocked` und deutscher Meldung ab. Im Dry-Run erscheint
-dieselbe Meldung als Warnung. Übergehen lässt sich der Schutz nur mit
-`"confirm_removals": true` (boolesch, Standard `false`, `app_admin`); die
-Bestätigung gilt für genau einen Lauf. Die Antwort enthält dazu
-`removal_guard` (`triggered`, `removed`, `existing`, `maxFiles`, `share`,
-`confirmed`).
-
-Bilddateinamen bleiben stabil: das Hauptbild heißt `<Artikelnummer>-01`, alle
-übrigen Bilder behalten ihre eigene Nummer aus dem Store, solange sie frei ist.
-Ein Löschen oder Hinzufügen im Store benennt daher nicht die übrigen Bilder um.
-
-Fehlt das Token, antwortet der Endpunkt mit `400 publish_token_missing` und einer
-deutschen Meldung. Ein abgelehntes Token ergibt `502 github_unauthorized`, ein
-unbekanntes Repository `404 github_not_found`, ein währenddessen bewegter Branch
-`409 github_conflict`, eine nicht-JSON-Antwort von GitHub (Störungsseite)
-`502 github_unavailable`. Unerwartete Serverfehler werden mit vollständigem
-Traceback im HA-Protokoll geloggt und als `500 internal_error` mit deutscher
-Meldung beantwortet.
+Der öffentliche Erweiterungsvertrag (Contract 1) steht in
+[docs/extension-api.md](docs/extension-api.md); der Umstieg von 0.1.x ist in
+[docs/migration-0.2.md](docs/migration-0.2.md) beschrieben.
 
 ## KI-Beschreibungen
 
@@ -404,15 +304,13 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | PUT, DELETE | `/users/{user_id}` (nur `app_admin`) |
 | GET, PATCH | `/settings` (nur `app_admin`) |
 | GET | `/locations` (`product`) |
-| POST | `/publish` (nur `app_admin`; `dry_run` möglich) |
 | POST | `/export` (nur `app_admin`) |
-| POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
-| POST | `/features/{feature}` (Erweiterungs-Fähigkeit; ohne Erweiterung `publish`/`import`) |
+| POST | `/features/{feature}` (Fähigkeit einer Erweiterung; `publish`/`import` nur mit Erweiterung) |
 
 `GET /me` und `GET /settings` liefern zusätzlich `features` (Verfügbarkeit je Fähigkeit
 mit `available`, `reason`, `provider`, `contract_version`); `/settings` enthält für
 `app_admin` außerdem `feature_details` mit Titel, benötigter Rolle und
-`provides_panel_routes`. Die zweite Custom Integration `frickeldave_store_sync` nutzt
+`provides_panel_routes`. Die Erweiterung `frickeldave_store_syncfd` bedient
 `POST /features/publish` und `/features/import`. Der öffentliche Erweiterungsvertrag
 (Contract 1) ist in [`docs/extension-api.md`](docs/extension-api.md) beschrieben.
 
@@ -431,13 +329,13 @@ Name, dann Artikelnummer – auch bei `order=desc`, das nur das Hauptkriterium d
 Anlegen-Dialog (Recht `product`). Der Vorschlag wird nicht reserviert; beim Anlegen
 erzeugt `POST /products` die Nummer erneut und gibt die tatsächliche zurück.
 
-`GET /settings` liefert neben `ai`, `publish` (ohne Token, nur `token_set`), `users`,
-`export_path` und `locations` den Abschnitt `storage` mit `data_path`,
-`effective_path`, `backup_included`, `exclude_from_backup`, `paths` (Metadaten, Bilder,
-Snapshots) und `choices`. `PATCH /settings` akzeptiert `{"ai": {...}}`,
-`{"publish": {"repository|dev_branch|prod_branch|prod_workflow|token": ...}}`,
-`{"locations": [{"id"?: "...", "name": "..."}]}` und `{"storage": {"data_path":
-"config|share|media"}}`; nach einer erfolgreichen Migration enthält die Antwort
+`GET /settings` liefert neben `ai`, `users`, `export_path` und `locations` den Abschnitt
+`storage` mit `data_path`, `effective_path`, `backup_included`, `exclude_from_backup`,
+`paths` (Metadaten, Bilder, Snapshots) und `choices`. `PATCH /settings` akzeptiert
+`{"ai": {...}}`, `{"locations": [{"id"?: "...", "name": "..."}]}` und
+`{"storage": {"data_path": "config|share|media"}}`; ein mitgeschicktes `publish` gilt als
+unbekanntes Feld (`400`), die gespeicherten Werte bleiben aber erhalten. Nach einer
+erfolgreichen Migration enthält die Antwort
 `"reload_required": true`. Ungültige Werte oder unbekannte Felder → `400`, ein
 belegtes Ziel oder eine Lagerstätte mit Bestand → `409`.
 
@@ -533,7 +431,8 @@ deshalb importiert das Panel `./lit.js`; das Bundle wird nie von Hand bearbeitet
 Details: [frontend/README.md](custom_components/frickeldave_store/frontend/README.md).
 
 Dokumentation: [Architektur](docs/architecture.md), [Datenmodell](docs/data-model.md),
-[Berechtigungen](docs/permissions.md), [Backup & Restore](docs/backup-restore.md).
+[Berechtigungen](docs/permissions.md), [Backup & Restore](docs/backup-restore.md),
+[Migration auf 0.2.0](docs/migration-0.2.md), [Erweiterungs-API](docs/extension-api.md).
 
 ## Roadmap / ausdrückliche Nicht-Ziele dieser Ausbaustufe
 
@@ -541,7 +440,7 @@ Nicht enthalten und bewusst auf später verschoben:
 
 - PayPal-Synchronisation (Artikel und Kunden)
 - vollständige Kundenverwaltung (CRUD, Rechnungs-/Lieferadresse)
-- Website-Publish-Workflow oder PR-Automation (nur Export und Katalogimport)
+- Website-Publish-Workflow oder PR-Automation in dieser Basis (liegt in der Erweiterung)
 - Aufnahme in den offiziellen HACS-Katalog
 - Finanzfunktionen (Einkaufskosten, Margen, Steuerrücklagen)
 

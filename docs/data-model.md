@@ -80,8 +80,13 @@ nicht automatisch abgebucht.
 
 ## Katalogimport
 
-`POST /api/frickeldave_store/import/catalog` übernimmt den Live-Katalog der Website
+`POST /api/frickeldave_store/features/import` (Erweiterung
+`frickeldave_store_syncfd`) übernimmt den Live-Katalog der Website
 (`https://frickeldave.de/data/handmade.json`) und die zugehörigen Bilder in den Store.
+Die Basis stellt dafür nur den generischen Batch-Pfad
+`StoreFacade.async_apply_import_batch` (`batch_import.py`) bereit; Netzzugriff,
+Quellen-Allowlist und Rollenprüfung liegen bei der Erweiterung.
+
 Ohne `overwrite` ist der Import eine reine Anlege-Operation: bestehende Produkte bleiben
 unverändert. Es gibt keinen Hard-Delete-Pfad.
 

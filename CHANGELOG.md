@@ -4,6 +4,64 @@ Alle nennenswerten Änderungen an diesem Projekt werden hier festgehalten.
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [0.2.0] - 2026-11-02
+
+**Breaking Release.** Die frickeldave-Synchronisation ist jetzt eine eigene
+HACS-Integration (`Frickeldave/frickeldave-store-syncfd`, Contract 1). Die Basis
+enthält keine frickeldave-spezifischen Vorgaben mehr.
+
+### Breaking Changes
+
+- **Veröffentlichen und Katalogimport entfernt (#289).** `publish.py` und
+  `importer.py` sind gelöscht; ebenso die Endpunkte `POST /publish` (404) und
+  `POST /import/catalog` (404). Beide Fähigkeiten kommen ausschließlich aus einer
+  registrierten Erweiterung: `POST /api/frickeldave_store/features/publish` bzw.
+  `.../features/import`. Ohne Erweiterung antworten sie mit `409
+  feature_unavailable` und deutscher Meldung.
+- **Konstanten entfernt (#289).** `DEFAULT_PUBLISH_REPOSITORY`,
+  `DEFAULT_PUBLISH_DEV_BRANCH`, `DEFAULT_PUBLISH_PROD_BRANCH`,
+  `DEFAULT_PUBLISH_PROD_WORKFLOW`, `DEFAULT_CATALOG_URL`, `DEFAULT_IMAGE_BASE_URL`
+  und `IMPORT_ALLOWED_HOSTS` existieren nicht mehr. Die SSRF-Allowlist führt die
+  Erweiterung.
+- **Options-Flow ohne `github_*` (#289).** `github_repository`, `github_dev_branch`,
+  `github_prod_workflow` und `github_token` sind keine Optionen der Basis mehr.
+  `PATCH /settings` lehnt `publish` als unbekanntes Feld ab (`400`);
+  `GET /settings` liefert kein `publish` mehr (auch kein `token_set`).
+- **Feature-Status ohne Erweiterung (#289).** `features.publish` und
+  `features.import` melden `available: false`, `provider: ""` und
+  `reason: "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS."`
+- **Generischer Import-Batch bleibt (#289).** `StoreFacade.async_apply_import_batch`
+  schreibt unverändert über das neue Modul `batch_import.py` (Import-Ergebnis,
+  Snapshot und Feldregeln identisch). Contract 1 bleibt bei `CONTRACT_VERSION = 1`.
+
+### Migration
+
+1. Basis `0.2.0` installieren.
+2. `Frickeldave/homeassistant-frickeldave-store-syncfd` über HACS als zweites
+   benutzerdefiniertes Repository (Kategorie Integration) installieren und
+   einrichten.
+3. Dort einen neuen Fine-grained Token (`Contents: write`, `Actions: write`)
+   hinterlegen und den alten Token widerrufen. Der Token wird bewusst **nicht**
+   automatisch übernommen.
+
+Gespeicherte `settings.publish`-Daten bleiben in `frickeldave_store.data` erhalten,
+werden ab 0.2.0 aber weder gelesen noch ausgeliefert – der Rückfallweg auf 0.1.x
+funktioniert damit ohne Datenverlust. Details:
+[docs/migration-0.2.md](docs/migration-0.2.md).
+
+### Added
+
+- `docs/migration-0.2.md` (Migrationsleitfaden 0.1.x → 0.2.0) (#289).
+
+### Changed
+
+- README, `docs/architecture.md`, `docs/permissions.md` und
+  `docs/extension-api.md` beschreiben die neue Rollen- und Modulaufteilung (#289).
+- Konfigurationspanel: der Tab „Veröffentlichen“ entfällt; ein Hinweisbanner nennt
+  weiterhin, wo Token und Ziel-Repository gepflegt werden (#289).
+- Seitenpanel: der Rückfall „ältere Basis ohne Feature-Angabe“ ist entfernt
+  (#289).
+
 ## [0.1.17] - 2026-11-02
 
 ### Changed

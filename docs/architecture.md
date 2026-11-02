@@ -26,8 +26,10 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
   `media`), Schreibbarkeitsprüfung und Backup-Kennzeichnung für die API.
 - **`permissions.py`** – Rollen, Default Deny, Prüfung je Anfrage.
 - **`ai.py`** – Anbieter-Abstraktion, DeepSeek-Client, Metadaten-Bereinigung.
-- **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen),
-  inklusive des validierten Batch-Pfads für Erweiterungen (`async_import_products`).
+- **`batch_import.py`** – validierter Import-Batch für Erweiterungen
+  (`async_import_products`): schreibt fertige Produkte und optionale Bilddaten in den
+  Store, ohne Netzzugriff. Seit 0.2.0 die einzige Importlogik der Basis; der frühere
+  Katalogabruf (`importer.py`) liegt in der Erweiterung.
 - **`export.py`** – idempotenter Katalogexport im Website-Schema.
 - **`extension.py`** – öffentlicher Erweiterungsvertrag (Contract 1): Registrierung,
   Feature-Status, Fassade auf den Store. Details in
@@ -74,7 +76,9 @@ Seit 0.1.5 registriert `panel.py` zusätzlich zum Seitenleisten-Panel ein zweite
 
 `config_panel_domain` bewirkt, dass das Zahnrad am Integrationseintrag auf
 `/frickeldave-store-config?config_entry=<id>` verlinkt statt den Options-Flow zu öffnen.
-Das Panel enthält die Tabs **Benutzerverwaltung** und **KI-Einstellungen**; die
+Das Panel enthält die Tabs **Allgemeine Einstellungen**, **Benutzerverwaltung**,
+**Lagerstätten** und **KI-Einstellungen**; einen Tab „Veröffentlichen“ gibt es seit
+0.2.0 nicht mehr, weil Repository, Branches und Token in der Erweiterung liegen. Die
 Seitenleisten-Registrierung bleibt unverändert. Beide Panels werden idempotent
 registriert und beim Unload gemeinsam entfernt.
 
@@ -110,7 +114,7 @@ extension.py  ──registriert Handler──>  hass.data["frickeldave_store_ext
         |                                        |
         |  Fassade (StoreFacade)                 |  Status
         v                                        v
-CatalogStore / ImageStorage / export / importer   GET /me, /settings, POST /features/{feature}
+CatalogStore / ImageStorage / export / batch_import   GET /me, /settings, POST /features/{feature}
 ```
 
 - **Import-Richtung:** Erweiterung → Basis. Die Basis importiert die Erweiterung nie und
@@ -123,9 +127,9 @@ CatalogStore / ImageStorage / export / importer   GET /me, /settings, POST /feat
   Rechteprüfung, Snapshot, Export im Website-Schema und ein validierter Import-Batch.
   Keine internen Objekte, keine Privatattribute, keine Dateipfade.
 - **Routing:** `POST /api/frickeldave_store/features/{feature}` authentifiziert und
-  prüft `required_role`, dann ruft die Basis den Handler der Erweiterung auf. Ohne
-  registrierte Erweiterung bedient die Basis `publish` und `import` selbst – `0.1.16`
-  ist die additive Brücke, `publish.py` und `importer.py` bleiben unverändert nutzbar.
+  prüft `required_role`, dann ruft die Basis den Handler der Erweiterung auf. Mit 0.2.0
+  gibt es keinen eingebauten Fallback mehr: ohne Registrierung antworten `publish` und
+  `import` mit `409 feature_unavailable`, unbekannte Namen mit `404 feature_unknown`.
 - **Gating:** `features` in `/me` und `/settings` (plus `feature_details` für
   `app_admin`) sagen dem Panel, welche Fähigkeit verfügbar ist, wer sie anbietet und
   warum sie gegebenenfalls nicht bereit ist. Das Event
@@ -231,14 +235,15 @@ automatisch gesichert; `share`/`media` müssen separat gesichert werden
 - Kein Hintergrund-Polling externer Dienste (KI nur auf ausdrückliche Anfrage).
 - Blockierendes Datei-I/O ausschließlich im Executor (`asyncio.to_thread`,
   `hass.async_add_executor_job`).
-- Externe Fehler (KI, Netzwerk) verändern den gespeicherten Datenstand nicht. Ausnahme
-  ist der Katalogimport: Er schreibt nur neue Produkte, und ein ungültiges oder nicht
-  lesbares Dokument wird abgelehnt, bevor der Store verändert wird. Bildfehler werden
-  gesammelt (`errors`) und brechen den Produktimport nicht ab.
-- Der Bildimport läuft mit höchstens fünf parallelen Anfragen und 30 s Zeitlimit je
-  Anfrage; Datei-I/O bleibt im Executor (`ImageStorage.async_write`).
+- Externe Fehler (KI, Netzwerk) verändern den gespeicherten Datenstand nicht. Der
+  Import-Batch (`batch_import.py`) hat keinen Netzzugriff: die Erweiterung übergibt
+  geprüfte Produkte, ungültige Einträge landen gesammelt in `errors`, und der Store
+  wird erst nach vollständiger Prüfung verändert.
+- Datei-I/O bleibt im Executor (`ImageStorage.async_write`). Netzabrufe (Katalog,
+  Bilder, GitHub) finden ausschließlich in der Erweiterung statt.
 
 ## Nicht Teil dieser Ausbaustufe
 
-PayPal-Synchronisation, Kundenverwaltung, Website-Publish-Automation, HACS-Default-Katalog,
-produktive Migration. Siehe README (Roadmap).
+PayPal-Synchronisation, Kundenverwaltung, Website-Publish-Automation in dieser Basis
+(sie liegt in der Erweiterung), HACS-Default-Katalog, produktive Migration. Siehe README
+(Roadmap).
