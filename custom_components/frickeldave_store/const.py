@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "frickeldave_store"
 NAME: Final = "Frickeldave Store"
 MANUFACTURER: Final = "Frickeldave"
-VERSION: Final = "0.1.9"
+VERSION: Final = "0.1.10"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/frickeldave.home.net"
 
@@ -27,13 +27,27 @@ EXPORT_DIR_NAME: Final = "export"
 
 FRONTEND_URL_PATH: Final = "frickeldave_store_frontend"
 PANEL_URL_PATH: Final = "frickeldave-store"
-PANEL_MODULE_URL: Final = f"/{FRONTEND_URL_PATH}/frickeldave-store-panel.js"
 PANEL_TITLE: Final = "Frickeldave Store"
 PANEL_ICON: Final = "mdi:store-cog"
 
+
+def module_url(filename: str, version: str = VERSION) -> str:
+    """URL eines Frontend-Moduls mit Versions-Query (Cache-Bust, Issue #289).
+
+    ``panel_custom`` reicht den Wert unverändert als ES-Modul-URL an das Frontend
+    weiter; die Query ist dort zulässig und erzeugt pro Version eine eigene
+    Modul-Identität (wichtig für Browser-Cache und den Modul-Registry-Cache des
+    Frontends).
+    """
+
+    return f"/{FRONTEND_URL_PATH}/{filename}?v={version}"
+
+
+PANEL_MODULE_URL: Final = module_url("frickeldave-store-panel.js")
+
 #: Konfigurationspanel (Zahnrad am Integrationseintrag), nicht in der Seitenleiste.
 CONFIG_PANEL_URL_PATH: Final = "frickeldave-store-config"
-CONFIG_PANEL_MODULE_URL: Final = f"/{FRONTEND_URL_PATH}/frickeldave-store-config-panel.js"
+CONFIG_PANEL_MODULE_URL: Final = module_url("frickeldave-store-config-panel.js")
 
 API_PREFIX: Final = "/api/frickeldave_store"
 

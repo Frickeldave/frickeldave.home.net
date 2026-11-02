@@ -12,7 +12,8 @@ import pytest
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.ai import AIError, AIService
-from custom_components.frickeldave_store.const import DOMAIN
+from custom_components.frickeldave_store.const import DOMAIN, PANEL_MODULE_URL, VERSION
+from custom_components.frickeldave_store.models import SCHEMA_VERSION
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.store import CatalogStore
@@ -122,9 +123,14 @@ async def test_me_reports_roles_and_can_flags(tmp_path: Path) -> None:
     body = _payload(response)
     assert body["roles"] == ["product"]
     assert body["can"] == {"product": True, "finance": False, "app_admin": False}
+    assert body["version"] == VERSION
+    assert body["storage_schema_version"] == SCHEMA_VERSION
+    assert body["panel_module_url"] == PANEL_MODULE_URL
+    assert f"?v={VERSION}" in body["panel_module_url"]
 
     unknown = await MeView().get(FakeRequest(hass, "ghost"))
     assert _payload(unknown)["can"] == {"product": False, "finance": False, "app_admin": False}
+    assert _payload(unknown)["version"] == VERSION
 
 
 async def test_default_deny_returns_403_without_protected_data(tmp_path: Path) -> None:
@@ -222,6 +228,7 @@ async def test_settings_requires_admin_and_hides_api_key(tmp_path: Path) -> None
     assert allowed.status == 200
     assert b"super-secret" not in allowed.body
     body = _payload(allowed)
+    assert body["version"] == VERSION
     assert body["ai"]["api_key_set"] is True
     assert "api_key" not in body["ai"]
     assert {item["user_id"] for item in body["users"]} == {"user-1", "admin"}

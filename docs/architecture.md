@@ -45,6 +45,10 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
 `GET /api/frickeldave_store/me` ist bewusst **nicht** rollengeschützt: Es liefert nur die
 eigene Identität und die effektiven Rechte (bei unbekannten Benutzern leere Listen), damit
 das Panel „kein Zugriff“ anzeigen kann. Es enthält keine Produkt-, Kunden- oder Finanzdaten.
+Zusätzlich stehen dort `version` (Integrationsversion aus `const.VERSION`),
+`storage_schema_version` (Katalogschema aus `models.SCHEMA_VERSION`) und
+`panel_module_url` (die tatsächlich registrierte, cache-gebustete Modul-URL) – damit kann
+das Panel den geladenen Build anzeigen. `GET`/`PATCH /settings` führen ebenfalls `version`.
 
 ## Konfigurationspanel
 
@@ -55,7 +59,7 @@ Seit 0.1.5 registriert `panel.py` zusätzlich zum Seitenleisten-Panel ein zweite
 | --- | --- |
 | `frontend_url_path` | `frickeldave-store-config` |
 | `webcomponent_name` | `frickeldave-store-config-panel` |
-| `module_url` | `/frickeldave_store_frontend/frickeldave-store-config-panel.js` |
+| `module_url` | `/frickeldave_store_frontend/frickeldave-store-config-panel.js?v=<VERSION>` |
 | `config_panel_domain` | `frickeldave_store` |
 | `require_admin` | `true` |
 | `embed_iframe` | `false` |
@@ -66,6 +70,17 @@ Seit 0.1.5 registriert `panel.py` zusätzlich zum Seitenleisten-Panel ein zweite
 Das Panel enthält die Tabs **Benutzerverwaltung** und **KI-Einstellungen**; die
 Seitenleisten-Registrierung bleibt unverändert. Beide Panels werden idempotent
 registriert und beim Unload gemeinsam entfernt.
+
+### Cache-Bust der Panel-Module
+
+Beide `module_url`-Werte enden auf `?v=<VERSION>` (`const.module_url()`). `panel_custom`
+reicht den String unverändert an das Frontend weiter, das ihn als ES-Modul-URL lädt – die
+Query ist dort zulässig und ergibt pro Version eine eigene Modul-Identität. Die statische
+Route wird weiterhin mit `cache_headers=False` registriert (kein `max-age`); zusätzlich
+liefert `FrontendAssetView` direkte Dateien des Frontend-Verzeichnisses mit
+`Cache-Control: no-cache, must-revalidate`. Das betrifft insbesondere das relativ
+importierte `./lit.js`, das keine Versions-Query trägt: Es wird bei jedem Laden
+revalidiert, sodass kein gemischter Zustand aus neuem Panel und altem Lit-Bundle entsteht.
 
 Die Config-Entry-Optionen bleiben die einzige Quelle der Wahrheit: Die
 Benutzerverwaltungs-API (`PUT`/`DELETE /api/frickeldave_store/users/{user_id}`)

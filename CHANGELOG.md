@@ -6,6 +6,26 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-02
+
+### Added
+
+- **Versionsauskunft (#289):** `GET /api/frickeldave_store/me` liefert zusätzlich
+  `version`, `storage_schema_version` und `panel_module_url`; `GET`/`PATCH`
+  `/api/frickeldave_store/settings` führen ebenfalls `version`. Damit kann das Panel
+  anzeigen, welcher Build geladen ist.
+
+### Fixed
+
+- **Cache-Bust für Panel-Module (#289):** Beide Panel-Module werden wieder mit
+  `?v=<VERSION>` ausgeliefert, sodass ein Update eine neue Modul-URL ergibt. Die
+  statische Route bleibt ohne lange Cache-Zeiten; direkte Frontend-Dateien
+  (inklusive des relativ importierten `lit.js`) werden über einen eigenen View mit
+  `Cache-Control: no-cache, must-revalidate` ausgeliefert.
+- **Ursache:** Browser hielten die feste Modul-URL über das Update hinweg im Cache;
+  die Android-App zeigte die neue Oberfläche bereits, weil sie ihren Cache anders
+  verwaltet.
+
 ## [0.1.9] - 2026-11-02
 
 ### Added

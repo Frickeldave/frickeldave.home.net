@@ -5,6 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
+from aiohttp.web_urldispatcher import StaticResource
 from homeassistant.components import frontend
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
@@ -12,11 +16,16 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.const import (
+    CONFIG_PANEL_MODULE_URL,
     DOMAIN,
+    FRONTEND_URL_PATH,
+    PANEL_MODULE_URL,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
     STORAGE_PATH,
     STORAGE_VERSION,
+    VERSION,
+    module_url,
 )
 from custom_components.frickeldave_store.models import SCHEMA_VERSION
 
@@ -87,7 +96,8 @@ async def test_setup_registers_panel_with_required_contract(
     assert panel.component_name == "custom"
     custom = panel.config["_panel_custom"]
     assert custom["name"] == "frickeldave-store-panel"
-    assert custom["module_url"] == "/frickeldave_store_frontend/frickeldave-store-panel.js"
+    assert custom["module_url"] == PANEL_MODULE_URL
+    assert custom["module_url"].endswith(f"?v={VERSION}")
     assert custom["embed_iframe"] is False
     assert panel.config["api_prefix"] == "/api/frickeldave_store"
 
@@ -104,9 +114,49 @@ async def test_setup_registers_config_panel_for_entry_gear(
     assert panel.config_panel_domain == DOMAIN
     custom = panel.config["_panel_custom"]
     assert custom["name"] == "frickeldave-store-config-panel"
-    assert custom["module_url"] == "/frickeldave_store_frontend/frickeldave-store-config-panel.js"
+    assert custom["module_url"] == CONFIG_PANEL_MODULE_URL
+    assert custom["module_url"].endswith(f"?v={VERSION}")
     assert custom["embed_iframe"] is False
     assert panel.config["api_prefix"] == "/api/frickeldave_store"
+
+
+def test_module_url_changes_with_version() -> None:
+    """Issue #289: ein Versionswechsel ergibt eine andere Modul-URL (Cache-Bust)."""
+
+    older = module_url("frickeldave-store-panel.js", "0.1.9")
+    newer = module_url("frickeldave-store-panel.js", "0.1.10")
+    assert older != newer
+    assert older == f"/{FRONTEND_URL_PATH}/frickeldave-store-panel.js?v=0.1.9"
+    assert newer == f"/{FRONTEND_URL_PATH}/frickeldave-store-panel.js?v=0.1.10"
+    assert module_url("frickeldave-store-panel.js", VERSION) == PANEL_MODULE_URL
+    assert module_url("frickeldave-store-config-panel.js", VERSION) == CONFIG_PANEL_MODULE_URL
+
+
+async def test_frontend_assets_are_served_with_explicit_revalidation(
+    hass: Any, enable_custom_integrations: Any
+) -> None:
+    """``lit.js`` trägt keine Versions-Query und muss deshalb revalidiert werden."""
+
+    await _setup_entry(hass)
+    from custom_components.frickeldave_store.panel import FrontendAssetView
+
+    assert hass.data["frickeldave_store_asset_view_registered"] is True
+
+    # Der View muss gegenüber der statischen Präfix-Route gewinnen, sonst fehlt
+    # die Kopfzeile in der Praxis.
+    match = await hass.http.app.router.resolve(
+        make_mocked_request("GET", f"/{FRONTEND_URL_PATH}/lit.js")
+    )
+    assert match.http_exception is None
+    assert not isinstance(match.route.resource, StaticResource)
+    view = FrontendAssetView()
+    response = await view.get(None, "lit.js")  # type: ignore[arg-type]
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+
+    with pytest.raises(web.HTTPNotFound):
+        await view.get(None, "does-not-exist.js")  # type: ignore[arg-type]
+    with pytest.raises(web.HTTPNotFound):
+        await view.get(None, "../const.py")  # type: ignore[arg-type]
 
 
 async def test_panel_registration_is_idempotent(hass: Any, enable_custom_integrations: Any) -> None:

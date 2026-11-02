@@ -25,10 +25,13 @@ from .const import (
     DEFAULT_CATALOG_URL,
     DEFAULT_IMAGE_BASE_URL,
     DOMAIN,
+    PANEL_MODULE_URL,
+    VERSION,
 )
 from .export import async_export_catalog
 from .importer import async_import_catalog
 from .models import (
+    SCHEMA_VERSION,
     ConflictError,
     NotFoundError,
     PermissionDenied,
@@ -255,7 +258,12 @@ class MeView(HomeAssistantView):
         try:
             runtime = _runtime(request)
             user = _user(request)
-            return web.json_response(runtime.permissions.snapshot(str(user.id)))
+            payload = runtime.permissions.snapshot(str(user.id))
+            # Build-Informationen für das Panel: Rechte bleiben unverändert.
+            payload["version"] = VERSION
+            payload["storage_schema_version"] = SCHEMA_VERSION
+            payload["panel_module_url"] = PANEL_MODULE_URL
+            return web.json_response(payload)
         except StoreError as err:
             return _error_response(err)
 
@@ -585,6 +593,7 @@ def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> 
     """Gemeinsames Antwortformat für GET und PATCH ``/settings``."""
 
     payload = runtime.store.public_settings()
+    payload["version"] = VERSION
     payload["users"] = [
         {"user_id": grant.user_id, "name": grant.name, "roles": list(grant.roles)}
         for grant in runtime.permissions.grants().values()

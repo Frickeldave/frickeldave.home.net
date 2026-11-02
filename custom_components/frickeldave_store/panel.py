@@ -17,7 +17,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aiohttp import web
 from homeassistant.components import frontend
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.panel_custom import async_register_panel as _async_register_panel
 from homeassistant.core import HomeAssistant
 
@@ -36,14 +38,44 @@ _LOGGER = logging.getLogger(__name__)
 
 STATIC_URL = f"/{FRONTEND_URL_PATH}"
 _ATTR_REGISTERED = f"{DOMAIN}_static_registered"
+_ATTR_ASSET_VIEW_REGISTERED = f"{DOMAIN}_asset_view_registered"
 _ATTR_PANEL_REGISTERED = f"{DOMAIN}_panel_registered"
 _ATTR_CONFIG_PANEL_REGISTERED = f"{DOMAIN}_config_panel_registered"
 
 CONFIG_PANEL_WEBCOMPONENT = "frickeldave-store-config-panel"
 
+#: ``cache_headers=False`` der statischen Route setzt nur *keine* langen Cache-
+#: Zeiten; ohne ``Cache-Control`` dürfen Browser heuristisch cachen. Der eigene
+#: View liefert direkte Dateien des Frontend-Verzeichnisses deshalb mit
+#: expliziter Revalidierung – wichtig für das relativ importierte ``lit.js``,
+#: das keine Versions-Query trägt.
+CACHE_CONTROL_NO_CACHE = "no-cache, must-revalidate"
+
 
 def frontend_dir() -> Path:
     return Path(__file__).parent / "frontend"
+
+
+class FrontendAssetView(HomeAssistantView):
+    """Frontend-Dateien mit explizitem ``Cache-Control`` ausliefern.
+
+    Die Route ist spezifischer als der statische Präfix-Pfad und gewinnt daher
+    für direkte Dateien (z. B. ``lit.js``); Unterverzeichnisse übernimmt weiter
+    die statische Route.
+    """
+
+    name = f"api:{DOMAIN}:frontend_asset"
+    url = f"/{FRONTEND_URL_PATH}/{{filename}}"
+    requires_auth = False
+
+    async def get(self, request: web.Request, filename: str) -> web.StreamResponse:
+        directory = frontend_dir().resolve()
+        candidate = (directory / filename).resolve()
+        if candidate.parent != directory or not candidate.is_file():
+            raise web.HTTPNotFound()
+        response = web.FileResponse(candidate)
+        response.headers["Cache-Control"] = CACHE_CONTROL_NO_CACHE
+        return response
 
 
 async def async_register_static(hass: HomeAssistant) -> None:
@@ -57,6 +89,11 @@ async def async_register_static(hass: HomeAssistant) -> None:
         return
     if hass.data.get(_ATTR_REGISTERED):
         return
+    # Vor der statischen Route registrieren: bei gleichem Präfix entscheidet die
+    # Registrierungsreihenfolge, und der View soll direkte Dateien bedienen.
+    if not hass.data.get(_ATTR_ASSET_VIEW_REGISTERED):
+        hass.http.register_view(FrontendAssetView())
+        hass.data[_ATTR_ASSET_VIEW_REGISTERED] = True
     try:
         from homeassistant.components.http import StaticPathConfig
 
