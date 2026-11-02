@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -178,19 +180,21 @@ async def test_unload_removes_panels(hass: Any, enable_custom_integrations: Any)
     assert "frickeldave-store-config" not in hass.data[frontend.DATA_PANELS]
 
 
-async def test_store_and_views_are_registered(
-    hass: Any, enable_custom_integrations: Any, hass_storage: dict[str, Any]
-) -> None:
+async def test_store_and_views_are_registered(hass: Any, enable_custom_integrations: Any) -> None:
+    # Der Store schreibt bewusst direkt in den Datenordner (Issue #289); vor dem
+    # Setup einen sauberen Stand herstellen, damit Wiederholungsläufe nicht zählen.
+    store_file = Path(hass.config.path(STORAGE_PATH, STORAGE_KEY))
+    store_file.unlink(missing_ok=True)
+    shutil.rmtree(store_file.parent / "backups", ignore_errors=True)
+
     entry = await _setup_entry(hass)
 
     runtime: FrickeldaveStoreRuntime = hass.data[DOMAIN]
     product = await runtime.products.async_create({"name": "Schild", "category": "LA"})
     await hass.async_block_till_done()
 
-    # Die `hass`-Fixture ersetzt HA-Storage durch `hass_storage`; Dateisystem-Assertions
-    # wären hier von Artefakten früherer Läufe abhängig.
-    assert Path(runtime.store._backend.path) == Path(hass.config.path(STORAGE_PATH, STORAGE_KEY))
-    persisted = hass_storage[STORAGE_KEY]
+    assert Path(runtime.store._backend.path) == store_file
+    persisted = json.loads(store_file.read_text(encoding="utf-8"))
     assert persisted["version"] == STORAGE_VERSION
     assert persisted["minor_version"] == STORAGE_MINOR_VERSION
     assert persisted["data"]["schemaVersion"] == SCHEMA_VERSION

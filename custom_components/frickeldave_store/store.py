@@ -100,6 +100,26 @@ def new_payload() -> dict[str, Any]:
     }
 
 
+def _schema_version(payload: dict[str, Any]) -> int:
+    """Payload-Schema lesen; unversionierte Altbestände gelten als Schema 0."""
+
+    try:
+        return int(payload.get("schemaVersion", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _product_count(payload: dict[str, Any] | None) -> int:
+    """Anzahl der Produkte in einem (rohen) Payload."""
+
+    if not payload:
+        return 0
+    products = payload.get("products")
+    if isinstance(products, (list, tuple)):
+        return len(products)
+    return 0
+
+
 def _migrate_0_to_1(payload: dict[str, Any]) -> dict[str, Any]:
     """Schema 0 (unversioniert) auf Schema 1 heben."""
 
@@ -175,7 +195,13 @@ def migrate_payload(payload: dict[str, Any], from_version: int) -> dict[str, Any
 
 
 def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    """Fehlende Schlüssel ergänzen und Grundtypen sicherstellen."""
+    """Fehlende Schlüssel ergänzen und Grundtypen sicherstellen.
+
+    Nicht lesbare Produkte werden **nicht** mehr stillschweigend verworfen
+    (Issue #289): ein einzelner Skip hätte den Katalog beim anschließenden
+    Speichern verkleinert. Stattdessen schlägt der Ladevorgang laut fehl und die
+    Store-Datei bleibt unangetastet.
+    """
 
     base = new_payload()
     if not payload:
@@ -185,14 +211,25 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     publish_settings = {**base["settings"]["publish"], **(settings.get("publish") or {})}
     locations = _coerce_locations(payload.get("locations"))
     location_ids = [str(item["id"]) for item in locations]
+    raw_products = payload.get("products") or []
     products: list[dict[str, Any]] = []
-    for raw in payload.get("products", []) or []:
+    skipped: list[str] = []
+    for raw in raw_products:
         try:
             products.append(
                 Product.from_dict(raw, location_ids=location_ids, strict=False).to_dict()
             )
-        except (ValidationError, StoreError) as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Produkt übersprungen (%s): %s", raw.get("articleNumber"), err)
+        except (StoreError, ValueError, TypeError, AttributeError) as err:
+            identifier = raw.get("articleNumber") if isinstance(raw, dict) else raw
+            _LOGGER.error("Produkt nicht lesbar (%s): %s", identifier, err)
+            skipped.append(str(identifier))
+    if skipped:
+        raise StoreError(
+            f"{len(skipped)} von {len(raw_products)} Produkten sind nicht lesbar "
+            f"({', '.join(skipped[:5])}). Der Store wird nicht überschrieben; bitte die "
+            "Store-Datei prüfen oder einen Snapshot aus backups/ einspielen.",
+            code="products_unreadable",
+        )
     bookings: list[dict[str, Any]] = []
     for raw in payload.get("bookings", []) or []:
         booking = StockBooking.from_dict(raw)
@@ -281,84 +318,105 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 
 
 class HassStoreBackend:
-    """HA-``Store``-Backend mit Migration und Snapshot vor der Migration."""
+    """Datei-Backend im HA-Datenordner – ohne ``homeassistant.helpers.storage``.
+
+    Issue #289: ``Store`` konsultiert vor dem Lesen den internen
+    ``_StoreManager``-Cache. Der Cache kennt nur Dateien aus
+    ``<config>/.storage`` und meldet für jeden anderen Schlüssel „existiert
+    nicht“ (``async_fetch`` → ``(False, None)``). Der Katalog liegt aber in
+    ``<config>/frickeldave_store/``: ``Store.async_load()`` lieferte deshalb
+    ``None``, die Integration startete mit einem leeren Katalog und der nächste
+    ``async_save`` überschrieb die echte Datei mit null Produkten.
+
+    Dieses Backend liest und schreibt die Datei selbst. Das Format bleibt
+    identisch zum HA-Store (``{"version", "minor_version", "key", "data"}``),
+    damit bestehende Dateien und Snapshots unverändert funktionieren. Maßgeblich
+    für die Migration ist ``data.schemaVersion``; die Envelope-Version wird nur
+    protokolliert.
+    """
 
     def __init__(self, hass: Any, data_dir: Path, snapshot_dir: Path) -> None:
         self._hass = hass
         self._data_dir = Path(data_dir)
-        self._snapshot_dir = snapshot_dir
-        self._store = self._build_store()
+        self._snapshot_dir = Path(snapshot_dir)
 
     @property
     def path(self) -> Path:
         return self._data_dir / STORAGE_KEY
 
-    def _build_store(self) -> Any:
-        # Import im Methodenkörper: Tests und das Export-CLI nutzen die reine Dateiablage.
-        import inspect
-
-        from homeassistant.helpers.storage import Store
-
-        backend = self
-        storage_path = self._data_dir
-        storage_file = storage_path / STORAGE_KEY
-        supports_path = "path" in inspect.signature(Store.__init__).parameters
-
-        class _MigratingStore(Store):  # type: ignore[misc, valid-type]
-            async def _async_migrate_func(
-                self,
-                old_major_version: int,
-                old_minor_version: int,
-                old_data: dict[str, Any],
-            ) -> dict[str, Any]:
-                return await backend._async_migrate(old_major_version, old_data)
-
-        if supports_path:
-            return _MigratingStore(
-                self._hass,
-                STORAGE_VERSION,
-                STORAGE_KEY,
-                minor_version=STORAGE_MINOR_VERSION,
-                atomic_writes=True,
-                path=str(storage_path),
-            )
-
-        class _PathStore(_MigratingStore):  # type: ignore[misc, valid-type]
-            @property
-            def path(self) -> str:
-                return str(storage_file)
-
-        return _PathStore(
-            self._hass,
-            STORAGE_VERSION,
-            STORAGE_KEY,
-            minor_version=STORAGE_MINOR_VERSION,
-            atomic_writes=True,
-        )
-
-    async def _async_migrate(
-        self, old_major_version: int, old_data: dict[str, Any]
-    ) -> dict[str, Any]:
-        await asyncio.to_thread(self._snapshot_sync, f"pre-migration-v{old_major_version}")
-        return migrate_payload(old_data, old_major_version)
-
     async def async_load(self) -> dict[str, Any] | None:
-        loaded = await self._store.async_load()
-        return loaded if isinstance(loaded, dict) else None
+        return await asyncio.to_thread(self._load_sync)
 
     async def async_save(self, data: dict[str, Any]) -> None:
-        await self._store.async_save(data)
+        envelope = {
+            "version": STORAGE_VERSION,
+            "minor_version": STORAGE_MINOR_VERSION,
+            "key": STORAGE_KEY,
+            "data": data,
+        }
+        await asyncio.to_thread(write_json_atomic, self.path, envelope)
+
+    def _load_sync(self) -> dict[str, Any] | None:
+        path = self.path
+        if not path.is_file():
+            return None
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            raise StoreError(
+                f"Store-Datei '{path}' ist nicht lesbar: {err}. Die Datei bleibt "
+                "unverändert; bitte einen Snapshot aus backups/ einspielen.",
+                code="storage_unreadable",
+            ) from err
+        if not isinstance(loaded, dict):
+            raise StoreError(
+                f"Store-Datei '{path}' enthält kein JSON-Objekt.",
+                code="storage_unreadable",
+            )
+        payload = loaded.get("data")
+        if not isinstance(payload, dict):
+            # Datei ohne HA-Umschlag (ältere Ablage oder kopierter Snapshot).
+            payload = {
+                key: value
+                for key, value in loaded.items()
+                if key not in {"version", "minor_version", "key"}
+            }
+        stored_version = loaded.get("version")
+        schema_version = payload.get("schemaVersion")
+        if (
+            stored_version is not None
+            and schema_version is not None
+            and str(stored_version) != str(schema_version)
+        ):
+            _LOGGER.info(
+                "Store-Datei meldet Version %s, Payload-Schema %s – maßgeblich ist "
+                "das Payload-Schema.",
+                stored_version,
+                schema_version,
+            )
+        return payload
 
     def _snapshot_sync(self, reason: str) -> Path | None:
         return copy_snapshot(self.path, self._snapshot_dir, reason)
 
 
-def copy_snapshot(source: Path, target_dir: Path, reason: str) -> Path | None:
-    """Aktuelle Store-Datei nach ``backups/`` kopieren (vor Migration/Restore)."""
+def copy_snapshot(
+    source: Path, target_dir: Path, reason: str, *, skip_if_identical: bool = False
+) -> Path | None:
+    """Aktuelle Store-Datei nach ``backups/`` kopieren (vor Migration/Restore).
+
+    ``skip_if_identical`` verhindert, dass wiederholte Starts dutzende gleiche
+    Snapshots ablegen (der Inhalt der Datei ändert sich beim Laden nicht).
+    """
 
     if not source.exists():
         return None
     target_dir.mkdir(parents=True, exist_ok=True)
+    if skip_if_identical:
+        data = source.read_bytes()
+        for existing in sorted(target_dir.glob(f"*-{reason}.json"), reverse=True):
+            if existing.read_bytes() == data:
+                return existing
     stamp = to_iso().replace(":", "-")
     target = target_dir / f"{stamp}-{reason}.json"
     shutil.copy2(source, target)
@@ -459,6 +517,11 @@ class CatalogStore:
         self._data: dict[str, Any] = new_payload()
         self._lock = asyncio.Lock()
         self._listeners: list[Callable[[], None]] = []
+        #: Produktanzahl des zuletzt gelesenen bzw. geschriebenen Stands.
+        #: Sicherheitsnetz gegen stillen Datenverlust (Issue #289).
+        self._disk_product_count = 0
+        #: ``True``, solange vor dem ersten Schreiben noch ein Snapshot fehlt.
+        self._needs_pre_save_snapshot = False
 
     # ------------------------------------------------------------------ Laden/Speichern
     @property
@@ -482,10 +545,13 @@ class CatalogStore:
 
     async def async_load(self) -> None:
         raw = await self._backend.async_load()
+        self._disk_product_count = _product_count(raw)
+        # Ein vorhandener Stand wird vor dem ersten Schreiben gesichert.
+        self._needs_pre_save_snapshot = raw is not None
         if raw is None:
             self._data = new_payload()
             return
-        version = int(raw.get("schemaVersion", 0))
+        version = _schema_version(raw)
         if version > SCHEMA_VERSION:
             raise StoreError(
                 f"Gespeichertes Schema {version} ist neuer als {SCHEMA_VERSION}.",
@@ -493,17 +559,46 @@ class CatalogStore:
             )
         if version < SCHEMA_VERSION:
             await asyncio.to_thread(self.async_snapshot_sync, f"pre-load-v{version}")
-            raw = migrate_payload(raw, version)
-            self._data = raw
+            self._needs_pre_save_snapshot = False
+            self._data = migrate_payload(raw, version)
             await self.async_save()
         else:
             self._data = coerce_payload(raw)
 
-    async def async_save(self) -> None:
+    async def async_save(self, *, allow_empty: bool = False) -> None:
+        """Store schreiben.
+
+        Sicherheitsnetz (Issue #289): ein Stand mit null Produkten überschreibt
+        niemals eine Datei, die Produkte enthält – außer der Aufrufer bestätigt
+        das ausdrücklich (``allow_empty=True``). Die Datei bleibt im Zweifel
+        unverändert.
+        """
+
         self._data["schemaVersion"] = SCHEMA_VERSION
         self._data["updatedAt"] = to_iso()
+        if not allow_empty and self._disk_product_count > 0 and not self._data["products"]:
+            _LOGGER.error(
+                "Schreiben abgebrochen: Store enthielt %s Produkte, neuer Stand hat 0. "
+                "Die Store-Datei bleibt unverändert.",
+                self._disk_product_count,
+            )
+            raise StoreError(
+                "Sicherheitsnetz: Der gespeicherte Katalog enthält "
+                f"{self._disk_product_count} Produkte, der neue Stand 0. "
+                "Es wurde nichts geschrieben; die Store-Datei bleibt unverändert.",
+                code="refuse_empty_overwrite",
+            )
+        if self._needs_pre_save_snapshot:
+            await asyncio.to_thread(self._snapshot_before_first_write)
+            self._needs_pre_save_snapshot = False
         await self._backend.async_save(self._data)
+        self._disk_product_count = len(self._data["products"])
         self._notify()
+
+    def _snapshot_before_first_write(self) -> Path | None:
+        return copy_snapshot(
+            self._backend.path, self.backup_dir, "pre-save", skip_if_identical=True
+        )
 
     async def async_snapshot(self, reason: str = "manual") -> Path | None:
         return await asyncio.to_thread(self.async_snapshot_sync, reason)

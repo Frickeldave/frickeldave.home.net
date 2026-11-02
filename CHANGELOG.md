@@ -6,6 +6,53 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-02
+
+### Fixed
+
+- **Datenverlust beim Update behoben (#289).** Nach dem Einspielen einer neuen
+  Version waren alle Produkte verschwunden. Ursache: `HassStoreBackend` las die
+  Store-Datei über `homeassistant.helpers.storage.Store`. Dessen interner
+  `_StoreManager` cached beim HA-Start die Dateiliste von `<config>/.storage` und
+  beantwortet jeden Schlüssel, der dort nicht liegt, mit „existiert nicht“
+  (`async_fetch` → `(False, None)`). Der Katalog liegt aber in
+  `<config>/frickeldave_store/frickeldave_store.data`; `Store.async_load()`
+  lieferte deshalb `None`, der Store startete leer und der nächste `async_save`
+  überschrieb die echte Datei mit `"products": []`. Da HACS-Updates einen
+  HA-Neustart auslösen, trat der Fehler bei jedem Update auf.
+- **Eigenes Datei-Backend (#289).** `HassStoreBackend` liest und schreibt die
+  Datei jetzt selbst (atomar, gleiches HA-Umschlagformat
+  `{"version", "minor_version", "key", "data"}`). Bestehende Dateien, Snapshots
+  und ältere Integrationen bleiben kompatibel; `STORAGE_VERSION` bleibt deshalb
+  bei `2`.
+- **Payload-Schema statt Envelope-Version (#289).** Maßgeblich für die Migration
+  ist `data.schemaVersion`. Weicht die Envelope-Version ab (z. B. Store-Version 1
+  bei bereits migriertem Payload), wird das protokolliert und nicht erneut
+  migriert.
+- **Kein stilles Verwerfen von Produkten (#289).** `coerce_payload` überspringt
+  keine Produkte mehr: nicht lesbare Einträge führen zu
+  `StoreError("products_unreadable")`, der Ladevorgang bricht ab und die
+  Store-Datei bleibt unverändert.
+
+### Added
+
+- **Sicherheitsnetz gegen leere Overwrites (#289).** Enthielt die Store-Datei
+  Produkte, schreibt `CatalogStore.async_save` niemals einen Stand mit null
+  Produkten — außer der Aufrufer bestätigt es ausdrücklich (`allow_empty=True`).
+  Im Zweifel bricht das Schreiben mit `refuse_empty_overwrite` ab und die Datei
+  bleibt unangetastet.
+- **Snapshot vor jedem Schreiben (#289).** Vor Schema-Migrationen entsteht
+  weiterhin `<Datenordner>/backups/<zeitstempel>-pre-load-v<n>.json`; zusätzlich
+  legt der erste Schreibvorgang nach dem Laden einen Snapshot
+  `<zeitstempel>-pre-save.json` an (identische Stände werden nicht dupliziert).
+
+### Wiederherstellung
+
+Ein Snapshot lässt sich ohne Neuinstallation zurückholen: HA stoppen, den
+gewünschten `*-pre-load-v*.json`/`*-pre-save.json`-Snapshot aus
+`config/frickeldave_store/backups/` nach `config/frickeldave_store/frickeldave_store.data`
+kopieren, HA starten. Details in `docs/backup-restore.md`.
+
 ## [0.1.10] - 2026-11-02
 
 ### Added

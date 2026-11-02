@@ -95,13 +95,17 @@ keinen Zustand, in dem Daten nur zur Hälfte kopiert sind.
 Nach der Migration den alten Ordner erst löschen, wenn Produktanzahl und
 Stichprobenbilder im Panel stimmen.
 
-## Snapshots vor Migrationen
+## Snapshots vor Migrationen und Schreibvorgängen
 
 - Vor jeder Schema-Migration kopiert der Store die bestehende Datei nach
   `<Datenordner>/backups/<zeitstempel>-pre-load-v<n>.json`.
+- Vor dem **ersten Schreibvorgang nach dem Laden** entsteht zusätzlich
+  `<Datenordner>/backups/<zeitstempel>-pre-save.json`. Das ist das Netz für den
+  Fehler aus Issue #289 (Katalog wurde leer geladen und überschrieben).
 - `async_migrate_entry` legt zusätzlich
   `<Datenordner>/backups/<zeitstempel>-pre-entry-migration-v<n>.json` an.
 - Snapshots werden nicht automatisch gelöscht; bei Bedarf manuell aufräumen.
+  Wiederholte `pre-save`-Snapshots mit identischem Inhalt werden nicht dupliziert.
 
 ## Prüfsummen
 
@@ -116,6 +120,46 @@ Bei `share`/`media` denselben Befehl im jeweiligen Ordner
 (`/share/frickeldave_store` bzw. `/media/frickeldave_store`) ausführen.
 
 ## Wiederherstellung
+
+### Aus einem Snapshot (ohne HA-Backup)
+
+Die Integration legt vor Migrationen und vor dem ersten Schreiben nach dem Laden
+Snapshots in `<Datenordner>/backups/` ab. Sie enthalten exakt das HA-Store-Format
+(`{"version", "minor_version", "key", "data"}`) und können die Store-Datei direkt
+ersetzen:
+
+1. Home Assistant stoppen (Container), damit während des Kopierens nicht
+   geschrieben wird.
+2. Sicherstellen, dass es eine Sicherung des *aktuellen* Stands gibt:
+   ```bash
+   cd config/frickeldave_store
+   cp frickeldave_store.data "frickeldave_store.data.vor-restore-$(date +%F-%H%M)"
+   ```
+3. Snapshots ansehen (neueste zuerst) und Produktanzahl prüfen:
+   ```bash
+   ls -1t backups/*.json
+   python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d['version'], len(d['data']['products']))" \
+     backups/<zeitstempel>-pre-save.json
+   ```
+   Der Stand muss die erwartete Produktanzahl (> 0) zeigen.
+4. Snapshot an die Stelle der Store-Datei kopieren:
+   ```bash
+   cp backups/<zeitstempel>-pre-save.json frickeldave_store.data
+   ```
+5. Rechte prüfen (`chown`/`chmod` wie die übrigen Dateien im Ordner).
+6. Home Assistant starten und im Panel Produktanzahl sowie ein Stichprobenbild
+   kontrollieren. Liegt der Snapshot auf einem älteren Schema, migriert der Store
+   beim Laden und legt vorher erneut einen Snapshot an.
+7. Ist der Bildordner `images/` ebenfalls beschädigt, den passenden
+   `images`-Ordner aus dem HA-Backup daneben entpacken — die JSON-Snapshots
+   enthalten nur die Bild-Metadaten, nicht die Bilddateien.
+
+> Hinweis: `pre-save`-Snapshots entstehen vor dem ersten Schreiben nach dem
+> Laden. Bei einem Update, das den Katalog leer angezeigt hat, ist genau dieser
+> Snapshot der letzte vollständige Stand — solange danach kein weiterer
+> Schreibvorgang mit leerem Inhalt erfolgt ist.
+
+### Aus einem Home-Assistant-Backup
 
 1. Home Assistant stoppen (Container).
 2. Bestehenden Datenordner beiseitelegen (nicht löschen). Der Pfad ergibt sich
