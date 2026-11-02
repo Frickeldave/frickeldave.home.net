@@ -2538,6 +2538,7 @@ export class FrickeldaveStorePanel extends LitElement {
                               d="M14 4l2.29 2.29-2.88 2.88 1.42 1.42 2.88-2.88L20 10V4h-6zM10 4H4v6l2.29-2.29 4.71 4.7V20h2v-8.41l-5.29-5.3L10 4z"
                             />
                           </svg>
+                          <span class="fd-bar-badge" aria-hidden="true">dev</span>
                         </button>
                         <button
                           type="button"
@@ -2549,9 +2550,10 @@ export class FrickeldaveStorePanel extends LitElement {
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                             <path
-                              d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18a8 8 0 0 1-8-8 8 8 0 0 1 8-8 8 8 0 0 1 8 8 8 8 0 0 1-8 8zm-1-13v4H7l5 5 5-5h-4V7h-2z"
+                              d="M14 4l2.29 2.29-2.88 2.88 1.42 1.42 2.88-2.88L20 10V4h-6zM10 4H4v6l2.29-2.29 4.71 4.7V20h2v-8.41l-5.29-5.3L10 4z"
                             />
                           </svg>
+                          <span class="fd-bar-badge" aria-hidden="true">prd</span>
                         </button>
                       `
                     : ""}
@@ -4700,6 +4702,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-bar-icon {
+      position: relative;
       display: inline-flex;
       flex: none;
       align-items: center;
@@ -4712,6 +4715,32 @@ export class FrickeldaveStorePanel extends LitElement {
       background: transparent;
       color: inherit;
       cursor: pointer;
+    }
+
+    /* Rein visuelles Kürzel (dev/prd) in der unteren rechten Ecke des Buttons.
+       Bewusst innerhalb der 48 px: kein Überhängen, damit weder das Klickziel
+       verkleinert noch der Fokusring oder das horizontale Scrollen beschnitten wird. */
+    .fd-bar-badge {
+      position: absolute;
+      inset-block-end: 0;
+      inset-inline-end: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      min-width: 14px;
+      height: 12px;
+      padding: 0 2px;
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius-pill);
+      background: var(--fd-surface);
+      color: var(--fd-text);
+      font-size: var(--ha-font-size-xs, 10px);
+      font-weight: var(--ha-font-weight-medium, 500);
+      line-height: 1;
+      letter-spacing: 0.02em;
+      pointer-events: none;
+      user-select: none;
     }
 
     .fd-bar-icon:hover:not(:disabled) {
@@ -6385,6 +6414,9 @@ export class FrickeldaveStorePanel extends LitElement {
       .fd-bar-actions {
         overflow-x: auto;
         scrollbar-width: none;
+        /* Platz für den 2px-Fokusring samt 2px Offset, damit das Scrollen ihn nicht abschneidet. */
+        padding-block: 5px;
+        margin-block: -5px;
       }
 
       .fd-bar-actions::-webkit-scrollbar {

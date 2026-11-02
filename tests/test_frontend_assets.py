@@ -66,3 +66,31 @@ def test_lit_bundle_exists_and_exports_lit_element() -> None:
     assert "@license" in code and "BSD-3-Clause" in code, "Lit-Lizenzbanner fehlt."
     exports = _exported_names(code)
     assert {"LitElement", "html", "css"} <= exports, f"Unerwartete Lit-Exports: {exports}"
+
+
+def _publish_button(source: str, target: str) -> str:
+    match = re.search(rf'_openPublish\("{target}"\).*?</button>', source, re.DOTALL)
+    assert match, f"Button für die Veröffentlichung nach {target} nicht gefunden."
+    return match.group(0)
+
+
+def test_publish_buttons_share_icon_and_differ_by_badge() -> None:
+    source = PANEL_PATH.read_text(encoding="utf-8")
+    buttons = {"dev": _publish_button(source, "dev"), "prod": _publish_button(source, "prod")}
+
+    icons = {}
+    for target, button in buttons.items():
+        icon = re.search(r'<path\s+d="([^"]+)"', button)
+        assert icon, f"Der {target}-Button hat kein Symbol."
+        icons[target] = icon.group(1)
+    assert icons["dev"] == icons["prod"], (
+        "Beide Veröffentlichungs-Buttons müssen dasselbe Symbol zeigen."
+    )
+
+    for target, badge_text, label in (("dev", "dev", "dev"), ("prod", "prd", "prod")):
+        button = buttons[target]
+        badge = re.search(r'<span class="fd-bar-badge" aria-hidden="true">([^<]*)</span>', button)
+        assert badge, f"Der {target}-Button braucht ein Badge."
+        assert badge.group(1) == badge_text
+        assert f'aria-label="Nach {label} veröffentlichen"' in button
+        assert f'title="Nach {label} veröffentlichen"' in button

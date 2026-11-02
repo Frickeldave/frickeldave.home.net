@@ -6,6 +6,17 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-02
+
+### Changed
+
+- **Einheitliches Symbol für beide Veröffentlichungs-Aktionen (#289).** „Nach dev
+  veröffentlichen“ und „Nach prod veröffentlichen“ nutzen in der App-Bar jetzt
+  dasselbe Branch-Symbol; die Rakete ist entfallen. Damit die beiden Buttons
+  unterscheidbar bleiben, trägt jeder ein kleines Kürzel in der unteren rechten
+  Ecke („dev“ bzw. „prd“). Das Kürzel ist rein visuell (`aria-hidden`), die
+  Unterscheidung für Screenreader läuft weiter über `aria-label` und `title`.
+
 ## [0.1.11] - 2026-11-02
 
 ### Fixed
