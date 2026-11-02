@@ -37,7 +37,6 @@ from custom_components.frickeldave_store.views import (
     MeView,
     ProductsView,
     ProductView,
-    PublishView,
     SettingsView,
 )
 
@@ -412,28 +411,23 @@ async def test_settings_patch_renames_and_deletes_locations(tmp_path: Path) -> N
     assert len(runtime.store.locations()) == 2
 
 
-async def test_settings_patch_publish_token_is_write_only(tmp_path: Path) -> None:
-    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
-    response = await SettingsView().patch(
-        FakeRequest(
-            hass,
-            "admin",
-            body={"publish": {"token": "ghp-streng-geheim", "repository": "a/b"}},
-        )
-    )
-    assert response.status == 200
-    assert b"ghp-streng-geheim" not in response.body
-    body = _payload(response)
-    assert body["publish"]["token_set"] is True
-    assert "token" not in body["publish"]
-    assert body["publish"]["repository"] == "a/b"
+async def test_settings_patch_rejects_publish_and_keeps_stored_data(tmp_path: Path) -> None:
+    """0.2.0 liest und schreibt ``settings.publish`` nicht mehr (Rückfallweg)."""
 
-    # Fehlendes Token behält das gespeicherte Geheimnis.
-    kept = await SettingsView().patch(
-        FakeRequest(hass, "admin", body={"publish": {"dev_branch": "dev"}})
+    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
+    runtime.store.settings["publish"] = {"repository": "alt/repo", "token": "ghp-alt"}
+
+    response = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"publish": {"token": "ghp-neu"}})
     )
-    assert kept.status == 200
-    assert runtime.store.settings["publish"]["token"] == "ghp-streng-geheim"
+
+    assert response.status == 400
+    error = _payload(response)["error"]
+    assert error["code"] == "validation_error"
+    assert "publish" in error["message"]
+    # Alte Daten bleiben unangetastet, werden aber nicht mehr ausgeliefert.
+    assert runtime.store.settings["publish"] == {"repository": "alt/repo", "token": "ghp-alt"}
+    assert "publish" not in _payload(await SettingsView().get(FakeRequest(hass, "admin")))
 
 
 async def test_description_suggest_accepts_optional_instructions(tmp_path: Path) -> None:
@@ -480,100 +474,6 @@ async def test_description_suggest_accepts_optional_instructions(tmp_path: Path)
         FakeRequest(hass, "user-1", body={"unbekannt": True}), article
     )
     assert invalid.status == 400
-
-
-class _BoomPublish:
-    async def async_publish(self, *args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("kaputte Veröffentlichung")
-
-
-async def test_publish_view_reports_unexpected_errors_as_internal_error(
-    tmp_path: Path, caplog: Any
-) -> None:
-    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
-    runtime.publish = _BoomPublish()  # type: ignore[assignment]
-
-    with caplog.at_level("ERROR", logger="custom_components.frickeldave_store.views"):
-        response = await PublishView().post(FakeRequest(hass, "admin", body={"target": "dev"}))
-
-    assert response.status == 500
-    body = _payload(response)
-    assert body["error"]["code"] == "internal_error"
-    assert "Unerwarteter Serverfehler" in body["error"]["message"]
-    assert "Protokoll" in body["error"]["message"]
-    record = next(item for item in caplog.records if item.name.endswith(".views"))
-    assert record.exc_info is not None, "Traceback muss geloggt werden"
-    assert "RuntimeError" in caplog.text
-
-
-async def test_publish_view_blocks_empty_catalog_and_honours_allow_empty(tmp_path: Path) -> None:
-    from custom_components.frickeldave_store.publish import PublishService, PublishSettings
-
-    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
-    runtime.store.update_settings(
-        {
-            "publish": {
-                "repository": "o/r",
-                "dev_branch": "dev",
-                "prod_branch": "main",
-                "prod_workflow": "fd-deploy-prd.yml",
-                "token": "ghp-test",
-            }
-        }
-    )
-
-    class _NoopGitHub:
-        def __init__(self, settings: PublishSettings) -> None:
-            self.settings = settings
-            self.commits = 0
-
-        async def async_read_tree(self) -> Any:
-            from custom_components.frickeldave_store.publish import RemoteTree
-
-            return RemoteTree("head", "tree", {"public/data/handmade.json": "alt"})
-
-        async def async_read_file(self, path: str) -> bytes | None:
-            return None
-
-        async def async_commit(self, artifacts: Any, changes: Any, **kwargs: Any) -> str:
-            self.commits += 1
-            return "commit"
-
-        async def async_dispatch_workflow(self, *args: Any, **kwargs: Any) -> None:
-            return None
-
-        async def async_close(self) -> None:
-            return None
-
-    runtime.publish = PublishService(runtime.store, client_factory=_NoopGitHub)
-
-    blocked = await PublishView().post(FakeRequest(hass, "admin", body={"target": "dev"}))
-    assert blocked.status == 409
-    assert _payload(blocked)["error"]["code"] == "publish_empty_catalog"
-
-    preview = await PublishView().post(
-        FakeRequest(hass, "admin", body={"target": "dev", "dry_run": True})
-    )
-    assert preview.status == 200
-    assert _payload(preview)["warning"]
-
-    allowed = await PublishView().post(
-        FakeRequest(hass, "admin", body={"target": "dev", "allow_empty": True})
-    )
-    assert allowed.status == 200
-    assert _payload(allowed)["changed"] is True
-    assert runtime.publish is not None
-
-
-async def test_publish_view_rejects_non_boolean_allow_empty(tmp_path: Path) -> None:
-    hass, _ = await _setup(tmp_path, {"admin": ["app_admin"]})
-
-    response = await PublishView().post(
-        FakeRequest(hass, "admin", body={"target": "dev", "allow_empty": "ja"})
-    )
-
-    assert response.status == 400
-    assert _payload(response)["error"]["code"] == "validation_error"
 
 
 async def test_product_responses_include_image_metadata(tmp_path: Path) -> None:

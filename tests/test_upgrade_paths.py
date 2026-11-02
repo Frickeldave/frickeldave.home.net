@@ -279,6 +279,22 @@ async def test_upgrade_keeps_every_product(
     assert len(read_store_file(store_file)["data"]["products"]) == 3
 
 
+async def test_upgrade_keeps_legacy_publish_settings_for_rollback(
+    hass_instance: HomeAssistant, tmp_path: Path
+) -> None:
+    """0.2.0 liest ``settings.publish`` nicht mehr, löscht es aber auch nicht."""
+
+    data_dir = tmp_path / "data"
+    store_file = write_store_file(data_dir, schema2_payload(), version=2, minor_version=0)
+
+    store = await load_store(hass_instance, data_dir)
+    assert store.settings["publish"] == {"repository": "Frickeldave/frickeldave.github.io"}
+
+    await store.async_save()
+    persisted = read_store_file(store_file)["data"]
+    assert persisted["settings"]["publish"] == {"repository": "Frickeldave/frickeldave.github.io"}
+
+
 @pytest.mark.parametrize("legacy_tag", ["0.1.7", "0.1.8"])
 async def test_snapshot_is_written_before_migration(
     hass_instance: HomeAssistant, tmp_path: Path, legacy_tag: str

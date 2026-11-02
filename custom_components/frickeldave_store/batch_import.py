@@ -1,38 +1,24 @@
-"""Import des bestehenden Website-Katalogs inklusive Bilder.
+"""Validierter Import-Batch in den Store (Erweiterungsvertrag, Contract 1).
 
-Standardmäßig ist der Import rein additiv und idempotent: Bestehende
-Artikelnummern werden nie überschrieben, sondern als ``skipped`` gemeldet. Es
-gibt keinen Hard-Delete-Pfad. Mit ``overwrite=True`` werden vorhandene Produkte
-zusätzlich mit dem Katalogstand überschrieben (Artikelnummer, ``createdAt``,
-Bilder, Buchungen und Archiv-Status bleiben lokal). Mit ``dry_run=True`` wird
-der Katalog zwar geladen und geprüft, aber nichts geschrieben: kein
-Store-Schreibzugriff, keine Bilddatei, kein Snapshot und kein ``updatedAt``.
+Der Batch-Pfad schreibt fertige, von einer Erweiterung geprüfte Produkte und
+optional Bilddaten in den Store – ohne Netzzugriff und ohne Quellen-Allowlist.
+Seit 0.2.0 ist das die einzige Importlogik der Basis: der frühere Katalogabruf
+(``importer.py``) ist samt frickeldave-Allowlist in die Erweiterung
+``frickeldave_store_syncfd`` gewandert.
 
-Fachliche Fehler einzelner Produkte oder Bilder landen in ``errors`` und brechen
-den Lauf nicht ab; nur ein nicht lesbares oder strukturell ungültiges
-Katalogdokument lehnt die Anfrage vollständig ab, bevor der Store verändert
-wird.
+Die fachlichen Regeln sind unverändert: archivierte Produkte bleiben
+unangetastet, ``overwrite`` übernimmt ausschließlich :data:`OVERWRITE_FIELDS`,
+und der Store legt vor dem ersten Schreiben einen Snapshot an.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import urlparse
 
-import aiohttp
-
-from .const import (
-    DEFAULT_CATALOG_URL,
-    DEFAULT_IMAGE_BASE_URL,
-    IMPORT_ALLOWED_HOSTS,
-)
 from .models import (
     CATEGORIES,
     MAX_IMAGES,
@@ -51,45 +37,12 @@ from .models import (
     normalise_text,
     to_iso,
 )
-from .store import CatalogStore, ImageStorage
+from .store import CatalogStore
 
-_LOGGER = logging.getLogger(__name__)
-
-#: Zeitlimit je HTTP-Anfrage (Katalog und Bilder).
-IMPORT_TIMEOUT = 30.0
-#: Obergrenze gleichzeitiger Bildabrufe.
-IMPORT_MAX_CONCURRENCY = 5
-#: Bildendungen in der Reihenfolge, in der sie probiert werden.
-IMAGE_SUFFIXES: tuple[str, ...] = (".jpg", ".jpeg")
-#: Der Altbestand enthält einzelne größere Dateien (bis ~12 MB); Panel-Uploads
-#: bleiben bei 10 MB. Der Import erlaubt daher bewusst etwas mehr.
-MAX_IMPORT_IMAGE_BYTES: Final = 25 * 1024 * 1024
-#: Signaturprüfung statt Content-Type: GitHub liefert große Binärdateien als
-#: ``application/octet-stream`` aus.
-IMAGE_SIGNATURES: Final[tuple[bytes, ...]] = (
-    b"\xff\xd8\xff",
-    b"\x89PNG\r\n\x1a\n",
-    b"GIF87a",
-    b"GIF89a",
-)
 #: Panel-generierte Artikelnummern sind sechsstellig; der Import akzeptiert
-#: zusätzlich kurze Altbestandsnummern (z. B. ``LAX``), damit der bestehende
+#: zusätzlich kurze Altbestandsnummern (z. B. ``LAX``), damit ein bestehender
 #: Katalog vollständig übernommen wird.
 ARTICLE_NUMBER_RE = re.compile(r"^[A-Z0-9]{1,12}$")
-#: Dateinamensschema der Bildablage (``<artikel>-NN.jpg``).
-_IMAGE_INDEX_RE = re.compile(r"-(\d{2})\.[A-Za-z]+$")
-
-
-class CatalogUnavailable(StoreError):
-    """Katalog oder Bildbasis nicht erreichbar."""
-
-    code = "catalog_unavailable"
-
-
-class CatalogInvalid(StoreError):
-    """Katalogdokument ist kein gültiges JSON oder strukturell falsch."""
-
-    code = "catalog_invalid"
 
 
 @dataclass(slots=True)
@@ -211,26 +164,6 @@ def build_summary(result: ImportResult) -> str:
     return text
 
 
-def validate_import_url(url: Any, *, label: str) -> str:
-    """Feste https-Allowlist gegen SSRF; liefert die bereinigte URL."""
-
-    if not isinstance(url, str) or not url.strip():
-        raise ValidationError(f"{label} muss eine absolute https-URL sein.")
-    value = url.strip()
-    parsed = urlparse(value)
-    if parsed.scheme != "https":
-        raise ValidationError(f"{label} muss https verwenden.")
-    if parsed.username or parsed.password:
-        raise ValidationError(f"{label} darf keine Zugangsdaten enthalten.")
-    host = (parsed.hostname or "").casefold()
-    if host not in IMPORT_ALLOWED_HOSTS:
-        allowed = ", ".join(sorted(IMPORT_ALLOWED_HOSTS))
-        raise ValidationError(f"{label} muss auf eine dieser Hosts zeigen: {allowed}.")
-    if parsed.port not in (None, 443):
-        raise ValidationError(f"{label} muss Port 443 verwenden.")
-    return value
-
-
 def map_catalog_product(raw: Any, *, stamp: str, location_ids: list[str] | None = None) -> Product:
     """Ein Katalogprodukt in das Store-Modell überführen (Schema-Version 2)."""
 
@@ -272,66 +205,6 @@ def map_catalog_product(raw: Any, *, stamp: str, location_ids: list[str] | None 
         updated_at=stamp,
         schema_version=SCHEMA_VERSION,
     )
-
-
-async def async_import_catalog(
-    store: CatalogStore,
-    *,
-    source_url: str = DEFAULT_CATALOG_URL,
-    image_base_url: str = DEFAULT_IMAGE_BASE_URL,
-    import_images: bool = True,
-    dry_run: bool = False,
-    overwrite: bool = False,
-    session: aiohttp.ClientSession | None = None,
-    request_timeout: float = IMPORT_TIMEOUT,
-    max_concurrency: int = IMPORT_MAX_CONCURRENCY,
-    stamp: str | None = None,
-) -> ImportResult:
-    """Katalog importieren.
-
-    Ohne ``overwrite`` bleiben bestehende Produkte unverändert. ``dry_run``
-    erzeugt ausschließlich eine Vorschau: Der Plan wird berechnet, aber weder
-    Store noch Bildablage werden geschrieben (kein ``async_save``, damit auch
-    kein Snapshot und kein ``updatedAt``).
-    """
-
-    source_url = validate_import_url(source_url, label="source_url")
-    image_base = validate_import_url(image_base_url, label="image_base_url").rstrip("/")
-
-    own_session = session is None
-    client: aiohttp.ClientSession = session or aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=request_timeout)
-    )
-    try:
-        document = await _async_fetch_document(client, source_url, request_timeout=request_timeout)
-        result = ImportResult(products_total=len(document["products"]), dry_run=dry_run)
-        plan = _plan_import(document["products"], result, store, stamp, overwrite=overwrite)
-        if import_images:
-            # Im Dry-Run existiert keine Bildablage als Schreibziel.
-            sink = None if dry_run else store.images
-            await _async_collect_images(
-                plan,
-                image_base,
-                client=client,
-                request_timeout=request_timeout,
-                max_concurrency=max_concurrency,
-                result=result,
-                sink=sink,
-            )
-        if dry_run:
-            result.would_create = len(plan.create)
-            result.would_overwrite = len(plan.update)
-            result.unchanged = plan.unchanged + plan.archived_skipped
-            result.skipped = result.unchanged
-            result.images_imported = sum(len(names) for names in plan.fetched_images.values())
-        else:
-            await _async_apply_plan(store, plan, result)
-        result.archived_skipped = plan.archived_skipped
-        result.summary = build_summary(result)
-    finally:
-        if own_session:
-            await client.close()
-    return result
 
 
 async def async_import_products(
@@ -613,172 +486,3 @@ async def _discard_images(store: CatalogStore, product: Product, winner: dict[st
         if image.name in keep:
             continue
         await store.images.async_delete(product.article_number, image.name)
-
-
-async def _async_fetch_document(
-    session: aiohttp.ClientSession, url: str, *, request_timeout: float
-) -> dict[str, Any]:
-    """Katalogdokument laden und strukturell prüfen (vor jeder Store-Änderung)."""
-
-    try:
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=request_timeout)
-        ) as response:
-            if response.status != 200:
-                raise CatalogUnavailable(
-                    f"Der Katalog ist nicht erreichbar (HTTP {response.status})."
-                )
-            body = await response.read()
-    except (TimeoutError, aiohttp.ClientError) as err:
-        raise CatalogUnavailable(
-            "Zeitüberschreitung oder Netzwerkfehler beim Katalogabruf."
-        ) from err
-
-    try:
-        document = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as err:
-        raise CatalogInvalid("Der Katalog ist kein gültiges JSON-Dokument.") from err
-    if not isinstance(document, dict) or not isinstance(document.get("products"), list):
-        raise CatalogInvalid("Der Katalog enthält keine Liste 'products'.")
-    return document
-
-
-async def _async_collect_images(
-    plan: ImportPlan,
-    image_base: str,
-    *,
-    client: aiohttp.ClientSession,
-    request_timeout: float,
-    max_concurrency: int,
-    result: ImportResult,
-    sink: ImageStorage | None,
-) -> None:
-    """Bilder mit begrenzter Parallelität laden; Fehler je Produkt sammeln.
-
-    ``sink`` ist im Trockenlauf ``None``; dann werden Bilddaten nur geprüft,
-    aber nirgends geschrieben.
-    """
-
-    limit = max(1, max_concurrency)
-    semaphore = asyncio.Semaphore(limit)
-
-    async def _load(product: Product) -> None:
-        product.images, fetched = await _async_product_images(
-            product,
-            image_base,
-            client=client,
-            request_timeout=request_timeout,
-            semaphore=semaphore,
-            result=result,
-            sink=sink,
-        )
-        plan.fetched_images[product.article_number] = fetched
-
-    await asyncio.gather(*(_load(product) for product in (*plan.create, *plan.update)))
-
-
-async def _async_product_images(
-    product: Product,
-    image_base: str,
-    *,
-    client: aiohttp.ClientSession,
-    request_timeout: float,
-    semaphore: asyncio.Semaphore,
-    result: ImportResult,
-    sink: ImageStorage | None,
-) -> tuple[list[Image], list[str]]:
-    """``<artikel>-01`` bis ``<artikel>-10`` prüfen; fehlende Indizes werden übersprungen.
-
-    Bereits lokal vorhandene Bilder bleiben unangetastet und werden nicht erneut
-    geladen. Zurückgegeben werden das vollständige Bildverzeichnis und die in
-    diesem Lauf neu geladenen Namen.
-    """
-
-    images: list[Image] = list(product.images)
-    existing = {image.name for image in images}
-    used_indices = {
-        int(match.group(1))
-        for match in (_IMAGE_INDEX_RE.search(name) for name in existing)
-        if match is not None
-    }
-    fetched: list[str] = []
-    for index in range(1, MAX_IMAGES + 1):
-        if len(images) >= MAX_IMAGES:
-            break
-        if index in used_indices:
-            # Lokales Bild bleibt erhalten; nichts nachladen oder schreiben.
-            continue
-        found: tuple[str, bytes] | None = None
-        for suffix in IMAGE_SUFFIXES:
-            name = f"{product.article_number}-{index:02d}{suffix}"
-            url = f"{image_base}/{product.category}/{product.article_number}/{name}"
-            outcome = await _async_fetch_image(
-                client, url, request_timeout=request_timeout, semaphore=semaphore
-            )
-            if outcome.error:
-                result.add_error(product.article_number, f"Bild {name}: {outcome.error}")
-                return images, fetched
-            if outcome.status == 404:
-                continue
-            if outcome.status != 200 or outcome.data is None:
-                result.add_error(
-                    product.article_number,
-                    f"Bild {name} konnte nicht geladen werden (HTTP {outcome.status}).",
-                )
-                return images, fetched
-            found = (name, outcome.data)
-            break
-        if found is None:
-            continue
-        name, data = found
-        if sink is not None:
-            await sink.async_write(product.article_number, name, data)
-        images.append(Image(name=name, is_main=not images))
-        fetched.append(name)
-    return images, fetched
-
-
-@dataclass(slots=True)
-class _ImageOutcome:
-    """Ergebnis eines einzelnen Bildabrufs."""
-
-    status: int | None
-    data: bytes | None = None
-    error: str = ""
-
-
-async def _async_fetch_image(
-    client: aiohttp.ClientSession,
-    url: str,
-    *,
-    request_timeout: float,
-    semaphore: asyncio.Semaphore,
-) -> _ImageOutcome:
-    async with semaphore:
-        try:
-            async with client.get(
-                url, timeout=aiohttp.ClientTimeout(total=request_timeout)
-            ) as response:
-                if response.status != 200:
-                    return _ImageOutcome(status=response.status)
-                data = await response.read()
-        except (TimeoutError, aiohttp.ClientError):
-            return _ImageOutcome(
-                status=None,
-                error="Zeitüberschreitung oder Netzwerkfehler beim Bildabruf.",
-            )
-    if not data:
-        return _ImageOutcome(status=None, error="leere Antwort.")
-    if len(data) > MAX_IMPORT_IMAGE_BYTES:
-        return _ImageOutcome(status=None, error="Datei ist größer als 25 MB.")
-    if not _looks_like_image(data):
-        return _ImageOutcome(status=None, error="kein gültiges Bild (JPEG, PNG, WebP oder GIF).")
-    return _ImageOutcome(status=200, data=data)
-
-
-def _looks_like_image(data: bytes) -> bool:
-    """Signatur prüfen; der Content-Type ist bei GitHub nicht verlässlich."""
-
-    if data.startswith(IMAGE_SIGNATURES):
-        return True
-    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"

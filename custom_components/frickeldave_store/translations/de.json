@@ -31,11 +31,7 @@
           "ai_api_key": "KI-API-Key",
           "ai_prompt": "Prompt für Beschreibungen",
           "export_path": "Exportverzeichnis (relativ zu config/)",
-          "data_path": "Speicherort der Daten",
-          "github_repository": "Website-Repository (owner/name)",
-          "github_dev_branch": "Integrationsbranch (dev)",
-          "github_prod_workflow": "Produktions-Workflow (fd-deploy-prd.yml)",
-          "github_token": "GitHub-Token (nur Schreibzugriff)"
+          "data_path": "Speicherort der Daten"
         },
         "data_description": {
           "users": "Eine Zeile pro Benutzer, zum Beispiel `ha_user_id: product,finance,app_admin`.",
@@ -45,11 +41,7 @@
           "ai_api_key": "Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um den gespeicherten Key zu behalten.",
           "ai_prompt": "Initial: „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“",
           "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis.",
-          "data_path": "config: im Home-Assistant-Backup enthalten (Standard). share/media: vom Backup ausgeschlossen, separates Backup nötig; das Verzeichnis muss eingebunden sein.",
-          "github_repository": "Repository der Website. Commits gehen auf den Integrationsbranch; main wird ausschließlich vom Workflow fd-deploy-prd aktualisiert.",
-          "github_dev_branch": "Branch für Veröffentlichungen. Ein Commit hier löst fd-ci und fd-deploy-dev aus.",
-          "github_prod_workflow": "Workflow, der dev nach main promotet und die Produktion deployt.",
-          "github_token": "Fine-grained Token mit Contents: write und Actions: write. Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um das gespeicherte Token zu behalten."
+          "data_path": "config: im Home-Assistant-Backup enthalten (Standard). share/media: vom Backup ausgeschlossen, separates Backup nötig; das Verzeichnis muss eingebunden sein."
         }
       }
     },

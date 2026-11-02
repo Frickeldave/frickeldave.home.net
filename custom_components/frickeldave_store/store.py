@@ -26,10 +26,6 @@ from .const import (
     DEFAULT_AI_ENDPOINT,
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
-    DEFAULT_PUBLISH_DEV_BRANCH,
-    DEFAULT_PUBLISH_PROD_BRANCH,
-    DEFAULT_PUBLISH_PROD_WORKFLOW,
-    DEFAULT_PUBLISH_REPOSITORY,
     IMAGES_DIR_NAME,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
@@ -67,7 +63,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 def default_settings() -> dict[str, Any]:
-    """Standard-Einstellungen inklusive KI-Anbieter und Veröffentlichung."""
+    """Standard-Einstellungen (KI-Anbieter; Veröffentlichen liegt bei der Erweiterung)."""
 
     return {
         "ai": {
@@ -75,13 +71,6 @@ def default_settings() -> dict[str, Any]:
             "model": DEFAULT_AI_MODEL,
             "prompt": DEFAULT_AI_PROMPT,
             "api_key": "",
-        },
-        "publish": {
-            "repository": DEFAULT_PUBLISH_REPOSITORY,
-            "dev_branch": DEFAULT_PUBLISH_DEV_BRANCH,
-            "prod_branch": DEFAULT_PUBLISH_PROD_BRANCH,
-            "prod_workflow": DEFAULT_PUBLISH_PROD_WORKFLOW,
-            "token": "",
         },
     }
 
@@ -208,7 +197,6 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         return base
     settings = payload.get("settings") or {}
     ai_settings = {**base["settings"]["ai"], **(settings.get("ai") or {})}
-    publish_settings = {**base["settings"]["publish"], **(settings.get("publish") or {})}
     locations = _coerce_locations(payload.get("locations"))
     location_ids = [str(item["id"]) for item in locations]
     raw_products = payload.get("products") or []
@@ -244,7 +232,13 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         "products": products,
         "tags": normalise_tags(payload.get("tags", [])),
         "bookings": bookings,
-        "settings": {**settings, "ai": ai_settings, "publish": publish_settings},
+        "settings": {
+            # ``settings`` bleibt vollständig erhalten: ein aus 0.1.x
+            # mitgebrachter Abschnitt ``publish`` wird ab 0.2.0 nicht mehr
+            # gelesen, aber auch nicht gelöscht (Rückfallweg auf 0.1.x).
+            **settings,
+            "ai": ai_settings,
+        },
         "updatedAt": payload.get("updatedAt") or to_iso(),
     }
 
@@ -796,44 +790,18 @@ class CatalogStore:
             if unknown:
                 raise ValidationError(f"Unbekannte ai-Felder: {', '.join(sorted(unknown))}")
             self._data["settings"]["ai"].update(ai_changes)
-        publish_changes = changes.get("publish")
-        if publish_changes is not None:
-            if not isinstance(publish_changes, dict):
-                raise ValidationError("publish muss ein Objekt sein.")
-            allowed_publish = {"repository", "dev_branch", "prod_branch", "prod_workflow", "token"}
-            unknown_publish = set(publish_changes) - allowed_publish
-            if unknown_publish:
-                raise ValidationError(
-                    f"Unbekannte publish-Felder: {', '.join(sorted(unknown_publish))}"
-                )
-            for key, value in publish_changes.items():
-                if key == "token":
-                    self._data["settings"]["publish"]["token"] = str(value or "")
-                    continue
-                text = str(value or "").strip()
-                if not text:
-                    raise ValidationError(f"publish.{key} darf nicht leer sein.")
-                self._data["settings"]["publish"][key] = text
         return self._data["settings"]
 
     def public_settings(self) -> dict[str, Any]:
-        """Einstellungen ohne Geheimnisse (API-Key und Token nur als Flag)."""
+        """Einstellungen ohne Geheimnisse (API-Key nur als Flag)."""
 
         ai_settings = self._data["settings"]["ai"]
-        publish_settings = self._data["settings"].get("publish", {})
         return {
             "ai": {
                 "endpoint": ai_settings.get("endpoint", ""),
                 "model": ai_settings.get("model", ""),
                 "prompt": ai_settings.get("prompt", ""),
                 "api_key_set": bool(ai_settings.get("api_key")),
-            },
-            "publish": {
-                "repository": publish_settings.get("repository", ""),
-                "dev_branch": publish_settings.get("dev_branch", ""),
-                "prod_branch": publish_settings.get("prod_branch", ""),
-                "prod_workflow": publish_settings.get("prod_workflow", ""),
-                "token_set": bool(publish_settings.get("token")),
             },
         }
 

@@ -31,9 +31,6 @@ from .const import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
     DEFAULT_EXPORT_PATH,
-    DEFAULT_PUBLISH_DEV_BRANCH,
-    DEFAULT_PUBLISH_PROD_WORKFLOW,
-    DEFAULT_PUBLISH_REPOSITORY,
     DOMAIN,
 )
 from .models import StoreError, default_locations
@@ -158,26 +155,12 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
                             "export_path": str(
                                 user_input.get("export_path") or DEFAULT_EXPORT_PATH
                             ),
-                            "github_repository": str(
-                                user_input.get("github_repository") or DEFAULT_PUBLISH_REPOSITORY
-                            ),
-                            "github_dev_branch": str(
-                                user_input.get("github_dev_branch") or DEFAULT_PUBLISH_DEV_BRANCH
-                            ),
-                            "github_prod_workflow": str(
-                                user_input.get("github_prod_workflow")
-                                or DEFAULT_PUBLISH_PROD_WORKFLOW
-                            ),
                         }
                         if api_key:
                             options["ai_api_key"] = api_key
                         else:
                             # Leeres Feld behält den gespeicherten Key; er wird nie angezeigt.
                             options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
-                        github_token = str(user_input.get("github_token", "") or "")
-                        options["github_token"] = github_token or str(
-                            current.get("github_token", "") or ""
-                        )
                         return self.async_create_entry(title="", data=options)
 
         locations_default = str(current.get("stock_locations") or "")
@@ -216,19 +199,6 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
                 schema_lib.Optional(
                     "export_path", default=str(current.get("export_path", DEFAULT_EXPORT_PATH))
                 ): str,
-                schema_lib.Optional(
-                    "github_repository",
-                    default=str(current.get("github_repository", DEFAULT_PUBLISH_REPOSITORY)),
-                ): str,
-                schema_lib.Optional(
-                    "github_dev_branch",
-                    default=str(current.get("github_dev_branch", DEFAULT_PUBLISH_DEV_BRANCH)),
-                ): str,
-                schema_lib.Optional(
-                    "github_prod_workflow",
-                    default=str(current.get("github_prod_workflow", DEFAULT_PUBLISH_PROD_WORKFLOW)),
-                ): str,
-                schema_lib.Optional("github_token", default=""): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

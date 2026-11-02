@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "frickeldave_store"
 NAME: Final = "Frickeldave Store"
 MANUFACTURER: Final = "Frickeldave"
-VERSION: Final = "0.1.17"
+VERSION: Final = "0.2.0"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/frickeldave.home.net"
 
@@ -59,16 +59,7 @@ DEFAULT_AI_PROMPT: Final = (
 
 DEFAULT_EXPORT_PATH: Final = "frickeldave_store/export"
 
-#: Veröffentlichung im Website-Repository. ``dev`` ist der Integrationsbranch,
-#: ``main`` wird ausschließlich vom Workflow ``fd-deploy-prd`` aktualisiert.
-DEFAULT_PUBLISH_REPOSITORY: Final = "Frickeldave/frickeldave.github.io"
-DEFAULT_PUBLISH_DEV_BRANCH: Final = "dev"
-DEFAULT_PUBLISH_PROD_BRANCH: Final = "main"
-DEFAULT_PUBLISH_PROD_WORKFLOW: Final = "fd-deploy-prd.yml"
-
-#: Katalogimport: vertrauenswürdige Quellen und SSRF-Allowlist.
-DEFAULT_CATALOG_URL: Final = "https://frickeldave.de/data/handmade.json"
-DEFAULT_IMAGE_BASE_URL: Final = (
-    "https://raw.githubusercontent.com/Frickeldave/frickeldave.github.io/dev/src/assets/handmade"
+#: Meldung für reservierte Fähigkeiten, die keine Erweiterung bereitstellt.
+FEATURE_NOT_INSTALLED_REASON: Final = (
+    "Die Synchronisation ist nicht installiert. Installiere Frickeldave Store Sync über HACS."
 )
-IMPORT_ALLOWED_HOSTS: Final[tuple[str, ...]] = ("frickeldave.de", "raw.githubusercontent.com")

@@ -6,8 +6,9 @@ Fehlerformat: ``{"error": {"code": ..., "message": ...}}``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -22,25 +23,25 @@ from . import (
 from .ai import AIError
 from .const import (
     API_PREFIX,
-    DEFAULT_CATALOG_URL,
-    DEFAULT_IMAGE_BASE_URL,
     DOMAIN,
+    FEATURE_NOT_INSTALLED_REASON,
     PANEL_MODULE_URL,
     VERSION,
 )
 from .export import async_export_catalog
 from .extension import (
+    CONTRACT_VERSION,
     FEATURE_IMPORT,
     FEATURE_PUBLISH,
     ExtensionError,
     FeatureRequest,
     FeatureResponse,
+    FeatureStatus,
     StoreFacade,
     feature_details,
     feature_status,
     resolve_feature,
 )
-from .importer import async_import_catalog
 from .models import (
     SCHEMA_VERSION,
     ConflictError,
@@ -58,7 +59,6 @@ from .permissions import (
     normalise_roles,
 )
 from .products import ProductFilter
-from .publish import PUBLISH_TARGETS, PublishService
 from .storage import data_path_from_entry, storage_payload
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,19 +83,6 @@ STATUS_BY_CODE: dict[str, int] = {
     "ai_invalid_response": 502,
     "schema_too_new": 503,
     "not_loaded": 503,
-    "catalog_unavailable": 502,
-    "catalog_invalid": 422,
-    "publish_not_configured": 400,
-    "publish_token_missing": 400,
-    "publish_failed": 502,
-    "publish_empty_catalog": 409,
-    "publish_artifacts_unavailable": 409,
-    "publish_removals_blocked": 409,
-    "github_unauthorized": 502,
-    "github_not_found": 404,
-    "github_conflict": 409,
-    "github_failed": 502,
-    "github_unavailable": 502,
     "internal_error": 500,
 }
 
@@ -129,10 +116,62 @@ def _internal_error_response(err: Exception, *, action: str) -> web.Response:
     )
 
 
+#: Reservierte Fähigkeiten: ab 0.2.0 ausschließlich von einer Erweiterung bedient.
+RESERVED_FEATURES: Final[tuple[str, ...]] = (FEATURE_PUBLISH, FEATURE_IMPORT)
+
+
+def _reserved_status_without_extension(
+    registered: Mapping[str, FeatureStatus],
+) -> dict[str, FeatureStatus]:
+    """Reservierte Fähigkeiten ohne registrierte Erweiterung als „nicht installiert“.
+
+    ``extension.feature_status`` führt die reservierten Namen weiterhin als
+    eingebaute Fähigkeiten (Contract 1, unverändert). Seit 0.2.0 bedient die
+    Basis sie nicht mehr selbst, deshalb meldet die HTTP-Schicht sie ohne
+    Registrierung als nicht verfügbar – inklusive Anbieter und Vertragsversion
+    der Basis, aber ohne Handler.
+    """
+
+    missing: dict[str, FeatureStatus] = {}
+    for name in RESERVED_FEATURES:
+        status = registered.get(name)
+        if status is not None and status.provider != DOMAIN:
+            continue
+        missing[name] = FeatureStatus(
+            available=False,
+            reason=FEATURE_NOT_INSTALLED_REASON,
+            provider="",
+            contract_version=CONTRACT_VERSION,
+        )
+    return missing
+
+
 def _features_payload(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
     """Feature-Status für ``/me`` und ``/settings`` (Contract 1, additiv)."""
 
-    return {name: status.as_dict() for name, status in feature_status(hass).items()}
+    statuses = dict(feature_status(hass))
+    statuses.update(_reserved_status_without_extension(statuses))
+    return {name: status.as_dict() for name, status in statuses.items()}
+
+
+def _feature_details_payload(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """Ausführliche Feature-Beschreibung; reservierte Fähigkeiten ohne Erweiterung
+    werden als nicht installiert ausgewiesen."""
+
+    details = feature_details(hass)
+    for name in _reserved_status_without_extension(feature_status(hass)):
+        entry = dict(details.get(name) or {})
+        entry.update(
+            {
+                "name": name,
+                "available": False,
+                "reason": FEATURE_NOT_INSTALLED_REASON,
+                "provider": "",
+                "contract_version": CONTRACT_VERSION,
+            }
+        )
+        details[name] = entry
+    return details
 
 
 def _hass(request: web.Request) -> HomeAssistant:
@@ -177,15 +216,6 @@ async def _optional_json_body(request: web.Request) -> dict[str, Any]:
     if not request.can_read_body:
         return {}
     return await _json_body(request)
-
-
-def _optional_url(payload: dict[str, Any], key: str) -> str | None:
-    if key not in payload:
-        return None
-    value = payload[key]
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationError(f"{key} muss eine absolute https-URL sein.")
-    return value.strip()
 
 
 async def _async_auth_users(hass: HomeAssistant) -> list[Any]:
@@ -686,7 +716,7 @@ def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> 
     payload["locations"] = runtime.store.locations_payload()
     payload["features"] = _features_payload(hass)
     # Ausführliche Beschreibung nur für die Anwendungsverwaltung (Default Deny).
-    payload["feature_details"] = feature_details(hass)
+    payload["feature_details"] = _feature_details_payload(hass)
     return payload
 
 
@@ -707,7 +737,13 @@ class SettingsView(HomeAssistantView):
             hass = _hass(request)
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
             payload = await _json_body(request)
-            unknown = set(payload) - {"ai", "storage", "publish", "locations"}
+            unknown = set(payload) - {"ai", "storage", "locations"}
+            if "publish" in unknown:
+                raise ValidationError(
+                    "Der Abschnitt 'publish' gehört seit 0.2.0 zur Erweiterung "
+                    "Frickeldave Store Sync. Token und Ziel-Repository werden dort "
+                    "gepflegt; die gespeicherten Werte bleiben unverändert."
+                )
             if unknown:
                 raise ValidationError(
                     f"Unbekannte Felder: {', '.join(sorted(unknown))}. "
@@ -739,15 +775,10 @@ class SettingsView(HomeAssistantView):
             ai_changes = changes.get("ai")
             if isinstance(ai_changes, dict) and not ai_changes.get("api_key"):
                 ai_changes.pop("api_key", None)
-            publish_changes = changes.get("publish")
-            if isinstance(publish_changes, dict) and not publish_changes.get("token"):
-                publish_changes.pop("token", None)
             runtime.store.update_settings(changes)
             if new_locations is not None:
                 runtime.store.set_locations(new_locations)
                 self._persist_locations(hass, runtime, new_locations)
-            if isinstance(publish_changes, dict) and publish_changes:
-                self._persist_publish_options(hass, runtime, publish_changes)
             await runtime.store.async_save()
 
             reload_required = False
@@ -762,37 +793,6 @@ class SettingsView(HomeAssistantView):
             return web.json_response(response)
         except StoreError as err:
             return _error_response(err)
-
-    @staticmethod
-    def _persist_publish_options(
-        hass: HomeAssistant,
-        runtime: FrickeldaveStoreRuntime,
-        changes: dict[str, Any],
-    ) -> None:
-        """Panel-Änderungen in die Optionen spiegeln (eine Quelle der Wahrheit)."""
-
-        entry = runtime.entry
-        config_entries = getattr(hass, "config_entries", None)
-        if entry is None or config_entries is None:
-            return
-        options = dict(getattr(entry, "options", None) or {})
-        mapping = {
-            "repository": "github_repository",
-            "dev_branch": "github_dev_branch",
-            "prod_branch": "github_prod_branch",
-            "prod_workflow": "github_prod_workflow",
-        }
-        updated = False
-        for key, option in mapping.items():
-            if key in changes and options.get(option) != changes[key]:
-                options[option] = changes[key]
-                updated = True
-        token = changes.get("token")
-        if token and options.get("github_token") != token:
-            options["github_token"] = token
-            updated = True
-        if updated:
-            config_entries.async_update_entry(entry, options=options)
 
     @staticmethod
     def _persist_locations(
@@ -829,127 +829,6 @@ class LocationsView(HomeAssistantView):
             return _error_response(err)
 
 
-def _validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Payload für Veröffentlichen prüfen (identisch für Alt- und Feature-Route)."""
-
-    unknown = set(payload) - {
-        "target",
-        "dry_run",
-        "message",
-        "allow_empty",
-        "confirm_removals",
-    }
-    if unknown:
-        raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
-    target = payload.get("target")
-    if target not in PUBLISH_TARGETS:
-        raise ValidationError("target muss 'dev' oder 'prod' sein.")
-    dry_run = payload.get("dry_run", False)
-    if not isinstance(dry_run, bool):
-        raise ValidationError("dry_run muss ein Wahrheitswert sein.")
-    allow_empty = payload.get("allow_empty", False)
-    if not isinstance(allow_empty, bool):
-        raise ValidationError("allow_empty muss ein Wahrheitswert sein.")
-    # Löschschutz übergehen: eigene, ausdrückliche Bestätigung je Lauf.
-    confirm_removals = payload.get("confirm_removals", False)
-    if not isinstance(confirm_removals, bool):
-        raise ValidationError("confirm_removals muss ein Wahrheitswert sein.")
-    message = payload.get("message", "")
-    if not isinstance(message, str):
-        raise ValidationError("message muss eine Zeichenkette sein.")
-    return {
-        "target": str(target),
-        "dry_run": dry_run,
-        "message": message,
-        "allow_empty": allow_empty,
-        "confirm_removals": confirm_removals,
-    }
-
-
-async def _async_publish(
-    runtime: FrickeldaveStoreRuntime, payload: dict[str, Any], user_id: str
-) -> dict[str, Any]:
-    options = _validate_publish_payload(payload)
-    service = runtime.publish or PublishService(runtime.store)
-    return await service.async_publish(
-        options["target"],
-        dry_run=options["dry_run"],
-        message=options["message"],
-        user_id=user_id,
-        allow_empty=options["allow_empty"],
-        confirm_removals=options["confirm_removals"],
-    )
-
-
-def _import_requires_admin(payload: dict[str, Any]) -> bool:
-    """Eigene Quellen können interne Adressen ansprechen: nur App-Admins."""
-
-    return "source_url" in payload or "image_base_url" in payload
-
-
-def _validate_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Payload für den Katalogimport prüfen (identisch für Alt- und Feature-Route)."""
-
-    unknown = set(payload) - {
-        "source_url",
-        "image_base_url",
-        "import_images",
-        "dry_run",
-        "overwrite",
-    }
-    if unknown:
-        raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
-    source_url = _optional_url(payload, "source_url")
-    image_base_url = _optional_url(payload, "image_base_url")
-    import_images = payload.get("import_images", True)
-    if not isinstance(import_images, bool):
-        raise ValidationError("import_images muss ein Wahrheitswert sein.")
-    dry_run = payload.get("dry_run", False)
-    if not isinstance(dry_run, bool):
-        raise ValidationError("dry_run muss ein Wahrheitswert sein.")
-    overwrite = payload.get("overwrite", False)
-    if not isinstance(overwrite, bool):
-        raise ValidationError("overwrite muss ein Wahrheitswert sein.")
-    return {
-        "source_url": source_url or DEFAULT_CATALOG_URL,
-        "image_base_url": image_base_url or DEFAULT_IMAGE_BASE_URL,
-        "import_images": import_images,
-        "dry_run": dry_run,
-        # Überschreiben bleibt bei der Rolle ``product``: es ist ein
-        # Sammel-Update auf Daten, die diese Rolle einzeln ändern darf. Der
-        # Store legt vor dem ersten Schreiben einen Snapshot an.
-        "overwrite": overwrite,
-    }
-
-
-async def _async_import(
-    runtime: FrickeldaveStoreRuntime, payload: dict[str, Any]
-) -> dict[str, Any]:
-    options = _validate_import_payload(payload)
-    result = await async_import_catalog(runtime.store, **options)
-    return result.to_dict()
-
-
-class PublishView(HomeAssistantView):
-    """Katalog nach dev oder prod veröffentlichen (Dry-Run ohne Schreibwirkung)."""
-
-    name = "api:frickeldave_store:publish"
-    url = f"{API_PREFIX}/publish"
-    requires_auth = True
-
-    async def post(self, request: web.Request) -> web.Response:
-        try:
-            runtime, user = _authorize(request, ROLE_APP_ADMIN)
-            payload = await _optional_json_body(request)
-            return web.json_response(await _async_publish(runtime, payload, str(user.id)))
-        except StoreError as err:
-            return _error_response(err)
-        except Exception as err:
-            # Fremde Fehler (OSError, JSONDecodeError, Programmierfehler) nie als
-            # nacktes 500 durchreichen: das Panel braucht eine verwertbare Meldung.
-            return _internal_error_response(err, action="Veröffentlichen")
-
-
 class ExportView(HomeAssistantView):
     name = "api:frickeldave_store:export"
     url = f"{API_PREFIX}/export"
@@ -970,33 +849,13 @@ class ExportView(HomeAssistantView):
             return _error_response(err)
 
 
-class CatalogImportView(HomeAssistantView):
-    """Bestehenden Website-Katalog importieren (optional Vorschau und Überschreiben)."""
-
-    name = "api:frickeldave_store:import_catalog"
-    url = f"{API_PREFIX}/import/catalog"
-    requires_auth = True
-
-    async def post(self, request: web.Request) -> web.Response:
-        try:
-            payload = await _optional_json_body(request)
-            runtime, _ = _authorize(
-                request,
-                ROLE_APP_ADMIN if _import_requires_admin(payload) else ROLE_PRODUCT,
-            )
-            return web.json_response(await _async_import(runtime, payload))
-        except StoreError as err:
-            return _error_response(err)
-        except Exception as err:
-            return _internal_error_response(err, action="Importieren des Katalogs")
-
-
 class FeaturesView(HomeAssistantView):
     """Generischer Einstiegspunkt für Fähigkeiten einer Erweiterung (Contract 1).
 
-    Ohne registrierte Erweiterung bedient die Basis ``publish`` und ``import``
-    selbst (Fallback); die fachliche Validierung bleibt bei der Erweiterung,
-    sobald sie die Fähigkeit übernommen hat.
+    Ab 0.2.0 bedient die Basis keine Fähigkeit mehr selbst: ``publish`` und
+    ``import`` kommen ausschließlich aus einer registrierten Erweiterung. Ohne
+    Registrierung antworten sie mit ``feature_unavailable``, unbekannte Namen mit
+    ``feature_unknown``.
     """
 
     name = "api:frickeldave_store:features"
@@ -1045,18 +904,13 @@ class FeaturesView(HomeAssistantView):
                     )
                 return web.json_response(dict(response.payload), status=response.status)
 
-            if feature == FEATURE_PUBLISH:
-                _, user = _authorize(request, ROLE_APP_ADMIN)
-                return web.json_response(await _async_publish(runtime, payload, str(user.id)))
-            if feature == FEATURE_IMPORT:
-                role = ROLE_APP_ADMIN if _import_requires_admin(payload) else ROLE_PRODUCT
-                runtime.permissions.require(str(_user(request).id), role)
-                return web.json_response(await _async_import(runtime, payload))
+            if feature in RESERVED_FEATURES:
+                raise ExtensionError("feature_unavailable", FEATURE_NOT_INSTALLED_REASON)
             raise ExtensionError(
                 "feature_unknown",
-                f"Unbekannte Fähigkeit: {feature!r}. Diese Basis kennt "
-                "'publish' und 'import'; alles andere muss eine Erweiterung "
-                "registrieren.",
+                f"Unbekannte Fähigkeit: {feature!r}. Diese Basis kennt keine "
+                "eingebauten Fähigkeiten; sie muss von einer Erweiterung "
+                "registriert werden.",
             )
         except ExtensionError as err:
             return web.json_response({"error": err.as_dict()}, status=err.status)
@@ -1088,9 +942,7 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     UserView,
     SettingsView,
     LocationsView,
-    PublishView,
     ExportView,
-    CatalogImportView,
     FeaturesView,
 )
 

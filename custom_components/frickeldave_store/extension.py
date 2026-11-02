@@ -29,9 +29,9 @@ from typing import Any, ClassVar, Final, Literal
 
 from homeassistant.core import HomeAssistant
 
+from .batch_import import ImageUpload, ImportItem, async_import_products
 from .const import DOMAIN
 from .export import build_catalog, catalog_bytes, ordered_images
-from .importer import ImageUpload, ImportItem, async_import_products
 from .models import Product, ValidationError, to_iso
 from .permissions import ALL_ROLES
 

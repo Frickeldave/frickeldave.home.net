@@ -31,11 +31,7 @@
           "ai_api_key": "AI API key",
           "ai_prompt": "Prompt for descriptions",
           "export_path": "Export directory (relative to config/)",
-          "data_path": "Data location",
-          "github_repository": "Website repository (owner/name)",
-          "github_dev_branch": "Integration branch (dev)",
-          "github_prod_workflow": "Production workflow (fd-deploy-prd.yml)",
-          "github_token": "GitHub token (write access only)"
+          "data_path": "Data location"
         },
         "data_description": {
           "users": "One line per user, for example `ha_user_id: product,finance,app_admin`.",
@@ -45,11 +41,7 @@
           "ai_api_key": "Never returned, logged or exported. Leave empty to keep the stored key.",
           "ai_prompt": "Default: “Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.”",
           "export_path": "The export writes the catalogue to public/data/handmade.json and images to src/assets/handmade/, relative to the configured directory.",
-          "data_path": "config: included in Home Assistant backups (default). share/media: excluded from backups, separate backup required; the directory must be mounted.",
-          "github_repository": "Website repository. Commits go to the integration branch; main is only updated by the fd-deploy-prd workflow.",
-          "github_dev_branch": "Branch for publications. A commit here triggers fd-ci and fd-deploy-dev.",
-          "github_prod_workflow": "Workflow that promotes dev to main and deploys production.",
-          "github_token": "Fine-grained token with Contents: write and Actions: write. Never returned, logged or exported. Leave empty to keep the stored token."
+          "data_path": "config: included in Home Assistant backups (default). share/media: excluded from backups, separate backup required; the directory must be mounted."
         }
       }
     },

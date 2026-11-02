@@ -20,16 +20,11 @@ from .const import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
     DEFAULT_EXPORT_PATH,
-    DEFAULT_PUBLISH_DEV_BRANCH,
-    DEFAULT_PUBLISH_PROD_BRANCH,
-    DEFAULT_PUBLISH_PROD_WORKFLOW,
-    DEFAULT_PUBLISH_REPOSITORY,
     DOMAIN,
 )
 from .models import StoreError
 from .permissions import PermissionManager, parse_user_grants
 from .products import ProductService
-from .publish import PublishService
 from .storage import (
     async_migrate_data_dir,
     async_prepare_data_dir,
@@ -59,8 +54,6 @@ class FrickeldaveStoreRuntime:
     export_path: Path
     #: Ziel einer bereits durchgeführten Datenmigration (Reload steht noch aus).
     migrated_to: Path | None = None
-    #: Veröffentlichung im Website-Repository (optional, damit Tests schlank bleiben).
-    publish: PublishService | None = None
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -99,7 +92,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         permissions=permissions,
         ai=AIService(store),
         export_path=Path(DEFAULT_EXPORT_PATH),
-        publish=PublishService(store),
     )
     hass.data[DOMAIN] = runtime
     await _async_apply_entry_config(hass, entry, runtime)
@@ -278,25 +270,6 @@ async def _async_apply_entry_config(
     if api_key and ai_settings.get("api_key") != api_key:
         changes["api_key"] = api_key
 
-    publish_settings = runtime.store.settings.get("publish") or {}
-    publish_changes: dict[str, Any] = {}
-    for option, key, default in (
-        ("github_repository", "repository", DEFAULT_PUBLISH_REPOSITORY),
-        ("github_dev_branch", "dev_branch", DEFAULT_PUBLISH_DEV_BRANCH),
-        ("github_prod_branch", "prod_branch", DEFAULT_PUBLISH_PROD_BRANCH),
-        ("github_prod_workflow", "prod_workflow", DEFAULT_PUBLISH_PROD_WORKFLOW),
-    ):
-        # Nur gesetzte Optionen anwenden: das Konfigurationspanel schreibt direkt in
-        # den Store und darf beim nächsten Reload nicht auf Defaults zurückfallen.
-        if option not in config:
-            continue
-        value = str(config.get(option) or default)
-        if publish_settings.get(key) != value:
-            publish_changes[key] = value
-    github_token = str(config.get("github_token") or "")
-    if github_token and publish_settings.get("token") != github_token:
-        publish_changes["token"] = github_token
-
     locations_changed = False
     location_names = config.get("stock_locations")
     if isinstance(location_names, str) and location_names.strip():
@@ -317,8 +290,6 @@ async def _async_apply_entry_config(
     settings_changes: dict[str, Any] = {}
     if changes:
         settings_changes["ai"] = changes
-    if publish_changes:
-        settings_changes["publish"] = publish_changes
     if settings_changes or locations_changed:
         runtime.store.update_settings(settings_changes)
         await runtime.store.async_save()

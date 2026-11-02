@@ -14,7 +14,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime, views
 from custom_components.frickeldave_store.ai import AIService
-from custom_components.frickeldave_store.const import DOMAIN, VERSION
+from custom_components.frickeldave_store.const import (
+    API_PREFIX,
+    DOMAIN,
+    FEATURE_NOT_INSTALLED_REASON,
+    VERSION,
+)
 from custom_components.frickeldave_store.extension import (
     CONTRACT_VERSION,
     EVENT_FEATURES_CHANGED,
@@ -25,13 +30,14 @@ from custom_components.frickeldave_store.extension import (
     FeatureRequest,
     FeatureResponse,
     FeatureSpec,
+    ImageUpload,
+    ImportItem,
     StoreFacade,
     async_get_facade,
     async_get_feature_status,
     async_register_extension,
     async_unregister_extension,
 )
-from custom_components.frickeldave_store.importer import ImageUpload, ImportItem
 from custom_components.frickeldave_store.models import Image, PermissionDenied, Product
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
@@ -230,20 +236,13 @@ async def test_me_features_without_extension(tmp_path: Path) -> None:
     hass, _ = await _setup(tmp_path)
     body = _payload(await MeView().get(FakeRequest(hass, "user-1")))
 
-    assert body["features"] == {
-        FEATURE_PUBLISH: {
-            "available": True,
-            "reason": "",
-            "provider": "frickeldave_store",
-            "contract_version": CONTRACT_VERSION,
-        },
-        FEATURE_IMPORT: {
-            "available": True,
-            "reason": "",
-            "provider": "frickeldave_store",
-            "contract_version": CONTRACT_VERSION,
-        },
+    expected = {
+        "available": False,
+        "reason": FEATURE_NOT_INSTALLED_REASON,
+        "provider": "",
+        "contract_version": CONTRACT_VERSION,
     }
+    assert body["features"] == {FEATURE_PUBLISH: expected, FEATURE_IMPORT: expected}
     assert body["roles"] == ["product"]
 
 
@@ -273,7 +272,12 @@ async def test_me_and_settings_features_with_extension(tmp_path: Path) -> None:
         "provider": EXTENSION,
         "contract_version": CONTRACT_VERSION,
     }
-    assert me["features"][FEATURE_IMPORT]["provider"] == "frickeldave_store"
+    assert me["features"][FEATURE_IMPORT] == {
+        "available": False,
+        "reason": FEATURE_NOT_INSTALLED_REASON,
+        "provider": "",
+        "contract_version": CONTRACT_VERSION,
+    }
 
     settings = _payload(await SettingsView().get(FakeRequest(hass, "admin")))
     assert settings["features"] == me["features"]
@@ -289,81 +293,31 @@ async def test_me_and_settings_features_with_extension(tmp_path: Path) -> None:
         "provider": EXTENSION,
         "contract_version": CONTRACT_VERSION,
     }
-    assert details[FEATURE_IMPORT]["provider"] == "frickeldave_store"
-    assert details[FEATURE_IMPORT]["title"] == "Katalogimport"
-    assert details[FEATURE_IMPORT]["required_role"] == "product"
+    assert details[FEATURE_IMPORT]["available"] is False
+    assert details[FEATURE_IMPORT]["provider"] == ""
+    assert details[FEATURE_IMPORT]["reason"] == FEATURE_NOT_INSTALLED_REASON
 
 
 # ------------------------------------------------------------ Feature-Route
-class StubPublish:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def async_publish(self, target: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append({"target": target, **kwargs})
-        return {"target": target, "dry_run": kwargs["dry_run"], "products": 0}
-
-
-async def test_feature_route_falls_back_to_builtin_publish(tmp_path: Path) -> None:
-    hass, runtime = await _setup(tmp_path)
-    stub = StubPublish()
-    runtime.publish = stub  # type: ignore[assignment]
-
-    response = await FeaturesView().post(
-        FakeRequest(hass, "admin", body={"target": "dev", "dry_run": True}), FEATURE_PUBLISH
-    )
-    assert response.status == 200
-    assert _payload(response) == {"target": "dev", "dry_run": True, "products": 0}
-    assert stub.calls[0]["user_id"] == "admin"
-
-
-async def test_feature_route_fallback_keeps_permissions_and_validation(tmp_path: Path) -> None:
+async def test_feature_route_has_no_builtin_fallback(tmp_path: Path) -> None:
     hass, _ = await _setup(tmp_path)
 
-    denied = await FeaturesView().post(FakeRequest(hass, "user-1", body={}), FEATURE_PUBLISH)
-    assert denied.status == 403
-    assert _payload(denied)["error"]["code"] == "forbidden"
-
-    invalid = await FeaturesView().post(
-        FakeRequest(hass, "admin", body={"target": "staging"}), FEATURE_PUBLISH
-    )
-    assert invalid.status == 400
-    assert _payload(invalid)["error"]["code"] == "validation_error"
-
-
-async def test_feature_route_falls_back_to_builtin_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    hass, _ = await _setup(tmp_path)
-    calls: list[dict[str, Any]] = []
-
-    async def fake_import(store: Any, **kwargs: Any) -> Any:
-        calls.append(kwargs)
-        return SimpleNamespace(to_dict=lambda: {"created": 0, "dry_run": kwargs["dry_run"]})
-
-    monkeypatch.setattr(views, "async_import_catalog", fake_import)
-
-    response = await FeaturesView().post(
-        FakeRequest(hass, "user-1", body={"dry_run": True}), FEATURE_IMPORT
-    )
-    assert response.status == 200
-    assert _payload(response) == {"created": 0, "dry_run": True}
-    assert calls[0]["source_url"].startswith("https://")
-
-    custom = await FeaturesView().post(
-        FakeRequest(
-            hass, "user-1", body={"source_url": "https://frickeldave.de/data/handmade.json"}
-        ),
-        FEATURE_IMPORT,
-    )
-    assert custom.status == 403
+    for feature in (FEATURE_PUBLISH, FEATURE_IMPORT):
+        response = await FeaturesView().post(
+            FakeRequest(hass, "admin", body={"target": "dev", "dry_run": True}), feature
+        )
+        assert response.status == 409
+        assert _payload(response)["error"] == {
+            "code": "feature_unavailable",
+            "message": FEATURE_NOT_INSTALLED_REASON,
+        }
 
 
-async def test_feature_route_unknown_without_extension(tmp_path: Path) -> None:
-    hass, _ = await _setup(tmp_path)
-    response = await FeaturesView().post(FakeRequest(hass, "admin", body={}), "sync")
-    assert response.status == 404
-    assert _payload(response)["error"]["code"] == "feature_unknown"
+async def test_removed_publish_and_import_routes_are_gone() -> None:
+    urls = {view.url for view in views.VIEWS}
+    assert f"{API_PREFIX}/publish" not in urls
+    assert f"{API_PREFIX}/import/catalog" not in urls
+    assert f"{API_PREFIX}/features/{{feature}}" in urls
 
 
 async def test_feature_route_dispatches_to_registration(tmp_path: Path) -> None:
@@ -647,6 +601,7 @@ async def test_registration_after_panel_setup_is_harmless(
         hass, _registration(features={FEATURE_PUBLISH: _spec(FEATURE_PUBLISH)})
     )
     await async_unregister_extension(hass, EXTENSION)
+    await hass.async_block_till_done()
     unsub()
 
     assert len(fired) == 2
