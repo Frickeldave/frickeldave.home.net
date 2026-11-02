@@ -1,15 +1,9 @@
 {
   "domain": "frickeldave_store",
   "name": "Frickeldave Store",
-  "codeowners": [
-    "@Frickeldave"
-  ],
+  "codeowners": ["@Frickeldave"],
   "config_flow": true,
-  "dependencies": [
-    "http",
-    "panel_custom",
-    "websocket_api"
-  ],
+  "dependencies": ["http", "panel_custom", "websocket_api"],
   "documentation": "https://github.com/Frickeldave/frickeldave.home.net",
   "integration_type": "service",
   "iot_class": "local_polling",
