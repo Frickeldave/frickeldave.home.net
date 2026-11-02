@@ -26,6 +26,28 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   deutschen Meldung, die auf das Home-Assistant-Protokoll verweist. Dasselbe gilt
   für den Katalogimport.
 
+### Changed
+
+- **Publish-Dialog zeigt `warning` (#289).** `normalizePublishResult` übernimmt
+  das neue Feld `warning` (`string|null` → `""`). Der Hinweis erscheint im
+  Dry-Run als Warnblock mit Symbol und Text oberhalb der Bestätigung und nach
+  einem erfolgreichen Lauf zusätzlich im Ergebnis und im Toast.
+- **Leerer Katalog im Panel (#289).** Antwortet der Server mit
+  `409 publish_empty_catalog`, erklärt der Dialog, dass eine Veröffentlichung
+  den Website-Katalog leeren würde. `allow_empty: true` wird erst gesendet,
+  nachdem die Checkbox „Ich verstehe, dass der Website-Katalog geleert wird“
+  gesetzt und „Trotzdem veröffentlichen“ bestätigt wurde. Ohne Häkchen bleibt
+  der Button gesperrt; nach Abbruch, Fehler oder erneutem Dry-Run steht der
+  Wert wieder auf `false`.
+- **Neue Serverfehler im Panel (#289).** `publish_artifacts_unavailable` und
+  `internal_error` zeigen die deutsche `message` direkt; bei `internal_error`
+  zusätzlich der Hinweis auf das Home-Assistant-Protokoll (Filter
+  `frickeldave_store`).
+- **Dry-Run-Anzeige wieder durchgängig nutzbar (#289).** Lade-, Fehler- und
+  Ergebniszustand folgen der Serverantwort; `busy` sperrt Aktions- und
+  Schließen-Buttons während einer laufenden Anfrage. Statuswechsel werden über
+  `aria-live` angekündigt, die Bestätigung ist ein 48 px hohes Touch-Ziel.
+
 ### Fixed
 
 - **Veröffentlichen scheiterte an chunked GitHub-Antworten (#289).**

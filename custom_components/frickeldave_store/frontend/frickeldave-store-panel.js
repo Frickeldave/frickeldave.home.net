@@ -239,6 +239,7 @@ const normalizePublishResult = (data) => {
       workflow: typeof deployment.workflow === "string" ? deployment.workflow : "",
       branch: typeof deployment.branch === "string" ? deployment.branch : "",
     },
+    warning: typeof payload.warning === "string" ? payload.warning : "",
     summary: typeof payload.summary === "string" ? payload.summary : "",
   };
 };
@@ -4198,6 +4199,8 @@ export class FrickeldaveStorePanel extends LitElement {
       error: "",
       result: null,
       message: "",
+      emptyCatalog: false,
+      allowEmpty: false,
     };
     this._requestPublish(true);
   }
@@ -4217,15 +4220,42 @@ export class FrickeldaveStorePanel extends LitElement {
     this._publishDialog = { ...this._publishDialog, message: String(value ?? "").slice(0, 200) };
   }
 
+  _setPublishAllowEmpty(value) {
+    if (!this._publishDialog) {
+      return;
+    }
+    this._publishDialog = { ...this._publishDialog, allowEmpty: Boolean(value) };
+  }
+
   _publishErrorText(error) {
     const text = this._errorText(error);
-    if (
-      error instanceof ApiError &&
-      (error.code === "publish_token_missing" || error.code === "publish_not_configured")
-    ) {
-      return `${text} Hinterlege das Token unter Einstellungen → Frickeldave Store → Veröffentlichen.`;
+    if (error instanceof ApiError) {
+      if (error.code === "publish_token_missing" || error.code === "publish_not_configured") {
+        return `${text} Hinterlege das Token unter Einstellungen → Frickeldave Store → Veröffentlichen.`;
+      }
+      if (error.code === "internal_error") {
+        return `${text} Details stehen im Home-Assistant-Protokoll (Filter: frickeldave_store).`;
+      }
     }
     return text;
+  }
+
+  _publishStatusText(dialog) {
+    if (dialog.busy) {
+      return "Anfrage läuft …";
+    }
+    if (dialog.phase === "done") {
+      return "Veröffentlichung abgeschlossen.";
+    }
+    if (dialog.phase === "error") {
+      return "Dry-Run fehlgeschlagen.";
+    }
+    if (dialog.phase === "dry-run") {
+      return dialog.emptyCatalog
+        ? "Veröffentlichung abgelehnt: Der Store ist leer."
+        : "Dry-Run abgeschlossen.";
+    }
+    return "";
   }
 
   _publishToastMessage(result) {
@@ -4238,7 +4268,8 @@ export class FrickeldaveStorePanel extends LitElement {
     const deployment = result.deployment.triggered
       ? "Deployment ausgelöst"
       : "kein Deployment ausgelöst";
-    return `Nach ${target} veröffentlicht: ${commit}, ${deployment}.`;
+    const base = `Nach ${target} veröffentlicht: ${commit}, ${deployment}.`;
+    return result.warning ? `${base} ${result.warning}` : base;
   }
 
   async _requestPublish(dryRun) {
@@ -4246,6 +4277,7 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!dialog) {
       return;
     }
+    const allowEmpty = !dryRun && Boolean(dialog.allowEmpty);
     if (!dryRun) {
       this._publishDialog = { ...dialog, busy: true, error: "" };
     }
@@ -4256,6 +4288,7 @@ export class FrickeldaveStorePanel extends LitElement {
         body: {
           target: dialog.target,
           dry_run: Boolean(dryRun),
+          ...(allowEmpty ? { allow_empty: true } : {}),
           ...(message ? { message } : {}),
         },
         timeoutMs: IMPORT_TIMEOUT_MS,
@@ -4271,6 +4304,8 @@ export class FrickeldaveStorePanel extends LitElement {
           busy: false,
           error: "",
           result,
+          emptyCatalog: false,
+          allowEmpty: false,
         };
       } else {
         this._publishDialog = {
@@ -4279,6 +4314,8 @@ export class FrickeldaveStorePanel extends LitElement {
           busy: false,
           error: "",
           result,
+          emptyCatalog: false,
+          allowEmpty: false,
         };
         this._showToast(this._publishToastMessage(result));
       }
@@ -4289,12 +4326,28 @@ export class FrickeldaveStorePanel extends LitElement {
       if (!this._publishDialog) {
         return;
       }
+      const code = error instanceof ApiError ? error.code : "";
+      const emptyCatalog = !dryRun && code === "publish_empty_catalog";
       this._publishDialog = {
         ...this._publishDialog,
         phase: dryRun ? "error" : "dry-run",
         busy: false,
         error: this._publishErrorText(error),
+        emptyCatalog,
+        // Zustimmung gilt nie fort: nach einem Fehler und nach jedem Abbruch
+        // muss der Notausgang erneut bewusst gesetzt werden.
+        allowEmpty: false,
       };
+      if (emptyCatalog) {
+        this.updateComplete
+          .then(() => {
+            const checkbox = this.renderRoot?.querySelector("#fd-publish-allow-empty");
+            if (checkbox && typeof checkbox.focus === "function") {
+              checkbox.focus();
+            }
+          })
+          .catch(() => {});
+      }
     }
   }
 
@@ -4326,6 +4379,8 @@ export class FrickeldaveStorePanel extends LitElement {
     const result = dialog.result;
     const done = dialog.phase === "done";
     const dryRun = dialog.phase === "dry-run";
+    const emptyCatalog = Boolean(dialog.emptyCatalog) && !done;
+    const warning = emptyCatalog ? "" : result?.warning || "";
     const deploymentBranch = result?.deployment?.branch || result?.branch || "";
 
     return html`
@@ -4363,20 +4418,57 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
 
         <div class="fd-dialog-body">
-          ${dialog.error
-            ? html`<div class="fd-banner fd-banner--error" role="alert">
-                <p>${dialog.error}</p>
-                ${dialog.phase === "error"
-                  ? html`<div class="fd-inline-actions">
-                      <button
-                        type="button"
-                        class="fd-button fd-button--small"
-                        @click=${() => this._requestPublish(true)}
-                      >
-                        Dry-Run erneut starten
-                      </button>
-                    </div>`
-                  : ""}
+          <p class="fd-sr-only" role="status">${this._publishStatusText(dialog)}</p>
+
+          ${emptyCatalog
+            ? html`
+                <div class="fd-banner fd-banner--warning" role="alert">
+                  <p><strong>Veröffentlichung abgelehnt.</strong></p>
+                  <p>${dialog.error}</p>
+                  <p>
+                    Wenn du fortfährst, zeigt die Website keine Produkte mehr, bis du wieder welche
+                    veröffentlichst.
+                  </p>
+                </div>
+                <section class="fd-publish-confirm" aria-labelledby="fd-publish-empty-title">
+                  <h3 id="fd-publish-empty-title">Leeren bestätigen</h3>
+                  <label class="fd-switch">
+                    <input
+                      id="fd-publish-allow-empty"
+                      type="checkbox"
+                      .checked=${Boolean(dialog.allowEmpty)}
+                      ?disabled=${dialog.busy}
+                      aria-describedby="fd-publish-empty-hint"
+                      @change=${(event) => this._setPublishAllowEmpty(event.target.checked)}
+                    />
+                    <span>Ich verstehe, dass der Website-Katalog geleert wird</span>
+                  </label>
+                  <p class="fd-hint" id="fd-publish-empty-hint">
+                    „Trotzdem veröffentlichen“ ist erst nach dem Anhaken möglich. Die Zustimmung gilt
+                    nur für diesen Lauf und wird nicht gespeichert.
+                  </p>
+                </section>
+              `
+            : dialog.error
+              ? html`<div class="fd-banner fd-banner--error" role="alert">
+                  <p>${dialog.error}</p>
+                  ${dialog.phase === "error"
+                    ? html`<div class="fd-inline-actions">
+                        <button
+                          type="button"
+                          class="fd-button fd-button--small"
+                          @click=${() => this._requestPublish(true)}
+                        >
+                          Dry-Run erneut starten
+                        </button>
+                      </div>`
+                    : ""}
+                </div>`
+              : ""}
+
+          ${warning
+            ? html`<div class="fd-banner fd-banner--warning" role="note">
+                <p>${warning}</p>
               </div>`
             : ""}
 
@@ -4503,26 +4595,46 @@ export class FrickeldaveStorePanel extends LitElement {
             ? html`<button type="button" class="fd-button fd-button--primary" @click=${() => this._closePublish()}>
                 Schließen
               </button>`
-            : html`
-                <button
-                  type="button"
-                  class="fd-button fd-button--plain"
-                  @click=${() => this._closePublish()}
-                  ?disabled=${dialog.busy}
-                  data-autofocus
-                >
-                  Abbrechen
-                </button>
-                <button
-                  type="button"
-                  class="fd-button fd-button--primary"
-                  @click=${() => this._requestPublish(false)}
-                  ?disabled=${!dryRun || dialog.busy}
-                  aria-busy=${dialog.busy ? "true" : "false"}
-                >
-                  ${dialog.busy ? "Veröffentlichen …" : "Jetzt veröffentlichen"}
-                </button>
-              `}
+            : emptyCatalog
+              ? html`
+                  <button
+                    type="button"
+                    class="fd-button fd-button--plain"
+                    @click=${() => this._closePublish()}
+                    ?disabled=${dialog.busy}
+                  >
+                    Abbrechen
+                  </button>
+                  <button
+                    type="button"
+                    class="fd-button fd-button--danger"
+                    @click=${() => this._requestPublish(false)}
+                    ?disabled=${!dialog.allowEmpty || dialog.busy}
+                    aria-busy=${dialog.busy ? "true" : "false"}
+                  >
+                    ${dialog.busy ? "Veröffentlichen …" : "Trotzdem veröffentlichen"}
+                  </button>
+                `
+              : html`
+                  <button
+                    type="button"
+                    class="fd-button fd-button--plain"
+                    @click=${() => this._closePublish()}
+                    ?disabled=${dialog.busy}
+                    data-autofocus
+                  >
+                    Abbrechen
+                  </button>
+                  <button
+                    type="button"
+                    class="fd-button fd-button--primary"
+                    @click=${() => this._requestPublish(false)}
+                    ?disabled=${!dryRun || dialog.busy}
+                    aria-busy=${dialog.busy ? "true" : "false"}
+                  >
+                    ${dialog.busy ? "Veröffentlichen …" : "Jetzt veröffentlichen"}
+                  </button>
+                `}
         </div>
       </dialog>
     `;
@@ -6610,6 +6722,22 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-publish-section h3 {
+      margin: 0;
+      font-size: var(--ha-font-size-m, 14px);
+      font-weight: 500;
+    }
+
+    .fd-publish-confirm {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      padding: var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-publish-confirm h3 {
       margin: 0;
       font-size: var(--ha-font-size-m, 14px);
       font-weight: 500;
