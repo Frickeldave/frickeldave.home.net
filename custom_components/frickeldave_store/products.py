@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from .const import API_PREFIX
+from .imaging import (
+    async_inspect_paths,
+    async_optimize_image,
+    content_type_for_name,
+    read_info_sync,
+)
 from .models import (
     ARTICLE_NUMBER_LENGTH,
     BOOKING_TYPES,
@@ -504,18 +512,60 @@ class ProductService:
     async def async_list_images(self, article_number: str) -> list[dict[str, Any]]:
         product = await self.async_get(article_number, include_archived=True)
         self._sync_images(product)
+        return await self.image_payloads(product)
+
+    async def image_payloads(self, product: Product) -> list[dict[str, Any]]:
+        """Bilder eines Produkts inklusive Größenmetadaten (aus den Dateien gelesen)."""
+
         if not product.images:
             return []
+        paths = [
+            self._store.images.path_for(product.article_number, image.name)
+            for image in product.images
+        ]
+        infos = await async_inspect_paths(paths)
         return [
             {
                 "name": image.name,
-                "url": (
-                    f"/api/frickeldave_store/products/{product.article_number}/images/{image.name}"
-                ),
+                "url": f"{API_PREFIX}/products/{product.article_number}/images/{image.name}",
                 "is_main": image.is_main,
+                **info.to_dict(),
             }
+            for image, info in zip(product.images, infos, strict=True)
+        ]
+
+    async def async_serialise_product(self, product: Product) -> dict[str, Any]:
+        """Produkt-Dict für die API, Bilder mit ``bytes``/``width``/``height``/``oversized``."""
+
+        payloads = await self.async_serialise_products([product])
+        return payloads[0]
+
+    async def async_serialise_products(self, products: list[Product]) -> list[dict[str, Any]]:
+        """Mehrere Produkte mit Größenmetadaten – ein Executor-Lauf für alle Bilder."""
+
+        self._sync_images_all(products)
+        paths = [
+            self._store.images.path_for(product.article_number, image.name)
+            for product in products
             for image in product.images
         ]
+        infos = await async_inspect_paths(paths)
+        payloads: list[dict[str, Any]] = []
+        cursor = 0
+        for product in products:
+            payload = product.to_dict()
+            count = len(product.images)
+            payload["images"] = [
+                {"name": image.name, "is_main": image.is_main, **infos[cursor + index].to_dict()}
+                for index, image in enumerate(product.images)
+            ]
+            cursor += count
+            payloads.append(payload)
+        return payloads
+
+    def _sync_images_all(self, products: list[Product]) -> None:
+        for product in products:
+            self._sync_images(product)
 
     async def async_add_image(
         self,
@@ -534,6 +584,8 @@ class ProductService:
         if len(data) > MAX_IMAGE_BYTES:
             raise ValidationError("Das Bild ist größer als 10 MB.", code="file_too_large")
 
+        # Grenze zuerst prüfen (billig, ohne Dekodieren); danach wird außerhalb
+        # der Sperre verkleinert, damit CPU-Arbeit keine Schreibvorgänge blockiert.
         async with self._store.lock:
             product = self._store.get_product(article_number, include_archived=True)
             if len(product.images) >= MAX_IMAGES:
@@ -541,11 +593,21 @@ class ProductService:
                     f"Maximal {MAX_IMAGES} Bilder pro Produkt. Bitte zuerst ein Bild löschen.",
                     code="image_limit",
                 )
-            suffix = ALLOWED_CONTENT_TYPES[content_type]
+        optimized = await async_optimize_image(data, content_type)
+
+        async with self._store.lock:
+            product = self._store.get_product(article_number, include_archived=True)
+            if len(product.images) >= MAX_IMAGES:
+                raise ImageLimitError(
+                    f"Maximal {MAX_IMAGES} Bilder pro Produkt. Bitte zuerst ein Bild löschen.",
+                    code="image_limit",
+                )
             existing = [image.name for image in product.images]
             base_name = next_image_name(product.article_number, existing)
-            name = f"{Path(base_name).stem}{suffix}"
-            written = await self._store.images.async_write(product.article_number, name, data)
+            name = f"{Path(base_name).stem}{optimized.suffix}"
+            written = await self._store.images.async_write(
+                product.article_number, name, optimized.data
+            )
             product.images.append(Image(name=name, is_main=not product.images))
             try:
                 self._store.put_product(product)
@@ -554,7 +616,13 @@ class ProductService:
                 await self._store.images.async_delete(product.article_number, name)
                 raise
         _ = written, filename
-        return {"images": await self.async_list_images(article_number)}
+        return {
+            "images": await self.async_list_images(article_number),
+            "original": optimized.original_payload(),
+            "stored": optimized.stored_payload(),
+            "resized": optimized.resized,
+            "optimize_message": optimized.message,
+        }
 
     async def async_delete_image(self, article_number: str, name: str) -> dict[str, Any]:
         async with self._store.lock:
@@ -592,6 +660,112 @@ class ProductService:
             self._store.put_product(product)
             await self._store.async_save()
         return {"images": await self.async_list_images(article_number)}
+
+    async def async_optimize_images(self, article_number: str) -> dict[str, Any]:
+        """Alle zu großen Bilder eines Produkts verkleinern (idempotent).
+
+        Reihenfolge und Hauptbild bleiben erhalten. Ändert sich durch die
+        Formatwahl die Dateiendung, wird das Bild an derselben Listenposition
+        umbenannt. Fehler einzelner Bilder brechen den Lauf nicht ab.
+        """
+
+        async with self._store.lock:
+            product = self._store.get_product(article_number, include_archived=True)
+            self._sync_images(product)
+            results: list[dict[str, Any]] = []
+            changed = False
+            snapshot_taken = False
+            bytes_before_total = 0
+            bytes_after_total = 0
+            for image in list(product.images):
+                original_name = image.name
+                path = self._store.images.path_for(product.article_number, image.name)
+                before = await asyncio.to_thread(read_info_sync, path)
+                bytes_before_total += before.bytes
+                try:
+                    raw = await asyncio.to_thread(path.read_bytes)
+                    optimized = await async_optimize_image(raw, content_type_for_name(image.name))
+                except (OSError, ValidationError) as err:
+                    bytes_after_total += before.bytes
+                    message = (
+                        err.message
+                        if isinstance(err, ValidationError)
+                        else "Die Bilddatei konnte nicht gelesen werden."
+                    )
+                    results.append(
+                        {
+                            "name": image.name,
+                            "previous_name": original_name,
+                            "before": before.to_dict(),
+                            "after": before.to_dict(),
+                            "resized": False,
+                            "message": message,
+                            "error": message,
+                        }
+                    )
+                    continue
+                stored = optimized.stored_payload()
+                if optimized.resized:
+                    if not snapshot_taken:
+                        # Snapshot der Metadaten vor dem ersten Überschreiben.
+                        await self._store.async_snapshot("pre-image-optimize")
+                        snapshot_taken = True
+                    new_name = f"{Path(image.name).stem}{optimized.suffix}"
+                    try:
+                        await self._store.images.async_write(
+                            product.article_number, new_name, optimized.data
+                        )
+                        if new_name != image.name:
+                            await self._store.images.async_delete(
+                                product.article_number, image.name
+                            )
+                            image.name = new_name
+                    except OSError as err:
+                        bytes_after_total += before.bytes
+                        message = f"Das Bild konnte nicht geschrieben werden: {err}"
+                        results.append(
+                            {
+                                "name": original_name,
+                                "previous_name": original_name,
+                                "before": before.to_dict(),
+                                "after": before.to_dict(),
+                                "resized": False,
+                                "message": message,
+                                "error": message,
+                            }
+                        )
+                        continue
+                    changed = True
+                bytes_after_total += int(stored["bytes"])
+                results.append(
+                    {
+                        "name": image.name,
+                        "previous_name": original_name,
+                        "before": optimized.original_payload(),
+                        "after": stored,
+                        "resized": optimized.resized,
+                        "message": optimized.message,
+                        "error": None,
+                    }
+                )
+            if changed:
+                self._store.put_product(product)
+                await self._store.async_save()
+        saved_percent = (
+            round((bytes_before_total - bytes_after_total) / bytes_before_total * 100, 1)
+            if bytes_before_total
+            else 0.0
+        )
+        return {
+            "results": results,
+            "summary": {
+                "count": len(results),
+                "bytes_before": bytes_before_total,
+                "bytes_after": bytes_after_total,
+                "saved_percent": saved_percent,
+            },
+            "images": await self.async_list_images(article_number),
+        }
 
     async def async_read_image(self, article_number: str, name: str) -> tuple[Path, str]:
         product = await self.async_get(article_number, include_archived=True)

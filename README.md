@@ -364,6 +364,7 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | GET, DELETE | `/products/{article_number}/images/{name}` |
 | POST | `/products/{article_number}/images/order` |
 | POST | `/products/{article_number}/images/main` |
+| POST | `/products/{article_number}/images/optimize` (`product`; Bestandsbilder verkleinern) |
 | GET, POST | `/products/{article_number}/stock` |
 | POST | `/products/{article_number}/description/suggest` |
 | GET, POST | `/tags` |
@@ -407,6 +408,63 @@ belegtes Ziel oder eine Lagerstätte mit Bestand → `409`.
 `DELETE /users/{user_id}` entfernt die Freigabe; beide antworten mit derselben Struktur
 wie `GET /users`. Unbekannte Rollen, leere Rollenlisten und das Entfernen der letzten
 `app_admin`-Freigabe werden abgelehnt (`400` bzw. `409`).
+
+## Bilder: Upload, Verkleinerung und Metadaten
+
+`POST /products/{article_number}/images` (multipart, Feld `file`) nimmt JPEG, PNG,
+WebP und GIF bis 10 MB an und **verkleinert automatisch**:
+
+| Ausgangsbild | Ergebnis |
+| --- | --- |
+| Lange Kante > 1600 px | auf 1600 px verkleinert (nie hochskaliert) |
+| JPEG | neu als JPEG, Qualität 82, progressiv, ohne EXIF/GPS/Kommentare |
+| PNG/WebP **mit** Transparenz | WebP, Qualität 85, Alpha bleibt erhalten |
+| PNG/WebP **ohne** Transparenz | JPEG, Qualität 82 |
+| GIF (auch animiert) und animiertes WebP | unverändert durchgereicht |
+| Bereits passend (≤ 1600 px **und** ≤ 400 KiB) | byteweise übernommen, kein Re-Encoding |
+
+Die Dateiendung folgt dem Ergebnis: aus `LA0001-03.png` mit Transparenz wird
+`LA0001-03.webp`. Defekte Dateien werden mit `400 image_invalid` und deutscher
+Meldung abgelehnt; fehlt Pillow, antwortet die Route mit `pillow_missing`.
+
+Die Antwort enthält zusätzlich zu `images`:
+
+```json
+{
+  "original": {"bytes": 12582912, "width": 4032, "height": 3024, "content_type": "image/jpeg"},
+  "stored": {"bytes": 285000, "width": 1600, "height": 1200, "content_type": "image/jpeg"},
+  "resized": true,
+  "optimize_message": "Bild von 12,0 MB auf 278 KB verkleinert (4032×3024 → 1600×1200)."
+}
+```
+
+`GET /products/{article_number}/images`, die Produktliste und das Produktdetail
+liefern je Bild `bytes`, `width`, `height`, `content_type` und `oversized`
+(`true`, wenn die lange Kante > 1600 px **oder** die Datei > 400 KiB ist). Die
+Werte werden beim Lesen aus den Dateien ermittelt und nicht im Store gespeichert.
+
+`POST /products/{article_number}/images/optimize` verkleinert alle zu großen
+Bilder eines Produkts nach denselben Regeln, behält Reihenfolge und Hauptbild und
+ist idempotent (zweiter Aufruf: `resized: false`). Vor dem ersten Überschreiben
+entsteht ein Snapshot der Metadaten (`backups/*-pre-image-optimize.json`).
+
+```json
+{
+  "results": [
+    {"name": "LA0001-01.webp", "previous_name": "LA0001-01.png",
+     "before": {"bytes": 2400000, "width": 3000, "height": 2000, "content_type": "image/png"},
+     "after": {"bytes": 210000, "width": 1600, "height": 1067, "content_type": "image/webp"},
+     "resized": true, "message": "Bild von 2,3 MB auf 205 KB verkleinert (3000×2000 → 1600×1067).",
+     "error": null}
+  ],
+  "summary": {"count": 1, "bytes_before": 2400000, "bytes_after": 210000, "saved_percent": 91.2},
+  "images": [{"name": "LA0001-01.webp", "width": 1600, "height": 1067, "bytes": 210000,
+              "content_type": "image/webp", "oversized": false}]
+}
+```
+
+Fehler einzelner Bilder brechen den Lauf nicht ab; sie erscheinen mit `error`
+und `resized: false`, die übrigen Bilder werden weiter verarbeitet.
 
 WebSocket-Kommandos: `frickeldave_store/me`, `frickeldave_store/products`,
 `frickeldave_store/subscribe`.

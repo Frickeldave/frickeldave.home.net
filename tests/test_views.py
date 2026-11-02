@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
+from image_helpers import jpeg_bytes, png_bytes
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.ai import AIError, AIService
@@ -20,7 +21,7 @@ from custom_components.frickeldave_store.const import (
     PANEL_MODULE_URL,
     VERSION,
 )
-from custom_components.frickeldave_store.models import SCHEMA_VERSION
+from custom_components.frickeldave_store.models import SCHEMA_VERSION, Image
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.store import CatalogStore
@@ -30,6 +31,7 @@ from custom_components.frickeldave_store.views import (
     ArticleNumberView,
     DescriptionSuggestView,
     ExportView,
+    ImagesOptimizeView,
     ImagesView,
     LocationsView,
     MeView,
@@ -237,6 +239,9 @@ async def test_article_number_route_wins_over_product_route(tmp_path: Path) -> N
     assert product_match.route.resource.canonical == f"{API_PREFIX}/products/{{article_number}}"
 
 
+_JPEG = jpeg_bytes((64, 48))
+
+
 async def test_eleventh_image_upload_rejected_via_api(tmp_path: Path) -> None:
     hass, _ = await _setup(tmp_path, {"user-1": ["product"]})
     create = await ProductsView().post(
@@ -246,13 +251,13 @@ async def test_eleventh_image_upload_rejected_via_api(tmp_path: Path) -> None:
     upload = SimpleNamespace(
         content_type="image/jpeg",
         filename="bild.jpg",
-        file=io.BytesIO(b"\xff\xd8bild"),
+        file=io.BytesIO(_JPEG),
     )
     for _ in range(10):
         response = await ImagesView().post(FakeRequest(hass, "user-1", upload=upload), article)
         assert response.status == 201
         upload = SimpleNamespace(
-            content_type="image/jpeg", filename="bild.jpg", file=io.BytesIO(b"\xff\xd8bild")
+            content_type="image/jpeg", filename="bild.jpg", file=io.BytesIO(_JPEG)
         )
     rejected = await ImagesView().post(
         FakeRequest(
@@ -569,3 +574,71 @@ async def test_publish_view_rejects_non_boolean_allow_empty(tmp_path: Path) -> N
 
     assert response.status == 400
     assert _payload(response)["error"]["code"] == "validation_error"
+
+
+async def test_product_responses_include_image_metadata(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
+    create = await ProductsView().post(
+        FakeRequest(hass, "user-1", body={"name": "Schild", "category": "LA"})
+    )
+    article = _payload(create)["articleNumber"]
+    upload = SimpleNamespace(
+        content_type="image/jpeg",
+        filename="bild.jpg",
+        file=io.BytesIO(jpeg_bytes((320, 240), quality=60)),
+    )
+    response = await ImagesView().post(FakeRequest(hass, "user-1", upload=upload), article)
+    body = _payload(response)
+
+    assert body["resized"] is False
+    assert body["original"]["width"] == 320
+    assert body["stored"]["content_type"] == "image/jpeg"
+    stored = body["images"][0]
+    assert stored["width"] == 320 and stored["height"] == 240
+    assert stored["oversized"] is False
+
+    listing = _payload(await ProductsView().get(FakeRequest(hass, "user-1")))
+    image = listing["products"][0]["images"][0]
+    assert image["bytes"] > 0
+    assert image["width"] == 320
+    assert image["content_type"] == "image/jpeg"
+    detail = _payload(await ProductView().get(FakeRequest(hass, "user-1"), article))
+    assert detail["images"][0]["oversized"] is False
+
+
+async def test_optimize_endpoint_requires_product_role(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"user-1": ["product"], "gast": []})
+    create = await ProductsView().post(
+        FakeRequest(hass, "user-1", body={"name": "Schild", "category": "LA"})
+    )
+    article = _payload(create)["articleNumber"]
+
+    denied = await ImagesOptimizeView().post(FakeRequest(hass, "gast"), article)
+    assert denied.status == 403
+
+
+async def test_optimize_endpoint_resizes_existing_images(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
+    create = await ProductsView().post(
+        FakeRequest(hass, "user-1", body={"name": "Schild", "category": "LA"})
+    )
+    article = _payload(create)["articleNumber"]
+    await runtime.store.images.async_write(
+        article, "LA0001-01.png", png_bytes((2400, 1200), alpha=True)
+    )
+    product = runtime.store.get_product(article)
+    product.images.append(Image(name="LA0001-01.png", is_main=True))
+    runtime.store.put_product(product)
+    await runtime.store.async_save()
+
+    response = await ImagesOptimizeView().post(FakeRequest(hass, "user-1"), article)
+    body = _payload(response)
+
+    assert response.status == 200
+    assert body["summary"]["count"] == 1
+    assert body["results"][0]["resized"] is True
+    assert body["images"][0]["name"] == "LA0001-01.webp"
+    assert body["images"][0]["oversized"] is False
+
+    again = _payload(await ImagesOptimizeView().post(FakeRequest(hass, "user-1"), article))
+    assert again["results"][0]["resized"] is False

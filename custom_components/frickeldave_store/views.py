@@ -58,6 +58,8 @@ STATUS_BY_CODE: dict[str, int] = {
     "archive_endpoint_required": 400,
     "unsupported_media_type": 415,
     "file_too_large": 413,
+    "image_invalid": 400,
+    "pillow_missing": 500,
     "not_found": 404,
     "conflict": 409,
     "image_limit": 409,
@@ -301,9 +303,8 @@ class ProductsView(HomeAssistantView):
             runtime, _ = _authorize(request, ROLE_PRODUCT)
             filters = ProductFilter.from_query(dict(request.query))
             products, total = await runtime.products.async_list(filters)
-            return web.json_response(
-                {"products": [item.to_dict() for item in products], "total": total}
-            )
+            payloads = await runtime.products.async_serialise_products(products)
+            return web.json_response({"products": payloads, "total": total})
         except StoreError as err:
             return _error_response(err)
 
@@ -348,7 +349,7 @@ class ProductView(HomeAssistantView):
         try:
             runtime, _ = _authorize(request, ROLE_PRODUCT)
             product = await runtime.products.async_get(article_number)
-            return web.json_response(product.to_dict())
+            return web.json_response(await runtime.products.async_serialise_product(product))
         except StoreError as err:
             return _error_response(err)
 
@@ -357,7 +358,7 @@ class ProductView(HomeAssistantView):
             runtime, _ = _authorize(request, ROLE_PRODUCT)
             payload = await _json_body(request)
             product = await runtime.products.async_update(article_number, payload)
-            return web.json_response(product.to_dict())
+            return web.json_response(await runtime.products.async_serialise_product(product))
         except StoreError as err:
             return _error_response(err)
 
@@ -371,7 +372,9 @@ class ArchiveView(HomeAssistantView):
         try:
             runtime, _ = _authorize(request, ROLE_PRODUCT)
             product = await runtime.products.async_archive(article_number)
-            return web.json_response({"product": product.to_dict()})
+            return web.json_response(
+                {"product": await runtime.products.async_serialise_product(product)}
+            )
         except StoreError as err:
             return _error_response(err)
 
@@ -425,6 +428,22 @@ class ImageFileView(HomeAssistantView):
                 raise NotFoundError(f"Bild {name} nicht gefunden.")
             body = await _hass(request).async_add_executor_job(path.read_bytes)
             return web.Response(body=body, content_type=content_type)
+        except StoreError as err:
+            return _error_response(err)
+
+
+class ImagesOptimizeView(HomeAssistantView):
+    """Alle zu großen Bilder eines Produkts verkleinern (idempotent)."""
+
+    name = "api:frickeldave_store:images_optimize"
+    url = f"{API_PREFIX}/products/{{article_number}}/images/optimize"
+    requires_auth = True
+
+    async def post(self, request: web.Request, article_number: str) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            result = await runtime.products.async_optimize_images(article_number)
+            return web.json_response(result)
         except StoreError as err:
             return _error_response(err)
 
@@ -910,6 +929,8 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     ProductView,
     ArchiveView,
     ImagesView,
+    # statischer Pfad vor ``/images/{name}``
+    ImagesOptimizeView,
     ImageFileView,
     ImageOrderView,
     ImageMainView,

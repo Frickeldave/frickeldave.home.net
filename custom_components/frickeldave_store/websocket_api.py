@@ -120,7 +120,10 @@ async def websocket_products(hass: HomeAssistant, connection: Any, msg: dict[str
         return
     connection.send_result(
         msg["id"],
-        {"products": [item.to_dict() for item in products], "total": total},
+        {
+            "products": await runtime.products.async_serialise_products(products),
+            "total": total,
+        },
     )
 
 
@@ -139,9 +142,12 @@ async def websocket_subscribe(hass: HomeAssistant, connection: Any, msg: dict[st
         connection.send_error(msg["id"], err.code, err.message)
         return
 
-    def _payload() -> dict[str, Any]:
+    async def _async_payload() -> dict[str, Any]:
         products, total = _list_sync(runtime, filters)
-        return {"products": [item.to_dict() for item in products], "total": total}
+        return {
+            "products": await runtime.products.async_serialise_products(products),
+            "total": total,
+        }
 
     @callback
     def _on_change() -> None:
@@ -149,14 +155,22 @@ async def websocket_subscribe(hass: HomeAssistant, connection: Any, msg: dict[st
             connection.send_error(msg["id"], "forbidden", "Berechtigung entzogen.")
             unsubscribe()
             return
-        connection.send_message(websocket_api.event_message(msg["id"], _payload()))
+        # Metadaten werden im Executor gelesen – der Listener bleibt synchron.
+        hass.async_create_task(_async_push())
+
+    async def _async_push() -> None:
+        try:
+            payload = await _async_payload()
+        except StoreError:
+            return
+        connection.send_message(websocket_api.event_message(msg["id"], payload))
 
     def unsubscribe() -> None:
         remove = connection.subscriptions.pop(msg["id"], None)
         if remove is not None:
             remove()
 
-    connection.send_result(msg["id"], _payload())
+    connection.send_result(msg["id"], await _async_payload())
     connection.subscriptions[msg["id"]] = runtime.store.add_listener(_on_change)
     _ = user_id
 

@@ -8,6 +8,7 @@ from typing import Any
 
 import aiohttp
 import pytest
+from image_helpers import exif_bytes, image_bytes
 
 from custom_components.frickeldave_store.ai import (
     AIError,
@@ -182,7 +183,7 @@ async def test_ai_error_does_not_mutate_store(tmp_path: Path) -> None:
         created.article_number,
         filename="bild.jpg",
         content_type="image/jpeg",
-        data=_jpeg_with_metadata(),
+        data=image_bytes("JPEG", (64, 48), "RGB", exif=exif_bytes()),
     )
     before = json.dumps(store.data, sort_keys=True, ensure_ascii=False)
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from image_helpers import jpeg_bytes
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.const import DOMAIN, STORAGE_KEY
@@ -112,7 +113,7 @@ async def _store_with_product(tmp_path: Path) -> tuple[CatalogStore, str]:
         product.article_number,
         filename="bild.jpg",
         content_type="image/jpeg",
-        data=b"\xff\xd8bild",
+        data=jpeg_bytes((64, 48)),
     )
     await store.async_save()
     return store, product.article_number

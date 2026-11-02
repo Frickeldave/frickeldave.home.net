@@ -7,10 +7,12 @@ from pathlib import Path
 from string import ascii_uppercase
 
 import pytest
+from image_helpers import jpeg_bytes, png_bytes
 
 import custom_components.frickeldave_store.products as products_module
 from custom_components.frickeldave_store.models import (
     MAX_IMAGES,
+    Image,
     ImageLimitError,
     NotFoundError,
     Product,
@@ -415,7 +417,7 @@ async def test_max_ten_images_and_eleventh_rejected_without_persistence(tmp_path
             product.article_number,
             filename="bild.jpg",
             content_type="image/jpeg",
-            data=b"\xff\xd8fake-jpeg",
+            data=jpeg_bytes((64, 48)),
         )
     product_after = await service.async_get(product.article_number)
     assert len(product_after.images) == MAX_IMAGES
@@ -442,7 +444,7 @@ async def test_image_order_and_main_image(tmp_path: Path) -> None:
             product.article_number,
             filename="bild.png",
             content_type="image/png",
-            data=b"png",
+            data=png_bytes((64, 48)),
         )
     images = await service.async_list_images(product.article_number)
     assert images[0]["is_main"] is True
@@ -515,3 +517,201 @@ async def test_tags_management_removes_tag_from_products(tmp_path: Path) -> None
 def test_generated_numbers_avoid_ambiguous_characters() -> None:
     for _ in range(100):
         assert not set(generate_article_number("SB")[2:]) & set("IO01")
+
+
+# ---------------------------------------------------------------- Bildoptimierung
+
+
+async def test_upload_returns_optimization_metadata_and_changes_suffix(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+
+    result = await service.async_add_image(
+        product.article_number,
+        filename="gross.png",
+        content_type="image/png",
+        data=png_bytes((2400, 1200), alpha=True),
+    )
+
+    assert result["resized"] is True
+    assert result["original"]["content_type"] == "image/png"
+    assert result["original"]["width"] == 2400
+    assert result["stored"]["content_type"] == "image/webp"
+    assert result["stored"]["width"] == 1600
+    assert result["stored"]["height"] == 800
+    assert result["stored"]["bytes"] <= result["original"]["bytes"]
+    assert "verkleinert" in result["optimize_message"]
+    assert result["images"][0]["name"].endswith(".webp")
+    assert await store.images.async_list(product.article_number) == [result["images"][0]["name"]]
+
+
+async def test_upload_passthrough_reports_resized_false(tmp_path: Path) -> None:
+    _, service = await _service(tmp_path)
+    product = await _create(service)
+
+    result = await service.async_add_image(
+        product.article_number,
+        filename="klein.jpg",
+        content_type="image/jpeg",
+        data=jpeg_bytes((640, 480), quality=60),
+    )
+
+    assert result["resized"] is False
+    assert result["original"] == result["stored"]
+    assert result["optimize_message"].startswith("Bild unverändert übernommen")
+    assert result["images"][0]["name"].endswith(".jpg")
+
+
+async def test_upload_rejects_undecodable_image(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+
+    with pytest.raises(ValidationError) as err:
+        await service.async_add_image(
+            product.article_number,
+            filename="kaputt.jpg",
+            content_type="image/jpeg",
+            data=b"\xff\xd8keinbild",
+        )
+
+    assert err.value.code == "image_invalid"
+    assert await store.images.async_list(product.article_number) == []
+    assert (await service.async_get(product.article_number)).images == []
+
+
+async def test_image_payloads_expose_size_metadata(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    await store.images.async_write(
+        product.article_number, "LA0001-01.jpg", jpeg_bytes((800, 600), quality=60)
+    )
+    stored = store.get_product(product.article_number)
+    stored.images.append(Image(name="LA0001-01.jpg", is_main=True))
+    store.put_product(stored)
+    await store.async_save()
+
+    images = await service.async_list_images(product.article_number)
+    assert len(images) == 1
+    assert images[0]["bytes"] > 0
+    assert images[0]["width"] == 800 and images[0]["height"] == 600
+    assert images[0]["content_type"] == "image/jpeg"
+    assert images[0]["oversized"] is False
+
+
+@pytest.mark.parametrize(
+    ("size", "name", "pad", "expected"),
+    [
+        ((1600, 1200), "klein.jpg", False, False),
+        ((1601, 900), "lang.jpg", False, True),
+        ((800, 600), "schwer.jpg", True, True),
+    ],
+)
+async def test_oversized_flag_uses_long_edge_and_bytes(
+    tmp_path: Path, size: tuple[int, int], name: str, pad: bool, expected: bool
+) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    data = jpeg_bytes(size, quality=95)
+    if pad:
+        # Sicherstellen, dass die Byte-Grenze wirklich überschritten wird.
+        data += b"\x00" * (400 * 1024)
+    await store.images.async_write(product.article_number, name, data)
+    stored = store.get_product(product.article_number)
+    stored.images.append(Image(name=name, is_main=True))
+    store.put_product(stored)
+    await store.async_save()
+
+    listing = await service.async_list_images(product.article_number)
+    assert listing[0]["oversized"] is expected
+    payload = await service.async_serialise_product(await service.async_get(product.article_number))
+    assert payload["images"][0]["oversized"] is expected
+
+
+async def test_serialise_products_reports_dimensions_for_list(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    await service.async_add_image(
+        product.article_number,
+        filename="bild.jpg",
+        content_type="image/jpeg",
+        data=jpeg_bytes((320, 240), quality=60),
+    )
+
+    products, _ = await service.async_list()
+    payloads = await service.async_serialise_products(products)
+
+    image = payloads[0]["images"][0]
+    assert image["width"] == 320 and image["height"] == 240
+    assert image["content_type"] == "image/jpeg"
+    assert image["bytes"] > 0
+    assert "oversized" in image
+
+
+async def test_optimize_images_keeps_order_and_main_image(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    article = product.article_number
+    await store.images.async_write(article, "LA0001-01.jpg", jpeg_bytes((2400, 1200)))
+    await store.images.async_write(article, "LA0001-02.png", png_bytes((2400, 1200), alpha=True))
+    stored = store.get_product(article)
+    stored.images = [
+        Image(name="LA0001-01.jpg", is_main=False),
+        Image(name="LA0001-02.png", is_main=True),
+    ]
+    store.put_product(stored)
+    await store.async_save()
+
+    result = await service.async_optimize_images(article)
+
+    assert result["summary"]["count"] == 2
+    assert result["summary"]["bytes_after"] < result["summary"]["bytes_before"]
+    assert result["summary"]["saved_percent"] > 0
+    names = [item["name"] for item in result["images"]]
+    assert names == ["LA0001-01.jpg", "LA0001-02.webp"]
+    assert [item["is_main"] for item in result["images"]] == [False, True]
+    assert all(item["resized"] for item in result["results"])
+    assert result["results"][1]["previous_name"] == "LA0001-02.png"
+    assert await store.images.async_list(article) == ["LA0001-01.jpg", "LA0001-02.webp"]
+    assert list(store.backup_dir.glob("*-pre-image-optimize.json"))
+
+
+async def test_optimize_images_is_idempotent(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    await store.images.async_write(
+        product.article_number, "LA0001-01.jpg", jpeg_bytes((2400, 1200))
+    )
+    stored = store.get_product(product.article_number)
+    stored.images.append(Image(name="LA0001-01.jpg", is_main=True))
+    store.put_product(stored)
+    await store.async_save()
+
+    first = await service.async_optimize_images(product.article_number)
+    second = await service.async_optimize_images(product.article_number)
+
+    assert first["results"][0]["resized"] is True
+    assert all(item["resized"] is False for item in second["results"])
+    assert second["summary"]["bytes_before"] == second["summary"]["bytes_after"]
+    assert second["summary"]["saved_percent"] == 0.0
+
+
+async def test_optimize_images_continues_after_broken_file(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    product = await _create(service)
+    article = product.article_number
+    await store.images.async_write(article, "LA0001-01.jpg", b"kaputt")
+    await store.images.async_write(article, "LA0001-02.jpg", jpeg_bytes((2400, 1200)))
+    stored = store.get_product(article)
+    stored.images = [Image(name="LA0001-01.jpg", is_main=True), Image(name="LA0001-02.jpg")]
+    store.put_product(stored)
+    await store.async_save()
+
+    result = await service.async_optimize_images(article)
+
+    assert len(result["results"]) == 2
+    failed = result["results"][0]
+    assert failed["error"] and "Bild" in failed["error"]
+    assert failed["resized"] is False
+    assert result["results"][1]["resized"] is True
+    assert result["summary"]["count"] == 2
+    assert await store.images.async_list(article) == ["LA0001-01.jpg", "LA0001-02.jpg"]

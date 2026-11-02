@@ -6,6 +6,52 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-02
+
+### Added
+
+- **Automatische Bildverkleinerung beim Upload (#289).** `POST
+  /api/frickeldave_store/products/{artikelnummer}/images` skaliert auf maximal
+  1600 px lange Kante (nie hoch), schreibt JPEG mit Qualität 82 progressiv und
+  ohne EXIF/GPS, wandelt PNG/WebP mit Transparenz in WebP (Qualität 85) und
+  PNG/WebP ohne Transparenz in JPEG. GIF und animiertes WebP bleiben
+  unverändert; Bilder, die bereits ≤ 1600 px und ≤ 400 KiB sind, werden
+  byteweise übernommen. Die Dateiendung folgt dem Ergebnis (`…-03.webp`).
+  Defekte Bilder werden mit `400 image_invalid` abgelehnt.
+- **Upload-Antwort mit Vorher/Nachher-Werten (#289).** Zusätzlich zu `images`
+  liefert die Route `original`, `stored` (je `bytes`, `width`, `height`,
+  `content_type`), `resized` und `optimize_message`.
+- **Größenmetadaten je Bild (#289).** `GET /products/{artikelnummer}/images`,
+  die Produktliste (HTTP und WebSocket) und das Produktdetail liefern je Bild
+  `bytes`, `width`, `height`, `content_type` und `oversized` (lange Kante
+  > 1600 px oder > 400 KiB). Die Werte werden beim Lesen aus den Dateien
+  ermittelt, nicht persistiert und prozesslokal gecacht (Pfad + `mtime` +
+  Größe, LRU mit 4096 Einträgen).
+- **Sammel-Optimierung (#289).** `POST
+  /api/frickeldave_store/products/{artikelnummer}/images/optimize` (Recht
+  `product`) verkleinert alle zu großen Bilder eines Produkts, behält
+  Reihenfolge und Hauptbild, antwortet je Bild mit `name`, `previous_name`,
+  `before`, `after`, `resized`, `message`, `error` und liefert eine
+  Gesamtstatistik (`count`, `bytes_before`, `bytes_after`, `saved_percent`).
+  Der Lauf ist idempotent, Fehler einzelner Bilder brechen ihn nicht ab, und
+  vor dem ersten Überschreiben entsteht ein Snapshot
+  (`backups/*-pre-image-optimize.json`).
+
+### Changed
+
+- **Pillow bleibt Core-Abhängigkeit (#289).** Die Integration importiert
+  Pillow erst bei Bedarf und trägt es deshalb nicht in `manifest.json` ein;
+  fehlt es, scheitert der Upload mit `pillow_missing` und einer deutschen
+  Meldung statt mit einem Fehler beim Setup.
+
+### Notes
+
+- **Allgemeine Einstellungen (#289).** `GET/PATCH /settings` lieferte mit
+  `storage.backup_included`, `storage.exclude_from_backup`, `storage.choices`
+  (deutsche Labels und Beschreibungen) sowie `storage.data_path` bereits alles,
+  was der Tab „Allgemeine Einstellungen“ braucht – hier nur bestätigt, kein
+  neuer Mechanismus.
+
 ## [0.1.13] - 2026-11-02
 
 ### Added
