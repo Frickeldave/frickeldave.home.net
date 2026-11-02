@@ -464,6 +464,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
           finance: Boolean(me?.can?.finance),
           app_admin: Boolean(me?.can?.app_admin),
         },
+        version: typeof me?.version === "string" ? me.version : "",
       };
       if (this._can("app_admin")) {
         this._accessState = "ready";
@@ -1345,6 +1346,11 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
               : this._tab === "publish"
                 ? this._renderPublishTab()
                 : this._renderAiTab()}
+          ${this._me?.version
+            ? html`<footer class="fd-config-footer" aria-label="Geladene Panel-Version">
+                v${this._me.version}
+              </footer>`
+            : ""}
         </div>
       </div>
     `;
@@ -2210,6 +2216,13 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       max-width: 1100px;
       margin: 0 auto;
       padding: var(--fd-space-4);
+    }
+
+    .fd-config-footer {
+      margin-top: auto;
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+      text-align: end;
     }
 
     /* App-Leiste: volle Panel-Breite, HA-Metriken ------------------------- */

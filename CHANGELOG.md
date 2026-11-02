@@ -14,6 +14,27 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   `version`, `storage_schema_version` und `panel_module_url`; `GET`/`PATCH`
   `/api/frickeldave_store/settings` führen ebenfalls `version`. Damit kann das Panel
   anzeigen, welcher Build geladen ist.
+- **Geladene Version sichtbar (#289):** Panel und Konfigurationspanel zeigen die von
+  `/me` gelieferte Version dezent als Fußzeile (`v0.1.10`) an. Nach einem Update ist
+  damit sofort erkennbar, welcher Build im Browser geladen ist.
+- **Kompaktere Listenansicht (#289):** kleinere Vorschaubilder (40 px), engere
+  Zeilenabstände und Zell-Paddings, Tags fließen einzeilig mit Umbruch. „Bearbeiten“
+  und „Archivieren“ sind jetzt Icon-Buttons (Stift/Archivbox) nebeneinander mit
+  `aria-label` und `title`; das Touch-Ziel bleibt 44 px.
+- **Einklappbare Suche und Filter (#289):** die Filterleiste hat einen Kopfbereich
+  „Suche und Filter“ mit Chevron-Schaltfläche (`aria-expanded`/`aria-controls`). Der
+  Zustand bleibt über `localStorage` erhalten; bei aktiven Filtern zeigt ein Badge
+  „Filter aktiv“ auch im zugeklappten Zustand, dass gefiltert wird.
+- **Bündige Filterleiste (#289):** Suchfeld, Ansichtsumschalter und „Filter
+  zurücksetzen“ nutzen eine gemeinsame Steuerelementhöhe (48 px, 44 px Touch-Ziel im
+  Umschalter) und stehen auch umgebrochen bündig auf einer Linie; das Suchlabel ist
+  für Screenreader ausgeblendet.
+- **Veröffentlichen in der Kopfzeile (#289):** die Karte „Website veröffentlichen“
+  entfällt. Zwei Icon-Buttons (Branch für dev, Rakete für prod) sitzen für
+  `app_admin` in der Topbar-Aktionsgruppe und öffnen unverändert den Dry-Run-Dialog.
+- **Bestands-Editor (#289):** im Tab „Bestand“ stehen pro Lagerstätte Label,
+  Plus-Button, Nummernfeld und Minus-Button untereinander in gleicher Breite; die
+  Buttons tragen Plus-/Minus-Symbole mit sprechendem `aria-label`.
 
 ### Fixed
 

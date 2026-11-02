@@ -51,6 +51,7 @@ const BOOKING_TYPE_LABELS = Object.freeze({
 
 const VIEW_STORAGE_KEY = "fd-store-view";
 const VIEW_MODES = Object.freeze(["grid", "list"]);
+const FILTERS_STORAGE_KEY = "fd-store-filters-open";
 
 const PUBLISH_STATUS_META = Object.freeze({
   added: { label: "Neu", icon: "＋" },
@@ -237,6 +238,23 @@ const storeView = (view) => {
   }
 };
 
+const readStoredFiltersOpen = () => {
+  try {
+    const stored = window.localStorage?.getItem(FILTERS_STORAGE_KEY);
+    return stored === null || stored === undefined ? true : stored === "open";
+  } catch {
+    return true;
+  }
+};
+
+const storeFiltersOpen = (open) => {
+  try {
+    window.localStorage?.setItem(FILTERS_STORAGE_KEY, open ? "open" : "closed");
+  } catch {
+    // Privater Modus oder gesperrter Speicher: Zustand bleibt für die Sitzung gültig.
+  }
+};
+
 export class FrickeldaveStorePanel extends LitElement {
   static properties = {
     hass: { attribute: false, noAccessor: true },
@@ -248,6 +266,7 @@ export class FrickeldaveStorePanel extends LitElement {
     _me: { state: true },
 
     _menuOpen: { state: true },
+    _filtersOpen: { state: true },
 
     _products: { state: true },
     _total: { state: true },
@@ -300,6 +319,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessError = "";
     this._me = null;
     this._menuOpen = false;
+    this._filtersOpen = readStoredFiltersOpen();
 
     this._products = [];
     this._total = 0;
@@ -621,6 +641,7 @@ export class FrickeldaveStorePanel extends LitElement {
         name: typeof me?.name === "string" ? me.name : "",
         roles: Array.isArray(me?.roles) ? me.roles.filter((role) => typeof role === "string") : [],
         can,
+        version: typeof me?.version === "string" ? me.version : "",
       };
       this._accessUserId = this.hass?.user?.id ?? null;
 
@@ -663,6 +684,7 @@ export class FrickeldaveStorePanel extends LitElement {
         name: typeof me?.name === "string" ? me.name : this._me?.name || "",
         roles: Array.isArray(me?.roles) ? me.roles.filter((role) => typeof role === "string") : [],
         can,
+        version: typeof me?.version === "string" ? me.version : this._me?.version || "",
       };
       if (!can.product && !can.app_admin) {
         this._accessState = "denied";
@@ -893,6 +915,11 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     this._view = view;
     storeView(view);
+  }
+
+  _toggleFilters() {
+    this._filtersOpen = !this._filtersOpen;
+    storeFiltersOpen(this._filtersOpen);
   }
 
   _setSortField(value) {
@@ -2434,6 +2461,7 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _renderMain() {
     const canProduct = this._can("product");
+    const canPublish = this._can("app_admin");
 
     return html`
       <div class="fd-app">
@@ -2450,74 +2478,119 @@ export class FrickeldaveStorePanel extends LitElement {
             </svg>
           </button>
           <h1 id="fd-main-heading" class="fd-bar-title" tabindex="-1">Frickeldave Store</h1>
-          ${canProduct
+          ${canProduct || canPublish
             ? html`
                 <div class="fd-bar-actions">
-                  <button
-                    type="button"
-                    class="fd-bar-icon"
-                    @click=${() => this._reloadAll()}
-                    ?disabled=${this._productsLoading}
-                    aria-label="Aktualisieren"
-                    title="Aktualisieren"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path
-                        d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    class="fd-bar-icon"
-                    @click=${() => this._openImport()}
-                    ?disabled=${Boolean(this._importDialog?.busy)}
-                    aria-label="Katalog importieren"
-                    title="Katalog importieren"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    class="fd-bar-icon"
-                    @click=${() => this._openCreate()}
-                    aria-label="Produkt erstellen"
-                    title="Produkt erstellen"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
-                    </svg>
-                  </button>
+                  ${canProduct
+                    ? html`
+                        <button
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._reloadAll()}
+                          ?disabled=${this._productsLoading}
+                          aria-label="Aktualisieren"
+                          title="Aktualisieren"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path
+                              d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._openImport()}
+                          ?disabled=${Boolean(this._importDialog?.busy)}
+                          aria-label="Katalog importieren"
+                          title="Katalog importieren"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._openCreate()}
+                          aria-label="Produkt erstellen"
+                          title="Produkt erstellen"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+                          </svg>
+                        </button>
+                      `
+                    : ""}
+                  ${canPublish
+                    ? html`
+                        <span class="fd-bar-divider" aria-hidden="true"></span>
+                        <button
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._openPublish("dev")}
+                          ?disabled=${Boolean(this._publishDialog?.busy)}
+                          aria-label="Nach dev veröffentlichen"
+                          title="Nach dev veröffentlichen"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path
+                              d="M14 4l2.29 2.29-2.88 2.88 1.42 1.42 2.88-2.88L20 10V4h-6zM10 4H4v6l2.29-2.29 4.71 4.7V20h2v-8.41l-5.29-5.3L10 4z"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._openPublish("prod")}
+                          ?disabled=${Boolean(this._publishDialog?.busy)}
+                          aria-label="Nach prod veröffentlichen"
+                          title="Nach prod veröffentlichen"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path
+                              d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18a8 8 0 0 1-8-8 8 8 0 0 1 8-8 8 8 0 0 1 8 8 8 8 0 0 1-8 8zm-1-13v4H7l5 5 5-5h-4V7h-2z"
+                            />
+                          </svg>
+                        </button>
+                      `
+                    : ""}
                 </div>
-                <div class="fd-menu-anchor">
-                  <button
-                    id="fd-menu-trigger"
-                    type="button"
-                    class="fd-bar-icon"
-                    @click=${() => this._toggleMenu()}
-                    aria-haspopup="menu"
-                    aria-expanded=${this._menuOpen ? "true" : "false"}
-                    aria-controls="fd-main-menu"
-                    aria-label="Weitere Aktionen"
-                    title="Weitere Aktionen"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <circle cx="12" cy="5" r="1.7" />
-                      <circle cx="12" cy="12" r="1.7" />
-                      <circle cx="12" cy="19" r="1.7" />
-                    </svg>
-                  </button>
-                  ${this._renderHeaderMenu()}
-                </div>
+                ${canProduct
+                  ? html`
+                      <div class="fd-menu-anchor">
+                        <button
+                          id="fd-menu-trigger"
+                          type="button"
+                          class="fd-bar-icon"
+                          @click=${() => this._toggleMenu()}
+                          aria-haspopup="menu"
+                          aria-expanded=${this._menuOpen ? "true" : "false"}
+                          aria-controls="fd-main-menu"
+                          aria-label="Weitere Aktionen"
+                          title="Weitere Aktionen"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <circle cx="12" cy="5" r="1.7" />
+                            <circle cx="12" cy="12" r="1.7" />
+                            <circle cx="12" cy="19" r="1.7" />
+                          </svg>
+                        </button>
+                        ${this._renderHeaderMenu()}
+                      </div>
+                    `
+                  : ""}
               `
             : ""}
         </header>
 
         <div class="fd-shell">
-          ${this._can("app_admin") ? this._renderPublishActions() : ""}
           ${canProduct ? this._renderProducts() : this._renderNoProductView()}
+          ${this._me?.version
+            ? html`<footer class="fd-panel-footer" aria-label="Geladene Panel-Version">
+                v${this._me.version}
+              </footer>`
+            : ""}
         </div>
       </div>
     `;
@@ -2541,193 +2614,222 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _renderProducts() {
     return html`
-      <section class="fd-card fd-filters" aria-label="Suche, Filter und Sortierung">
-        <div class="fd-filter-head">
-          <div class="fd-field fd-field--search">
-            <label class="fd-label" for="fd-search">Suche</label>
-            <input
-              id="fd-search"
-              class="fd-input"
-              type="search"
-              placeholder="Name, Beschreibung, Artikelnummer oder Tag"
-              .value=${this._search}
-              @input=${(event) => this._onSearchInput(event.target.value)}
-            />
+      <section class="fd-card fd-filters" aria-labelledby="fd-filter-title">
+        <div class="fd-filter-summary">
+          <div class="fd-filter-summary-title">
+            <h2 id="fd-filter-title">Suche und Filter</h2>
+            ${this._hasActiveFilters()
+              ? html`<span class="fd-badge fd-badge--active">Filter aktiv</span>`
+              : ""}
           </div>
-          <div class="fd-filter-actions">
-            <div class="fd-view-toggle" role="group" aria-label="Darstellung der Produktliste">
-              <button
-                type="button"
-                class="fd-view-option"
-                aria-pressed=${this._view === "grid" ? "true" : "false"}
-                @click=${() => this._setView("grid")}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
-                </svg>
-                Kacheln
-              </button>
-              <button
-                type="button"
-                class="fd-view-option"
-                aria-pressed=${this._view === "list" ? "true" : "false"}
-                @click=${() => this._setView("list")}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z" />
-                </svg>
-                Liste
-              </button>
-            </div>
-            <button
-              type="button"
-              class="fd-button"
-              @click=${() => this._resetFilters()}
-              ?disabled=${!this._hasActiveFilters()}
+          <button
+            type="button"
+            class="fd-button fd-filter-toggle"
+            @click=${() => this._toggleFilters()}
+            aria-expanded=${this._filtersOpen ? "true" : "false"}
+            aria-controls="fd-filter-panel"
+            aria-label=${this._filtersOpen ? "Suche und Filter ausblenden" : "Suche und Filter anzeigen"}
+          >
+            ${this._filtersOpen ? "Ausblenden" : "Anzeigen"}
+            <svg
+              class="fd-filter-chevron${this._filtersOpen ? " fd-filter-chevron--open" : ""}"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
             >
-              Filter zurücksetzen
-            </button>
-          </div>
+              <path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+            </svg>
+          </button>
         </div>
 
-        <div class="fd-filter-options">
-          <fieldset class="fd-fieldset">
-            <legend class="fd-label">Kategorie</legend>
-            <div class="fd-chip-row">
-              ${CATEGORY_KEYS.map(
-                (key) => html`
-                  <button
-                    type="button"
-                    class="fd-chip"
-                    aria-pressed=${this._categoryFilter.includes(key) ? "true" : "false"}
-                    @click=${() => this._toggleFilterValue("_categoryFilter", key)}
-                  >
-                    ${CATEGORY_LABELS[key]}
-                  </button>
-                `,
-              )}
-            </div>
-          </fieldset>
-
-          <fieldset class="fd-fieldset">
-            <legend class="fd-label">Tags</legend>
-            ${this._allTags.length === 0
-              ? html`<p class="fd-hint">Noch keine Tags vorhanden.</p>`
-              : html`
-                  <div class="fd-chip-row fd-chip-row--scroll">
-                    ${this._allTags.map(
-                      (tag) => html`
-                        <button
-                          type="button"
-                          class="fd-chip"
-                          aria-pressed=${this._tagFilter.includes(tag) ? "true" : "false"}
-                          @click=${() => this._toggleFilterValue("_tagFilter", tag)}
-                        >
-                          ${tag}
-                        </button>
-                      `,
-                    )}
-                  </div>
-                `}
-          </fieldset>
-        </div>
-
-        <div class="fd-filter-grid">
-          <div class="fd-field">
-            <span class="fd-label" id="fd-flags-label">Bestand und Status</span>
-            <div class="fd-switch-row" role="group" aria-labelledby="fd-flags-label">
-              <label class="fd-switch">
-                <input
-                  type="checkbox"
-                  .checked=${this._customizableOnly}
-                  @change=${(event) => this._setFlag("_customizableOnly", event.target.checked)}
-                />
-                <span>Personalisierbar</span>
-              </label>
-              <label class="fd-switch">
-                <input
-                  type="checkbox"
-                  .checked=${this._inLocationOnly}
-                  ?disabled=${!this._locationFilter}
-                  @change=${(event) => this._setInLocationOnly(event.target.checked)}
-                />
-                <span>
-                  Nur mit Bestand${this._locationFilter
-                    ? ` in ${this._locationName(this._locationFilter)}`
-                    : " (Lagerstätte wählen)"}
-                </span>
-              </label>
-              <label class="fd-switch">
-                <input
-                  type="checkbox"
-                  .checked=${this._showArchived}
-                  @change=${(event) => this._setFlag("_showArchived", event.target.checked)}
-                />
-                <span>Nur archivierte anzeigen</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-location-filter">Lagerstätte</label>
-            ${this._locations.length === 0
-              ? html`<p class="fd-hint">
-                  ${this._locationsError || "Lagerstätten werden geladen …"}
-                </p>`
-              : html`
-                  <select
-                    id="fd-location-filter"
-                    class="fd-input"
-                    .value=${this._locationFilter}
-                    @change=${(event) => this._setLocationFilter(event.target.value)}
-                  >
-                    <option value="">Alle Lagerstätten</option>
-                    ${this._locations.map(
-                      (location) => html`<option value=${location.id}>${location.name}</option>`,
-                    )}
-                  </select>
-                `}
-            <p class="fd-hint">Filtert Produkte nach dem Bestand der gewählten Lagerstätte.</p>
-          </div>
-
-          <fieldset class="fd-fieldset fd-fieldset--inline">
-            <legend class="fd-label">Sichtbarkeit</legend>
-            <div class="fd-chip-row">
-              ${VISIBILITY_OPTIONS.map(
-                (option) => html`
-                  <button
-                    type="button"
-                    class="fd-chip"
-                    aria-pressed=${this._visibility === option.value ? "true" : "false"}
-                    @click=${() => this._setVisibility(option.value)}
-                  >
-                    ${option.label}
-                  </button>
-                `,
-              )}
-            </div>
-          </fieldset>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-sort">Sortierung</label>
-            <div class="fd-sort-row">
-              <select
-                id="fd-sort"
+        <div id="fd-filter-panel" class="fd-filter-panel" ?hidden=${!this._filtersOpen}>
+          <div class="fd-filter-head">
+            <div class="fd-field fd-field--search">
+              <label class="fd-label fd-sr-only" for="fd-search">Suche</label>
+              <input
+                id="fd-search"
                 class="fd-input"
-                .value=${this._sort}
-                @change=${(event) => this._setSortField(event.target.value)}
-              >
-                <option value="name">Name</option>
-                <option value="price">Preis</option>
-              </select>
+                type="search"
+                placeholder="Name, Beschreibung, Artikelnummer oder Tag"
+                .value=${this._search}
+                @input=${(event) => this._onSearchInput(event.target.value)}
+              />
+            </div>
+            <div class="fd-filter-actions">
+              <div class="fd-view-toggle" role="group" aria-label="Darstellung der Produktliste">
+                <button
+                  type="button"
+                  class="fd-view-option"
+                  aria-pressed=${this._view === "grid" ? "true" : "false"}
+                  @click=${() => this._setView("grid")}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
+                  </svg>
+                  Kacheln
+                </button>
+                <button
+                  type="button"
+                  class="fd-view-option"
+                  aria-pressed=${this._view === "list" ? "true" : "false"}
+                  @click=${() => this._setView("list")}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z" />
+                  </svg>
+                  Liste
+                </button>
+              </div>
               <button
                 type="button"
                 class="fd-button"
-                @click=${() => this._toggleSortOrder()}
-                aria-label=${`Sortierrichtung: ${this._order === "asc" ? "aufsteigend" : "absteigend"}. Richtung wechseln.`}
+                @click=${() => this._resetFilters()}
+                ?disabled=${!this._hasActiveFilters()}
               >
-                ${this._order === "asc" ? "↑ Aufsteigend" : "↓ Absteigend"}
+                Filter zurücksetzen
               </button>
+            </div>
+          </div>
+
+          <div class="fd-filter-options">
+            <fieldset class="fd-fieldset">
+              <legend class="fd-label">Kategorie</legend>
+              <div class="fd-chip-row">
+                ${CATEGORY_KEYS.map(
+                  (key) => html`
+                    <button
+                      type="button"
+                      class="fd-chip"
+                      aria-pressed=${this._categoryFilter.includes(key) ? "true" : "false"}
+                      @click=${() => this._toggleFilterValue("_categoryFilter", key)}
+                    >
+                      ${CATEGORY_LABELS[key]}
+                    </button>
+                  `,
+                )}
+              </div>
+            </fieldset>
+
+            <fieldset class="fd-fieldset">
+              <legend class="fd-label">Tags</legend>
+              ${this._allTags.length === 0
+                ? html`<p class="fd-hint">Noch keine Tags vorhanden.</p>`
+                : html`
+                    <div class="fd-chip-row fd-chip-row--scroll">
+                      ${this._allTags.map(
+                        (tag) => html`
+                          <button
+                            type="button"
+                            class="fd-chip"
+                            aria-pressed=${this._tagFilter.includes(tag) ? "true" : "false"}
+                            @click=${() => this._toggleFilterValue("_tagFilter", tag)}
+                          >
+                            ${tag}
+                          </button>
+                        `,
+                      )}
+                    </div>
+                  `}
+            </fieldset>
+          </div>
+
+          <div class="fd-filter-grid">
+            <div class="fd-field">
+              <span class="fd-label" id="fd-flags-label">Bestand und Status</span>
+              <div class="fd-switch-row" role="group" aria-labelledby="fd-flags-label">
+                <label class="fd-switch">
+                  <input
+                    type="checkbox"
+                    .checked=${this._customizableOnly}
+                    @change=${(event) => this._setFlag("_customizableOnly", event.target.checked)}
+                  />
+                  <span>Personalisierbar</span>
+                </label>
+                <label class="fd-switch">
+                  <input
+                    type="checkbox"
+                    .checked=${this._inLocationOnly}
+                    ?disabled=${!this._locationFilter}
+                    @change=${(event) => this._setInLocationOnly(event.target.checked)}
+                  />
+                  <span>
+                    Nur mit Bestand${this._locationFilter
+                      ? ` in ${this._locationName(this._locationFilter)}`
+                      : " (Lagerstätte wählen)"}
+                  </span>
+                </label>
+                <label class="fd-switch">
+                  <input
+                    type="checkbox"
+                    .checked=${this._showArchived}
+                    @change=${(event) => this._setFlag("_showArchived", event.target.checked)}
+                  />
+                  <span>Nur archivierte anzeigen</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="fd-field">
+              <label class="fd-label" for="fd-location-filter">Lagerstätte</label>
+              ${this._locations.length === 0
+                ? html`<p class="fd-hint">
+                    ${this._locationsError || "Lagerstätten werden geladen …"}
+                  </p>`
+                : html`
+                    <select
+                      id="fd-location-filter"
+                      class="fd-input"
+                      .value=${this._locationFilter}
+                      @change=${(event) => this._setLocationFilter(event.target.value)}
+                    >
+                      <option value="">Alle Lagerstätten</option>
+                      ${this._locations.map(
+                        (location) => html`<option value=${location.id}>${location.name}</option>`,
+                      )}
+                    </select>
+                  `}
+              <p class="fd-hint">Filtert Produkte nach dem Bestand der gewählten Lagerstätte.</p>
+            </div>
+
+            <fieldset class="fd-fieldset fd-fieldset--inline">
+              <legend class="fd-label">Sichtbarkeit</legend>
+              <div class="fd-chip-row">
+                ${VISIBILITY_OPTIONS.map(
+                  (option) => html`
+                    <button
+                      type="button"
+                      class="fd-chip"
+                      aria-pressed=${this._visibility === option.value ? "true" : "false"}
+                      @click=${() => this._setVisibility(option.value)}
+                    >
+                      ${option.label}
+                    </button>
+                  `,
+                )}
+              </div>
+            </fieldset>
+
+            <div class="fd-field">
+              <label class="fd-label" for="fd-sort">Sortierung</label>
+              <div class="fd-sort-row">
+                <select
+                  id="fd-sort"
+                  class="fd-input"
+                  .value=${this._sort}
+                  @change=${(event) => this._setSortField(event.target.value)}
+                >
+                  <option value="name">Name</option>
+                  <option value="price">Preis</option>
+                </select>
+                <button
+                  type="button"
+                  class="fd-button"
+                  @click=${() => this._toggleSortOrder()}
+                  aria-label=${`Sortierrichtung: ${this._order === "asc" ? "aufsteigend" : "absteigend"}. Richtung wechseln.`}
+                >
+                  ${this._order === "asc" ? "↑ Aufsteigend" : "↓ Absteigend"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2903,22 +3005,32 @@ export class FrickeldaveStorePanel extends LitElement {
     return html`
       <button
         type="button"
-        class="fd-button"
+        class="fd-button fd-row-action"
         @click=${() => this._openEdit(product)}
         aria-label=${`${productLabel} bearbeiten`}
+        title=${`${productLabel} bearbeiten`}
       >
-        Bearbeiten
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path
+            d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"
+          />
+        </svg>
       </button>
       ${product.archived
         ? ""
         : html`
             <button
               type="button"
-              class="fd-button"
+              class="fd-button fd-row-action"
               @click=${() => this._requestArchive(product)}
               aria-label=${`${productLabel} archivieren`}
+              title=${`${productLabel} archivieren`}
             >
-              Archivieren
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  d="M20.54 5.23l-1.39-1.68A1.4 1.4 0 0 0 18 3H6c-.47 0-.88.21-1.15.55L3.46 5.23A1.9 1.9 0 0 0 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5 6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"
+                />
+              </svg>
             </button>
           `}
     `;
@@ -3593,14 +3705,17 @@ export class FrickeldaveStorePanel extends LitElement {
                 const value = this._stockValue(editor, location.id);
                 return html`
                   <div class="fd-stock-editor">
-                    <span class="fd-label">${location.name}</span>
+                    <label class="fd-label" for=${`fd-editor-stock-${location.id}`}>${location.name}</label>
                     <button
                       type="button"
-                      class="fd-button"
+                      class="fd-button fd-stock-step"
                       @click=${() => this._stepStock(location.id, 1)}
                       aria-label=${`Anzahl für ${location.name} erhöhen`}
+                      title=${`Anzahl für ${location.name} erhöhen`}
                     >
-                      Anzahl erhöhen
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+                      </svg>
                     </button>
                     <input
                       id=${`fd-editor-stock-${location.id}`}
@@ -3615,12 +3730,15 @@ export class FrickeldaveStorePanel extends LitElement {
                     />
                     <button
                       type="button"
-                      class="fd-button"
+                      class="fd-button fd-stock-step"
                       @click=${() => this._stepStock(location.id, -1)}
                       ?disabled=${value <= 0}
                       aria-label=${`Anzahl für ${location.name} verringern`}
+                      title=${`Anzahl für ${location.name} verringern`}
                     >
-                      Anzahl verringern
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M19 13H5v-2h14v2z" />
+                      </svg>
                     </button>
                   </div>
                 `;
@@ -3818,28 +3936,6 @@ export class FrickeldaveStorePanel extends LitElement {
         error: this._publishErrorText(error),
       };
     }
-  }
-
-  _renderPublishActions() {
-    return html`
-      <section class="fd-card fd-publish-actions" aria-labelledby="fd-publish-actions-title">
-        <div>
-          <h2 id="fd-publish-actions-title">Website veröffentlichen</h2>
-          <p class="fd-muted fd-small">
-            Jede Veröffentlichung startet mit einem Vergleich (Dry-Run). Erst die Bestätigung im Dialog
-            schreibt Dateien.
-          </p>
-        </div>
-        <div class="fd-publish-buttons">
-          <button type="button" class="fd-button" @click=${() => this._openPublish("dev")}>
-            Nach dev veröffentlichen
-          </button>
-          <button type="button" class="fd-button fd-button--primary" @click=${() => this._openPublish("prod")}>
-            Nach prod veröffentlichen
-          </button>
-        </div>
-      </section>
-    `;
   }
 
   _renderCounts(counts) {
@@ -4507,6 +4603,7 @@ export class FrickeldaveStorePanel extends LitElement {
       --fd-line-height-heading: 1.2;
       --fd-duration-fast: var(--ha-animation-duration-fast, 150ms);
       --fd-duration-normal: var(--ha-animation-duration-normal, 250ms);
+      --fd-control-height: 48px;
     }
 
     *,
@@ -4545,6 +4642,13 @@ export class FrickeldaveStorePanel extends LitElement {
       padding: var(--fd-space-4);
     }
 
+    .fd-panel-footer {
+      margin-top: auto;
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+      text-align: end;
+    }
+
     /* App-Leiste: volle Panel-Breite, HA-Metriken ------------------------- */
 
     .fd-app-bar {
@@ -4580,6 +4684,16 @@ export class FrickeldaveStorePanel extends LitElement {
       display: flex;
       flex: none;
       align-items: center;
+      min-width: 0;
+      margin-inline-start: auto;
+    }
+
+    .fd-bar-divider {
+      flex: none;
+      width: 1px;
+      height: 24px;
+      margin: 0 var(--fd-space-1);
+      background: var(--fd-divider);
     }
 
     .fd-bar-icon {
@@ -5209,10 +5323,58 @@ export class FrickeldaveStorePanel extends LitElement {
       padding: var(--fd-space-4);
     }
 
+    .fd-filter-summary {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--fd-space-2) var(--fd-space-3);
+    }
+
+    .fd-filter-summary-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--fd-space-2);
+      min-width: 0;
+    }
+
+    .fd-filter-summary h2 {
+      margin: 0;
+      font-size: var(--ha-font-size-l, 16px);
+      font-weight: 500;
+    }
+
+    .fd-filter-toggle {
+      min-height: var(--fd-control-height);
+      padding: 8px 14px;
+    }
+
+    .fd-filter-toggle svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+      transition: transform var(--fd-duration-fast);
+    }
+
+    .fd-filter-toggle .fd-filter-chevron--open {
+      transform: rotate(180deg);
+    }
+
+    .fd-filter-panel {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-3);
+    }
+
+    .fd-filter-panel[hidden] {
+      display: none;
+    }
+
     .fd-filter-head {
       display: flex;
       flex-wrap: wrap;
-      align-items: flex-end;
+      align-items: center;
       gap: var(--fd-space-3);
     }
 
@@ -5220,9 +5382,16 @@ export class FrickeldaveStorePanel extends LitElement {
       flex: 1 1 280px;
     }
 
+    .fd-filter-head .fd-input,
+    .fd-filter-head .fd-button {
+      height: var(--fd-control-height);
+      min-height: var(--fd-control-height);
+    }
+
     .fd-filter-actions {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: var(--fd-space-2);
     }
 
@@ -5369,6 +5538,12 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-badge--muted {
       border-color: var(--fd-divider);
       color: var(--fd-text-muted);
+    }
+
+    .fd-badge--active {
+      border-color: var(--fd-accent);
+      background: var(--fd-accent-soft);
+      color: var(--fd-on-accent-soft);
     }
 
     .fd-badge--main {
@@ -5768,7 +5943,8 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-view-toggle {
       display: inline-flex;
       gap: 2px;
-      padding: 2px;
+      height: var(--fd-control-height);
+      padding: 1px;
       border: 1px solid var(--fd-border-strong);
       border-radius: var(--fd-radius-pill);
       background: var(--fd-surface);
@@ -5778,8 +5954,9 @@ export class FrickeldaveStorePanel extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      min-height: 48px;
-      padding: 8px 16px;
+      height: 100%;
+      min-height: 0;
+      padding: 0 16px;
       border: none;
       border-radius: var(--fd-radius-pill);
       background: transparent;
@@ -5806,27 +5983,6 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     /* Veröffentlichung ---------------------------------------------------- */
-
-    .fd-publish-actions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: var(--fd-space-3);
-      padding: var(--fd-space-4);
-    }
-
-    .fd-publish-actions h2 {
-      margin: 0 0 4px;
-      font-size: var(--ha-font-size-l, 1.125rem);
-      font-weight: 500;
-    }
-
-    .fd-publish-buttons {
-      display: flex;
-      flex-wrap: wrap;
-      gap: var(--fd-space-2);
-    }
 
     .fd-publish-meta {
       display: grid;
@@ -5965,10 +6121,10 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-product-table th,
     .fd-product-table td {
-      padding: var(--fd-space-2) var(--fd-space-3);
+      padding: 4px var(--fd-space-3);
       border-bottom: 1px solid var(--fd-divider);
       text-align: start;
-      vertical-align: top;
+      vertical-align: middle;
     }
 
     .fd-product-table thead th {
@@ -5988,9 +6144,9 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-product-row-main {
       display: flex;
-      align-items: flex-start;
-      gap: var(--fd-space-3);
-      min-width: 220px;
+      align-items: center;
+      gap: var(--fd-space-2);
+      min-width: 200px;
     }
 
     .fd-product-thumb {
@@ -5998,13 +6154,13 @@ export class FrickeldaveStorePanel extends LitElement {
       flex: none;
       align-items: center;
       justify-content: center;
-      width: 56px;
-      height: 56px;
+      width: 40px;
+      height: 40px;
       overflow: hidden;
       border-radius: var(--fd-radius);
       background: var(--fd-surface-alt);
       color: var(--fd-text-muted);
-      font-size: 1.5rem;
+      font-size: 1.1rem;
     }
 
     .fd-product-thumb img {
@@ -6016,27 +6172,54 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-product-row-text {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 0;
       min-width: 0;
+    }
+
+    .fd-product-row-text .fd-tag-list {
+      margin-top: 2px;
+    }
+
+    .fd-product-row-text .fd-tag {
+      padding: 0 6px;
+      font-size: 10px;
     }
 
     .fd-stock-chips {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 0;
     }
 
     .fd-stock-chip {
       display: flex;
       gap: 4px;
       font-size: var(--fd-font-small);
+      line-height: 1.4;
     }
 
     .fd-row-actions {
       display: flex;
-      flex-direction: column;
-      gap: var(--fd-space-2);
-      min-width: 150px;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .fd-row-action {
+      flex: none;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      min-height: 44px;
+      padding: 0;
+      border-radius: 50%;
+    }
+
+    .fd-row-action svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
     }
 
     /* Tabs im Produktdialog ----------------------------------------------- */
@@ -6094,12 +6277,23 @@ export class FrickeldaveStorePanel extends LitElement {
       border-radius: var(--fd-radius);
     }
 
-    .fd-stock-editor .fd-button {
-      min-height: 48px;
+    .fd-stock-editor > * {
+      width: 100%;
+    }
+
+    .fd-stock-step {
+      min-height: var(--fd-control-height);
+      padding: 0;
+    }
+
+    .fd-stock-step svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
     }
 
     .fd-stock-input {
-      max-width: 140px;
+      max-width: none;
       font-variant-numeric: tabular-nums;
       text-align: center;
     }
@@ -6172,8 +6366,21 @@ export class FrickeldaveStorePanel extends LitElement {
         padding: var(--fd-space-2);
       }
 
+      .fd-app-bar {
+        padding: 0 var(--ha-space-1, 4px);
+      }
+
+      .fd-bar-actions {
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .fd-bar-actions::-webkit-scrollbar {
+        display: none;
+      }
+
       .fd-bar-title {
-        padding-inline-start: var(--ha-space-3, 12px);
+        padding-inline-start: var(--ha-space-2, 8px);
         font-size: var(--ha-font-size-l, 1.25rem);
       }
 
@@ -6267,6 +6474,20 @@ export class FrickeldaveStorePanel extends LitElement {
 
       .fd-editor-tabs {
         padding: 0 var(--fd-space-3);
+      }
+    }
+
+    @media (max-width: 480px) {
+      .fd-bar-title {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
       }
     }
 
