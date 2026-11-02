@@ -209,6 +209,24 @@ async def test_store_and_views_are_registered(hass: Any, enable_custom_integrati
     assert entry.entry_id
 
 
+async def test_removed_publish_and_import_routes_return_404(
+    hass: Any, enable_custom_integrations: Any
+) -> None:
+    """0.2.0: die eingebauten Routen existieren nicht mehr (Issue #289).
+
+    Eine im Router unbekannte Route beantwortet aiohttp mit 404; geprüft wird
+    deshalb die tatsächlich registrierte Routenliste der laufenden Instanz.
+    """
+
+    await _setup_entry(hass)
+    routes = {resource.canonical for resource in hass.http.app.router.resources()}
+
+    assert "/api/frickeldave_store/publish" not in routes
+    assert "/api/frickeldave_store/import/catalog" not in routes
+    assert "/api/frickeldave_store/features/{feature}" in routes
+    assert "/api/frickeldave_store/export" in routes
+
+
 async def test_options_update_revokes_permission_immediately(
     hass: Any, enable_custom_integrations: Any
 ) -> None:
