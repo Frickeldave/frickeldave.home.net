@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from custom_components.frickeldave_store import websocket_api
+from custom_components.frickeldave_store.products import ProductFilter
 
 COMMANDS: dict[str, Any] = {
     "frickeldave_store/me": websocket_api.websocket_me,
@@ -126,3 +127,14 @@ def test_query_from_msg_uses_filter_names() -> None:
     assert query["in_stock"] == "false"
     assert query["limit"] == "10"
     assert "type" not in query
+
+
+@pytest.mark.parametrize("sort", ["name", "price", "category", "stock", "status"])
+@pytest.mark.parametrize("command", FILTER_COMMANDS)
+def test_new_sort_keys_reach_the_filter(command: str, sort: str) -> None:
+    """WebSocket und HTTP teilen ``ProductFilter`` – neue Schlüssel müssen dort ankommen."""
+
+    message = _validate(command, {"id": 5, "type": command, "sort": sort, "order": "desc"})
+    filters = ProductFilter.from_query(websocket_api._query_from_msg(message))
+    assert filters.sort == sort
+    assert filters.order == "desc"
