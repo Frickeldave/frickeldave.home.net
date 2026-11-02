@@ -42,28 +42,27 @@ const VISIBILITY_OPTIONS = Object.freeze([
   { value: "invisible", label: "Unsichtbar" },
 ]);
 
-const STOCK_TYPES = Object.freeze([
-  {
-    value: "in",
-    label: "Zugang",
-    hint: "Ware kommt ins Lager. Der Bestand im Verkaufsschrank bleibt unverändert.",
-  },
-  {
-    value: "out",
-    label: "Abgang",
-    hint: "Ware verlässt das Lager, zum Beispiel durch Verkauf oder Schwund.",
-  },
-  {
-    value: "transfer",
-    label: "Umlagerung",
-    hint: "Ware wird vom Lager in den Verkaufsschrank umgelagert.",
-  },
-  {
-    value: "correction",
-    label: "Korrektur",
-    hint: "Der Lagerbestand wird auf den gezählten Wert gesetzt.",
-  },
-]);
+const BOOKING_TYPE_LABELS = Object.freeze({
+  in: "Zugang",
+  out: "Abgang",
+  transfer: "Umlagerung",
+  correction: "Korrektur",
+});
+
+const VIEW_STORAGE_KEY = "fd-store-view";
+const VIEW_MODES = Object.freeze(["grid", "list"]);
+
+const PUBLISH_STATUS_META = Object.freeze({
+  added: { label: "Neu", icon: "＋" },
+  changed: { label: "Geändert", icon: "✎" },
+  removed: { label: "Entfernt", icon: "−" },
+  unchanged: { label: "Unverändert", icon: "＝" },
+});
+
+const PUBLISH_TARGET_LABELS = Object.freeze({
+  dev: "dev",
+  prod: "prod",
+});
 
 const currencyFormatter = new Intl.NumberFormat("de-DE", {
   style: "currency",
@@ -141,6 +140,103 @@ const normalizeImage = (image) => {
 
 const isAbortError = (error) => error?.name === "AbortError";
 
+const asCount = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
+};
+
+const normalizeLocations = (data) => {
+  const raw = Array.isArray(data) ? data : Array.isArray(data?.locations) ? data.locations : [];
+  return raw
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => ({
+      id: String(entry.id ?? ""),
+      name: typeof entry.name === "string" ? entry.name : "",
+      position: Number.isFinite(Number(entry.position)) ? Number(entry.position) : index,
+      stockTotal: asCount(entry.stock_total),
+      productsWithStock: asCount(entry.products_with_stock),
+    }))
+    .filter((entry) => entry.id && entry.name)
+    .sort((a, b) => a.position - b.position);
+};
+
+const normalizeBooking = (entry) => {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  return {
+    id: String(entry.id ?? ""),
+    type: typeof entry.type === "string" ? entry.type : "correction",
+    quantity: asCount(entry.quantity),
+    note: typeof entry.note === "string" ? entry.note : "",
+    at: typeof entry.at === "string" ? entry.at : "",
+    locationName: typeof entry.locationName === "string" ? entry.locationName : "",
+    targetLocationName: typeof entry.targetLocationName === "string" ? entry.targetLocationName : "",
+  };
+};
+
+const normalizeCounts = (value) => ({
+  added: asCount(value?.added),
+  changed: asCount(value?.changed),
+  removed: asCount(value?.removed),
+  unchanged: asCount(value?.unchanged),
+  total: asCount(value?.total),
+});
+
+const normalizePublishResult = (data) => {
+  const payload = data && typeof data === "object" ? data : {};
+  const deployment = payload.deployment && typeof payload.deployment === "object" ? payload.deployment : {};
+  const files = Array.isArray(payload.files)
+    ? payload.files
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          path: typeof entry.path === "string" ? entry.path : "",
+          status: PUBLISH_STATUS_META[entry.status] ? entry.status : "changed",
+          kind: entry.kind === "image" ? "image" : "catalog",
+          articleNumber: typeof entry.articleNumber === "string" ? entry.articleNumber : "",
+        }))
+        .filter((entry) => entry.path)
+    : [];
+  return {
+    target: payload.target === "prod" ? "prod" : "dev",
+    dryRun: Boolean(payload.dry_run),
+    repository: typeof payload.repository === "string" ? payload.repository : "",
+    branch: typeof payload.branch === "string" ? payload.branch : "",
+    commit: typeof payload.commit === "string" ? payload.commit : "",
+    changed: Boolean(payload.changed),
+    counts: normalizeCounts(payload.counts),
+    products: normalizeCounts(payload.products),
+    images: normalizeCounts(payload.images),
+    files,
+    filesTruncated: Boolean(payload.files_truncated),
+    deployment: {
+      triggered: Boolean(deployment.triggered),
+      wouldTrigger: Boolean(deployment.would_trigger),
+      mode: typeof deployment.mode === "string" ? deployment.mode : "push",
+      workflow: typeof deployment.workflow === "string" ? deployment.workflow : "",
+      branch: typeof deployment.branch === "string" ? deployment.branch : "",
+    },
+    summary: typeof payload.summary === "string" ? payload.summary : "",
+  };
+};
+
+const readStoredView = () => {
+  try {
+    const stored = window.localStorage?.getItem(VIEW_STORAGE_KEY);
+    return VIEW_MODES.includes(stored) ? stored : "grid";
+  } catch {
+    return "grid";
+  }
+};
+
+const storeView = (view) => {
+  try {
+    window.localStorage?.setItem(VIEW_STORAGE_KEY, view);
+  } catch {
+    // Privater Modus oder gesperrter Speicher: Ansicht bleibt für die Sitzung gültig.
+  }
+};
+
 export class FrickeldaveStorePanel extends LitElement {
   static properties = {
     hass: { attribute: false, noAccessor: true },
@@ -162,8 +258,8 @@ export class FrickeldaveStorePanel extends LitElement {
     _categoryFilter: { state: true },
     _tagFilter: { state: true },
     _customizableOnly: { state: true },
-    _inStockOnly: { state: true },
-    _inCabinetOnly: { state: true },
+    _locationFilter: { state: true },
+    _inLocationOnly: { state: true },
     _visibility: { state: true },
     _showArchived: { state: true },
     _sort: { state: true },
@@ -171,13 +267,16 @@ export class FrickeldaveStorePanel extends LitElement {
     _offset: { state: true },
     _allTags: { state: true },
     _imageVersion: { state: true },
+    _view: { state: true },
+
+    _locations: { state: true },
+    _locationsError: { state: true },
 
     _editor: { state: true },
-    _imagesDialog: { state: true },
-    _stockDialog: { state: true },
     _archiveDialog: { state: true },
     _tagsDialog: { state: true },
     _importDialog: { state: true },
+    _publishDialog: { state: true },
 
     _toast: { state: true },
   };
@@ -193,6 +292,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._accessUserId = null;
     this._productsRequestId = 0;
     this._imagesRequestId = 0;
+    this._bookingsRequestId = 0;
     this._imageCache = new Map();
     this._imagePending = new Set();
 
@@ -210,21 +310,24 @@ export class FrickeldaveStorePanel extends LitElement {
     this._categoryFilter = [];
     this._tagFilter = [];
     this._customizableOnly = false;
-    this._inStockOnly = false;
-    this._inCabinetOnly = false;
+    this._locationFilter = "";
+    this._inLocationOnly = false;
     this._visibility = "all";
     this._showArchived = false;
     this._sort = "name";
     this._order = "asc";
     this._offset = 0;
     this._allTags = [];
+    this._view = readStoredView();
+
+    this._locations = [];
+    this._locationsError = "";
 
     this._editor = null;
-    this._imagesDialog = null;
-    this._stockDialog = null;
     this._archiveDialog = null;
     this._tagsDialog = null;
     this._importDialog = null;
+    this._publishDialog = null;
 
     this._toast = null;
     this._imageVersion = 0;
@@ -492,11 +595,12 @@ export class FrickeldaveStorePanel extends LitElement {
     this._menuOpen = false;
     this._detachMenuListeners();
     this._editor = null;
-    this._imagesDialog = null;
-    this._stockDialog = null;
     this._archiveDialog = null;
     this._tagsDialog = null;
     this._importDialog = null;
+    this._publishDialog = null;
+    this._locations = [];
+    this._locationsError = "";
     this._releaseImages();
     this._imageVersion += 1;
     this._bootstrap();
@@ -523,6 +627,7 @@ export class FrickeldaveStorePanel extends LitElement {
       if (can.product || can.app_admin) {
         this._accessState = "ready";
         if (can.product) {
+          this._loadLocations();
           this._loadTags();
           this._loadProducts();
         }
@@ -568,11 +673,11 @@ export class FrickeldaveStorePanel extends LitElement {
         this._menuOpen = false;
         this._detachMenuListeners();
         this._editor = null;
-        this._imagesDialog = null;
-        this._stockDialog = null;
         this._archiveDialog = null;
         this._tagsDialog = null;
         this._importDialog = null;
+        this._publishDialog = null;
+        this._locations = [];
         return;
       }
       if (!can.product) {
@@ -582,12 +687,13 @@ export class FrickeldaveStorePanel extends LitElement {
         this._menuOpen = false;
         this._detachMenuListeners();
         this._editor = null;
-        this._imagesDialog = null;
-        this._stockDialog = null;
         this._archiveDialog = null;
         this._tagsDialog = null;
         this._importDialog = null;
+        this._publishDialog = null;
+        this._locations = [];
       } else {
+        this._loadLocations();
         this._loadProducts();
         this._loadTags();
       }
@@ -617,8 +723,47 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     this._releaseImages();
     this._imageVersion += 1;
+    this._loadLocations();
     this._loadTags();
     this._loadProducts();
+  }
+
+  async _loadLocations() {
+    if (!this._can("product")) {
+      return;
+    }
+    try {
+      const data = await this._api(`${API_ROOT}/locations`);
+      this._locations = normalizeLocations(data);
+      this._locationsError = "";
+      if (this._locationFilter && !this._locations.some((entry) => entry.id === this._locationFilter)) {
+        this._locationFilter = "";
+        this._inLocationOnly = false;
+        this._offset = 0;
+        this._loadProducts();
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
+      this._locationsError = this._errorText(error);
+    }
+  }
+
+  _locationName(locationId) {
+    return this._locations.find((entry) => entry.id === locationId)?.name || "";
+  }
+
+  _productStockEntries(product) {
+    return this._locations.map((location) => ({
+      id: location.id,
+      name: location.name,
+      value: Number(product?.stock?.[location.id]) || 0,
+    }));
+  }
+
+  _productStockTotal(product) {
+    return this._productStockEntries(product).reduce((sum, entry) => sum + entry.value, 0);
   }
 
   /* --------------------------------------------------------------------- */
@@ -647,11 +792,11 @@ export class FrickeldaveStorePanel extends LitElement {
     if (this._customizableOnly) {
       params.set("customizable", "true");
     }
-    if (this._inStockOnly) {
-      params.set("in_stock", "true");
-    }
-    if (this._inCabinetOnly) {
-      params.set("in_cabinet", "true");
+    if (this._locationFilter) {
+      params.set("location", this._locationFilter);
+      if (this._inLocationOnly) {
+        params.set("in_location", "true");
+      }
     }
     if (this._visibility !== "all") {
       params.set("visibility", this._visibility);
@@ -727,6 +872,29 @@ export class FrickeldaveStorePanel extends LitElement {
     this._loadProducts();
   }
 
+  _setLocationFilter(locationId) {
+    this._locationFilter = locationId || "";
+    if (!this._locationFilter) {
+      this._inLocationOnly = false;
+    }
+    this._offset = 0;
+    this._loadProducts();
+  }
+
+  _setInLocationOnly(value) {
+    this._inLocationOnly = Boolean(value) && Boolean(this._locationFilter);
+    this._offset = 0;
+    this._loadProducts();
+  }
+
+  _setView(view) {
+    if (!VIEW_MODES.includes(view) || this._view === view) {
+      return;
+    }
+    this._view = view;
+    storeView(view);
+  }
+
   _setSortField(value) {
     this._sort = value === "price" ? "price" : "name";
     this._offset = 0;
@@ -756,8 +924,7 @@ export class FrickeldaveStorePanel extends LitElement {
         this._categoryFilter.length > 0 ||
         this._tagFilter.length > 0 ||
         this._customizableOnly ||
-        this._inStockOnly ||
-        this._inCabinetOnly ||
+        Boolean(this._locationFilter) ||
         this._visibility !== "all" ||
         this._showArchived,
     );
@@ -768,8 +935,8 @@ export class FrickeldaveStorePanel extends LitElement {
     this._categoryFilter = [];
     this._tagFilter = [];
     this._customizableOnly = false;
-    this._inStockOnly = false;
-    this._inCabinetOnly = false;
+    this._locationFilter = "";
+    this._inLocationOnly = false;
     this._visibility = "all";
     this._showArchived = false;
     this._offset = 0;
@@ -903,11 +1070,10 @@ export class FrickeldaveStorePanel extends LitElement {
   _syncDialogs() {
     const entries = [
       ["#fd-editor-dialog", Boolean(this._editor)],
-      ["#fd-images-dialog", Boolean(this._imagesDialog)],
-      ["#fd-stock-dialog", Boolean(this._stockDialog)],
       ["#fd-archive-dialog", Boolean(this._archiveDialog)],
       ["#fd-tags-dialog", Boolean(this._tagsDialog)],
       ["#fd-import-dialog", Boolean(this._importDialog)],
+      ["#fd-publish-dialog", Boolean(this._publishDialog)],
     ];
     for (const [selector, shouldOpen] of entries) {
       const dialog = this.renderRoot?.querySelector(selector);
@@ -955,6 +1121,8 @@ export class FrickeldaveStorePanel extends LitElement {
       return;
     }
     this._captureFocus();
+    this._imagesRequestId += 1;
+    this._bookingsRequestId += 1;
     this._editor = {
       mode: "create",
       articleNumber: "",
@@ -968,13 +1136,39 @@ export class FrickeldaveStorePanel extends LitElement {
       customizable: true,
       visible: true,
       archived: false,
-      saving: false,
-      error: "",
-      fieldErrors: {},
+      stock: this._initialStock(null),
+      tab: "general",
+      images: [],
+      imagesLoading: false,
+      imagesBusy: false,
+      imagesError: "",
+      imagesNotice: "",
+      imagesPendingDelete: null,
+      bookings: [],
+      bookingsLoading: false,
+      bookingsLoaded: false,
+      bookingsError: "",
       suggestion: null,
+      suggestionInstructions: "",
       shake: false,
     };
     this._editorSnapshot = this._editorFormState(this._editor);
+  }
+
+  _initialStock(product) {
+    const stock = {};
+    const raw = product && typeof product.stock === "object" && product.stock !== null ? product.stock : null;
+    this._locations.forEach((location, index) => {
+      let value = raw ? Number(raw[location.id]) : 0;
+      if (!raw && index === 0 && Number.isFinite(Number(product?.stock))) {
+        value = Number(product.stock);
+      }
+      if (index === 1 && product?.salesCabinet != null) {
+        value = Number(product.salesCabinet);
+      }
+      stock[location.id] = Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+    });
+    return stock;
   }
 
   _openEdit(product) {
@@ -982,6 +1176,8 @@ export class FrickeldaveStorePanel extends LitElement {
       return;
     }
     this._captureFocus();
+    this._imagesRequestId += 1;
+    this._bookingsRequestId += 1;
     this._editor = {
       mode: "edit",
       articleNumber: product.articleNumber || "",
@@ -995,10 +1191,20 @@ export class FrickeldaveStorePanel extends LitElement {
       customizable: Boolean(product.customizable),
       visible: product.visible !== false,
       archived: Boolean(product.archived),
-      saving: false,
-      error: "",
-      fieldErrors: {},
+      stock: this._initialStock(product),
+      tab: "general",
+      images: [],
+      imagesLoading: false,
+      imagesBusy: false,
+      imagesError: "",
+      imagesNotice: "",
+      imagesPendingDelete: null,
+      bookings: [],
+      bookingsLoading: false,
+      bookingsLoaded: false,
+      bookingsError: "",
       suggestion: null,
+      suggestionInstructions: "",
       shake: false,
     };
     this._editorSnapshot = this._editorFormState(this._editor);
@@ -1014,6 +1220,7 @@ export class FrickeldaveStorePanel extends LitElement {
       tags: editor.tags,
       customizable: editor.customizable,
       visible: editor.visible,
+      stock: editor.stock,
     });
   }
 
@@ -1047,6 +1254,8 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     clearTimeout(this._editorShakeTimer);
     this._editorSnapshot = "";
+    this._imagesRequestId += 1;
+    this._bookingsRequestId += 1;
     this._editor = null;
     this._restoreFocus();
   }
@@ -1182,25 +1391,51 @@ export class FrickeldaveStorePanel extends LitElement {
       tags: [...editor.tags],
       customizable: editor.customizable,
       visible: editor.visible,
+      stock: { ...editor.stock },
     };
 
     this._patchEditor({ saving: true, error: "", fieldErrors: {} });
 
     try {
       if (editor.mode === "create") {
-        await this._api(`${API_ROOT}/products`, {
+        const created = await this._api(`${API_ROOT}/products`, {
           method: "POST",
           body: { ...payload, category: editor.category },
         });
-      } else {
-        await this._api(productPath(editor.articleNumber), {
-          method: "PATCH",
-          body: payload,
-        });
+        const articleNumber = typeof created?.articleNumber === "string" ? created.articleNumber : "";
+        this._loadProducts();
+        this._loadTags();
+        if (articleNumber && this._editor) {
+          // Nach dem Anlegen gibt es erst eine Artikelnummer: direkt in den
+          // Bilder-Tab wechseln, damit Bilder ohne Umweg ergänzt werden können.
+          this._patchEditor({
+            mode: "edit",
+            articleNumber,
+            tab: "images",
+            saving: false,
+            images: [],
+            imagesLoading: true,
+            imagesError: "",
+            imagesNotice: "",
+          });
+          this._editorSnapshot = this._editorFormState(this._editor);
+          this._showToast("Produkt wurde erstellt. Du kannst jetzt Bilder hinzufügen.");
+          this._loadImages(articleNumber);
+          return;
+        }
+        this._editor = null;
+        this._showToast("Produkt wurde erstellt.");
+        this._restoreFocus();
+        return;
       }
 
+      await this._api(productPath(editor.articleNumber), {
+        method: "PATCH",
+        body: payload,
+      });
+
       this._editor = null;
-      this._showToast(editor.mode === "create" ? "Produkt wurde erstellt." : "Produkt wurde gespeichert.");
+      this._showToast("Produkt wurde gespeichert.");
       this._restoreFocus();
       this._loadProducts();
       this._loadTags();
@@ -1218,22 +1453,65 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!editor || editor.mode !== "edit" || editor.suggestion?.loading) {
       return;
     }
-    this._patchEditor({ suggestion: { loading: true, error: "", text: "" } });
+    const instructions = String(editor.suggestionInstructions ?? "").trim();
+    this._patchEditor({
+      suggestion: {
+        loading: true,
+        error: "",
+        text: "",
+        tags: [],
+        rejectedTags: [],
+        instructionsUsed: false,
+      },
+    });
     try {
       const data = await this._api(`${productPath(editor.articleNumber)}/description/suggest`, {
         method: "POST",
+        body: instructions ? { instructions } : {},
       });
       const text = typeof data?.suggestion === "string" ? data.suggestion.trim() : "";
       if (!text) {
         throw new ApiError("Es wurde kein Vorschlag geliefert. Bitte erneut versuchen.", 0, "empty_suggestion");
       }
-      this._patchEditor({ suggestion: { loading: false, error: "", text } });
+      const known = new Set((this._allTags || []).map((tag) => tag.toLocaleLowerCase("de")));
+      const tags = Array.isArray(data?.tags)
+        ? data.tags
+            .filter(
+              (tag) =>
+                typeof tag === "string" &&
+                (known.size === 0 || known.has(tag.toLocaleLowerCase("de"))),
+            )
+            .map((tag) => tag.trim())
+            .filter(Boolean)
+        : [];
+      const rejectedTags = Array.isArray(data?.rejected_tags)
+        ? data.rejected_tags.filter((tag) => typeof tag === "string" && tag.trim()).map((tag) => tag.trim())
+        : [];
+      this._patchEditor({
+        suggestion: {
+          loading: false,
+          error: "",
+          text,
+          tags,
+          rejectedTags,
+          instructionsUsed: Boolean(data?.instructions_used),
+        },
+      });
     } catch (error) {
       if (isAbortError(error)) {
         this._patchEditor({ suggestion: null });
         return;
       }
-      this._patchEditor({ suggestion: { loading: false, error: this._suggestionError(error), text: "" } });
+      this._patchEditor({
+        suggestion: {
+          loading: false,
+          error: this._suggestionError(error),
+          text: "",
+          tags: [],
+          rejectedTags: [],
+          instructionsUsed: false,
+        },
+      });
     }
   }
 
@@ -1243,6 +1521,45 @@ export class FrickeldaveStorePanel extends LitElement {
       return;
     }
     this._editor = { ...editor, suggestion: { ...editor.suggestion, text } };
+  }
+
+  _addSuggestedTag(tag) {
+    const editor = this._editor;
+    if (!editor || typeof tag !== "string" || !tag.trim()) {
+      return;
+    }
+    const known = new Set((this._allTags || []).map((entry) => entry.toLocaleLowerCase("de")));
+    if (known.size > 0 && !known.has(tag.toLocaleLowerCase("de"))) {
+      this._patchEditor({ error: `Der Tag „${tag}“ existiert nicht und kann nicht übernommen werden.` });
+      return;
+    }
+    if (editor.tags.some((entry) => entry.toLocaleLowerCase("de") === tag.toLocaleLowerCase("de"))) {
+      return;
+    }
+    this._patchEditor({ tags: [...editor.tags, tag], error: "" });
+    this._showToast(`Tag „${tag}“ übernommen.`);
+  }
+
+  _applySuggestedTags() {
+    const editor = this._editor;
+    const suggested = editor?.suggestion?.tags;
+    if (!editor || !Array.isArray(suggested) || suggested.length === 0) {
+      return;
+    }
+    const known = new Set((this._allTags || []).map((entry) => entry.toLocaleLowerCase("de")));
+    const additions = suggested.filter(
+      (tag) =>
+        (known.size === 0 || known.has(tag.toLocaleLowerCase("de"))) &&
+        !editor.tags.some((entry) => entry.toLocaleLowerCase("de") === tag.toLocaleLowerCase("de")),
+    );
+    if (additions.length === 0) {
+      this._showToast("Alle vorgeschlagenen Tags sind bereits gesetzt.");
+      return;
+    }
+    this._patchEditor({ tags: [...editor.tags, ...additions], error: "" });
+    this._showToast(
+      additions.length === 1 ? "Vorgeschlagener Tag übernommen." : `${additions.length} Tags übernommen.`,
+    );
   }
 
   _applySuggestion() {
@@ -1262,61 +1579,44 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
-  /* Bilder                                                                 */
+  /* Bilder (Tab im Produktdialog)                                          */
   /* --------------------------------------------------------------------- */
 
-  _openImages(product) {
-    if (!this._can("product") || !product) {
-      return;
-    }
-    this._captureFocus();
-    this._imagesDialog = {
-      product,
-      images: [],
-      loading: true,
-      busy: false,
-      error: "",
-      notice: "",
-      pendingDelete: null,
-    };
-    this._loadImages(product.articleNumber);
+  _imageBusy() {
+    const editor = this._editor;
+    return Boolean(editor && (editor.imagesBusy || editor.imagesLoading));
   }
 
-  _closeImages() {
-    if (this._imagesDialog?.busy) {
-      return;
-    }
-    this._imagesDialog = null;
-    this._imagesRequestId += 1;
-    this._restoreFocus();
+  _canManageImages() {
+    return Boolean(this._editor && this._editor.mode === "edit" && this._editor.articleNumber);
   }
 
   async _loadImages(articleNumber) {
-    if (!this._imagesDialog) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || editor.articleNumber !== articleNumber) {
       return;
     }
     const requestId = ++this._imagesRequestId;
-    this._imagesDialog = { ...this._imagesDialog, loading: true, error: "" };
+    this._patchEditor({ imagesLoading: true, imagesError: "" });
     try {
       const data = await this._api(`${productPath(articleNumber)}/images`);
       if (requestId !== this._imagesRequestId) {
         return;
       }
-      const current = this._imagesDialog;
-      if (!current || current.product.articleNumber !== articleNumber) {
+      const current = this._editor;
+      if (!current || current.mode !== "edit" || current.articleNumber !== articleNumber) {
         return;
       }
       const images = Array.isArray(data?.images) ? data.images.map(normalizeImage).filter(Boolean) : [];
-      this._imagesDialog = { ...current, images, loading: false };
+      this._patchEditor({ images, imagesLoading: false });
     } catch (error) {
       if (isAbortError(error) || requestId !== this._imagesRequestId) {
         return;
       }
-      const current = this._imagesDialog;
-      if (!current) {
+      if (!this._editor) {
         return;
       }
-      this._imagesDialog = { ...current, loading: false, error: this._errorText(error) };
+      this._patchEditor({ imagesLoading: false, imagesError: this._errorText(error) });
     }
   }
 
@@ -1326,26 +1626,30 @@ export class FrickeldaveStorePanel extends LitElement {
     if (input) {
       input.value = "";
     }
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy || files.length === 0) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy() || files.length === 0) {
       return;
     }
 
-    if (dialog.images.length + files.length > MAX_IMAGES) {
-      const free = Math.max(MAX_IMAGES - dialog.images.length, 0);
-      this._imagesDialog = {
-        ...dialog,
-        error:
-          `Maximal ${MAX_IMAGES} Bilder pro Produkt. Es sind bereits ${dialog.images.length} Bilder hinterlegt ` +
+    if (editor.images.length + files.length > MAX_IMAGES) {
+      const free = Math.max(MAX_IMAGES - editor.images.length, 0);
+      this._patchEditor({
+        imagesError:
+          `Maximal ${MAX_IMAGES} Bilder pro Produkt. Es sind bereits ${editor.images.length} Bilder hinterlegt ` +
           `und nur noch ${free} ${free === 1 ? "Platz" : "Plätze"} frei. Es wurde nichts hochgeladen.`,
-        notice: "",
-        pendingDelete: null,
-      };
+        imagesNotice: "",
+        imagesPendingDelete: null,
+      });
       return;
     }
 
-    const articleNumber = dialog.product.articleNumber;
-    this._imagesDialog = { ...dialog, busy: true, error: "", notice: "", pendingDelete: null };
+    const articleNumber = editor.articleNumber;
+    this._patchEditor({
+      imagesBusy: true,
+      imagesError: "",
+      imagesNotice: "",
+      imagesPendingDelete: null,
+    });
 
     try {
       for (const file of files) {
@@ -1354,50 +1658,53 @@ export class FrickeldaveStorePanel extends LitElement {
         await this._api(`${productPath(articleNumber)}/images`, { method: "POST", formData });
       }
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = {
-          ...this._imagesDialog,
-          busy: false,
-          notice: files.length === 1 ? "Bild wurde hochgeladen." : `${files.length} Bilder wurden hochgeladen.`,
-        };
+      if (this._editor) {
+        this._patchEditor({
+          imagesBusy: false,
+          imagesNotice:
+            files.length === 1 ? "Bild wurde hochgeladen." : `${files.length} Bilder wurden hochgeladen.`,
+        });
       }
       this._loadProducts();
     } catch (error) {
       if (isAbortError(error)) {
-        if (this._imagesDialog) {
-          this._imagesDialog = { ...this._imagesDialog, busy: false };
-        }
+        this._patchEditor({ imagesBusy: false });
         return;
       }
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = {
-          ...this._imagesDialog,
-          busy: false,
-          error: `${this._errorText(error)} Bereits übertragene Bilder bleiben erhalten.`,
-        };
+      if (this._editor) {
+        this._patchEditor({
+          imagesBusy: false,
+          imagesError: `${this._errorText(error)} Bereits übertragene Bilder bleiben erhalten.`,
+        });
       }
     }
   }
 
   async _moveImage(index, delta) {
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy || dialog.loading) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy()) {
       return;
     }
     const target = index + delta;
-    if (target < 0 || target >= dialog.images.length) {
+    if (target < 0 || target >= editor.images.length) {
       return;
     }
-    const images = [...dialog.images];
+    const images = [...editor.images];
     const [moved] = images.splice(index, 1);
     if (!moved) {
       return;
     }
     images.splice(target, 0, moved);
 
-    const articleNumber = dialog.product.articleNumber;
-    this._imagesDialog = { ...dialog, images, busy: true, error: "", notice: "", pendingDelete: null };
+    const articleNumber = editor.articleNumber;
+    this._patchEditor({
+      images,
+      imagesBusy: true,
+      imagesError: "",
+      imagesNotice: "",
+      imagesPendingDelete: null,
+    });
 
     try {
       await this._api(`${productPath(articleNumber)}/images/order`, {
@@ -1405,28 +1712,34 @@ export class FrickeldaveStorePanel extends LitElement {
         body: { order: images.map((image) => image.name) },
       });
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, notice: "Reihenfolge gespeichert." };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesNotice: "Reihenfolge gespeichert." });
       }
       this._loadProducts();
     } catch (error) {
       if (isAbortError(error)) {
+        this._patchEditor({ imagesBusy: false });
         return;
       }
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, error: this._errorText(error) };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesError: this._errorText(error) });
       }
     }
   }
 
   async _setMainImage(name) {
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy || !name) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy() || !name) {
       return;
     }
-    const articleNumber = dialog.product.articleNumber;
-    this._imagesDialog = { ...dialog, busy: true, error: "", notice: "", pendingDelete: null };
+    const articleNumber = editor.articleNumber;
+    this._patchEditor({
+      imagesBusy: true,
+      imagesError: "",
+      imagesNotice: "",
+      imagesPendingDelete: null,
+    });
 
     try {
       await this._api(`${productPath(articleNumber)}/images/main`, {
@@ -1434,128 +1747,171 @@ export class FrickeldaveStorePanel extends LitElement {
         body: { name },
       });
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, notice: "Hauptbild gespeichert." };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesNotice: "Hauptbild gespeichert." });
       }
       this._loadProducts();
     } catch (error) {
       if (isAbortError(error)) {
+        this._patchEditor({ imagesBusy: false });
         return;
       }
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, error: this._errorText(error) };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesError: this._errorText(error) });
       }
     }
   }
 
   _requestDeleteImage(name) {
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy()) {
       return;
     }
-    this._imagesDialog = {
-      ...dialog,
-      pendingDelete: dialog.pendingDelete === name ? null : name,
-      error: "",
-      notice: "",
-    };
+    this._patchEditor({
+      imagesPendingDelete: editor.imagesPendingDelete === name ? null : name,
+      imagesError: "",
+      imagesNotice: "",
+    });
   }
 
   async _deleteImage(name) {
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy || !name) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy() || !name) {
       return;
     }
-    const articleNumber = dialog.product.articleNumber;
-    this._imagesDialog = { ...dialog, busy: true, error: "", pendingDelete: null };
+    const articleNumber = editor.articleNumber;
+    this._patchEditor({
+      imagesBusy: true,
+      imagesError: "",
+      imagesPendingDelete: null,
+    });
 
     try {
       await this._api(`${productPath(articleNumber)}/images/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, notice: "Bild wurde gelöscht." };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesNotice: "Bild wurde gelöscht." });
       }
       this._loadProducts();
     } catch (error) {
       if (isAbortError(error)) {
+        this._patchEditor({ imagesBusy: false });
         return;
       }
       await this._loadImages(articleNumber);
-      if (this._imagesDialog) {
-        this._imagesDialog = { ...this._imagesDialog, busy: false, error: this._errorText(error) };
+      if (this._editor) {
+        this._patchEditor({ imagesBusy: false, imagesError: this._errorText(error) });
       }
     }
   }
 
   /* --------------------------------------------------------------------- */
-  /* Bestandsbuchung                                                        */
+  /* Bestand (Tab im Produktdialog)                                         */
   /* --------------------------------------------------------------------- */
 
-  _openStock(product) {
-    if (!this._can("product") || !product) {
+  _stockValue(editor, locationId) {
+    const value = Number(editor?.stock?.[locationId]);
+    return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+  }
+
+  _setStockValue(locationId, rawValue) {
+    const editor = this._editor;
+    if (!editor || !locationId) {
       return;
     }
-    this._captureFocus();
-    this._stockDialog = {
-      product,
-      type: "in",
-      quantity: "1",
-      note: "",
-      saving: false,
+    const parsed = Number(String(rawValue ?? "").trim());
+    const value = Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+    this._patchEditor({
+      stock: { ...editor.stock, [locationId]: value },
+      fieldErrors: { ...editor.fieldErrors },
       error: "",
-    };
+    });
   }
 
-  _closeStock() {
-    if (this._stockDialog?.saving) {
+  _stepStock(locationId, delta) {
+    const editor = this._editor;
+    if (!editor || !locationId) {
       return;
     }
-    this._stockDialog = null;
-    this._restoreFocus();
+    const next = Math.max(0, this._stockValue(editor, locationId) + delta);
+    this._patchEditor({ stock: { ...editor.stock, [locationId]: next }, error: "" });
   }
 
-  async _saveStock(event) {
-    event?.preventDefault();
-    const dialog = this._stockDialog;
-    if (!dialog || dialog.saving) {
+  _bookingTypeLabel(type) {
+    return BOOKING_TYPE_LABELS[type] || type || "Buchung";
+  }
+
+  async _loadBookings(articleNumber) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || editor.articleNumber !== articleNumber) {
       return;
     }
-
-    const type = STOCK_TYPES.some((entry) => entry.value === dialog.type) ? dialog.type : "in";
-    const quantityText = String(dialog.quantity).trim();
-    const quantity = Number(quantityText);
-
-    if (!/^\d+$/.test(quantityText) || !Number.isInteger(quantity) || quantity < 1) {
-      this._stockDialog = {
-        ...dialog,
-        error: "Bitte eine ganze Zahl größer 0 angeben.",
-      };
-      return;
-    }
-
-    this._stockDialog = { ...dialog, saving: true, error: "" };
-
+    const requestId = ++this._bookingsRequestId;
+    this._patchEditor({ bookingsLoading: true, bookingsError: "" });
     try {
-      await this._api(`${productPath(dialog.product.articleNumber)}/stock`, {
-        method: "POST",
-        body: { type, quantity, note: dialog.note.trim() },
-      });
-      this._stockDialog = null;
-      this._showToast("Bestandsbuchung gespeichert.");
-      this._restoreFocus();
-      this._loadProducts();
+      const data = await this._api(`${productPath(articleNumber)}/stock`);
+      if (requestId !== this._bookingsRequestId) {
+        return;
+      }
+      const current = this._editor;
+      if (!current || current.articleNumber !== articleNumber) {
+        return;
+      }
+      const bookings = Array.isArray(data?.bookings)
+        ? data.bookings.map(normalizeBooking).filter(Boolean)
+        : [];
+      this._patchEditor({ bookings, bookingsLoading: false, bookingsLoaded: true });
     } catch (error) {
-      if (isAbortError(error)) {
+      if (isAbortError(error) || requestId !== this._bookingsRequestId) {
         return;
       }
-      if (!this._stockDialog) {
+      if (!this._editor) {
         return;
       }
-      this._stockDialog = { ...this._stockDialog, saving: false, error: this._errorText(error) };
+      this._patchEditor({ bookingsLoading: false, bookingsError: this._errorText(error) });
     }
+  }
+
+  _setEditorTab(tab) {
+    const editor = this._editor;
+    if (!editor || !["general", "images", "stock"].includes(tab) || editor.tab === tab) {
+      return;
+    }
+    this._patchEditor({ tab });
+    if (tab === "stock" && editor.mode === "edit" && !editor.bookingsLoaded) {
+      this._loadBookings(editor.articleNumber);
+    }
+    if (tab === "images" && editor.mode === "edit" && editor.images.length === 0 && !editor.imagesLoading) {
+      this._loadImages(editor.articleNumber);
+    }
+  }
+
+  _onEditorTabKeydown(event) {
+    const tabs = ["general", "images", "stock"];
+    const currentIndex = tabs.indexOf(this._editor?.tab || "general");
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = tabs.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    const next = tabs[nextIndex];
+    this._setEditorTab(next);
+    this.updateComplete
+      .then(() => {
+        this.renderRoot?.querySelector(`#fd-editor-tab-${next}`)?.focus?.();
+      })
+      .catch(() => {});
   }
 
   /* --------------------------------------------------------------------- */
@@ -1874,11 +2230,10 @@ export class FrickeldaveStorePanel extends LitElement {
     return html`
       ${this._renderAccess()}
       ${this._renderEditorDialog()}
-      ${this._renderImagesDialog()}
-      ${this._renderStockDialog()}
       ${this._renderArchiveDialog()}
       ${this._renderTagsDialog()}
       ${this._renderImportDialog()}
+      ${this._renderPublishDialog()}
       ${this._renderToast()}
     `;
   }
@@ -2161,6 +2516,7 @@ export class FrickeldaveStorePanel extends LitElement {
         </header>
 
         <div class="fd-shell">
+          ${this._can("app_admin") ? this._renderPublishActions() : ""}
           ${canProduct ? this._renderProducts() : this._renderNoProductView()}
         </div>
       </div>
@@ -2199,6 +2555,30 @@ export class FrickeldaveStorePanel extends LitElement {
             />
           </div>
           <div class="fd-filter-actions">
+            <div class="fd-view-toggle" role="group" aria-label="Darstellung der Produktliste">
+              <button
+                type="button"
+                class="fd-view-option"
+                aria-pressed=${this._view === "grid" ? "true" : "false"}
+                @click=${() => this._setView("grid")}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
+                </svg>
+                Kacheln
+              </button>
+              <button
+                type="button"
+                class="fd-view-option"
+                aria-pressed=${this._view === "list" ? "true" : "false"}
+                @click=${() => this._setView("list")}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z" />
+                </svg>
+                Liste
+              </button>
+            </div>
             <button
               type="button"
               class="fd-button"
@@ -2267,18 +2647,15 @@ export class FrickeldaveStorePanel extends LitElement {
               <label class="fd-switch">
                 <input
                   type="checkbox"
-                  .checked=${this._inStockOnly}
-                  @change=${(event) => this._setFlag("_inStockOnly", event.target.checked)}
+                  .checked=${this._inLocationOnly}
+                  ?disabled=${!this._locationFilter}
+                  @change=${(event) => this._setInLocationOnly(event.target.checked)}
                 />
-                <span>Auf Lager</span>
-              </label>
-              <label class="fd-switch">
-                <input
-                  type="checkbox"
-                  .checked=${this._inCabinetOnly}
-                  @change=${(event) => this._setFlag("_inCabinetOnly", event.target.checked)}
-                />
-                <span>Im Schrank</span>
+                <span>
+                  Nur mit Bestand${this._locationFilter
+                    ? ` in ${this._locationName(this._locationFilter)}`
+                    : " (Lagerstätte wählen)"}
+                </span>
               </label>
               <label class="fd-switch">
                 <input
@@ -2289,6 +2666,28 @@ export class FrickeldaveStorePanel extends LitElement {
                 <span>Nur archivierte anzeigen</span>
               </label>
             </div>
+          </div>
+
+          <div class="fd-field">
+            <label class="fd-label" for="fd-location-filter">Lagerstätte</label>
+            ${this._locations.length === 0
+              ? html`<p class="fd-hint">
+                  ${this._locationsError || "Lagerstätten werden geladen …"}
+                </p>`
+              : html`
+                  <select
+                    id="fd-location-filter"
+                    class="fd-input"
+                    .value=${this._locationFilter}
+                    @change=${(event) => this._setLocationFilter(event.target.value)}
+                  >
+                    <option value="">Alle Lagerstätten</option>
+                    ${this._locations.map(
+                      (location) => html`<option value=${location.id}>${location.name}</option>`,
+                    )}
+                  </select>
+                `}
+            <p class="fd-hint">Filtert Produkte nach dem Bestand der gewählten Lagerstätte.</p>
           </div>
 
           <fieldset class="fd-fieldset fd-fieldset--inline">
@@ -2398,10 +2797,130 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
       `;
     }
+    return this._view === "list" ? this._renderProductList() : this._renderProductTiles();
+  }
+
+  _renderProductTiles() {
     return html`
       <ul class="fd-grid" role="list">
         ${this._products.map((product) => this._renderProductCard(product))}
       </ul>
+    `;
+  }
+
+  _renderProductList() {
+    return html`
+      <div class="fd-product-list-wrap">
+        <table class="fd-product-table">
+          <caption class="fd-sr-only">Produkte in der Listenansicht</caption>
+          <thead>
+            <tr>
+              <th scope="col">Produkt</th>
+              <th scope="col">Kategorie</th>
+              <th scope="col">Preis</th>
+              <th scope="col">Bestand</th>
+              <th scope="col">Status</th>
+              <th scope="col">Aktionen</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${this._products.map((product) => this._renderProductRow(product))}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  _renderProductRow(product) {
+    const mainImage = this._mainImage(product);
+    const mainSrc = this._imageSrc(this._imageUrl(product, mainImage));
+    const archived = Boolean(product.archived);
+    const productLabel = product.name || product.articleNumber || "Produkt";
+
+    return html`
+      <tr class="fd-product-row${archived ? " fd-product--archived" : ""}">
+        <td class="fd-product-cell" data-label="Produkt">
+          <div class="fd-product-row-main">
+            <div class="fd-product-thumb">
+              ${mainSrc
+                ? html`<img src=${mainSrc} alt=${`Produktbild von ${productLabel}`} loading="lazy" />`
+                : html`<span aria-hidden="true">${String(productLabel).slice(0, 1).toUpperCase()}</span>`}
+            </div>
+            <div class="fd-product-row-text">
+              <span class="fd-product-title">${product.name || "(ohne Namen)"}</span>
+              <span class="fd-muted fd-small">${product.articleNumber || "Ohne Artikelnummer"}</span>
+              ${Array.isArray(product.tags) && product.tags.length > 0
+                ? html`
+                    <ul class="fd-tag-list" role="list" aria-label="Tags">
+                      ${product.tags.map((tag) => html`<li class="fd-tag">${tag}</li>`)}
+                    </ul>
+                  `
+                : ""}
+            </div>
+          </div>
+        </td>
+        <td data-label="Kategorie">${categoryLabel(product.category)}</td>
+        <td data-label="Preis" class="fd-price">${formatPrice(product.price)}</td>
+        <td data-label="Bestand">
+          <div class="fd-stock-chips">${this._renderStockSummary(product)}</div>
+        </td>
+        <td data-label="Status">
+          <div class="fd-badges">${this._renderProductBadges(product)}</div>
+        </td>
+        <td data-label="Aktionen">
+          <div class="fd-row-actions">${this._renderProductActions(product)}</div>
+        </td>
+      </tr>
+    `;
+  }
+
+  _renderStockSummary(product) {
+    if (this._locations.length === 0) {
+      return html`<span class="fd-muted fd-small">
+        ${this._locationsError || "Keine Lagerstätten konfiguriert."}
+      </span>`;
+    }
+    return this._productStockEntries(product).map(
+      (entry) => html`
+        <span class="fd-stock-chip">
+          <span class="fd-muted">${entry.name}:</span>
+          <strong>${formatNumber(entry.value)}</strong>
+        </span>
+      `,
+    );
+  }
+
+  _renderProductBadges(product) {
+    return html`
+      ${product.customizable ? html`<span class="fd-badge">Personalisierbar</span>` : ""}
+      ${product.visible === false ? html`<span class="fd-badge fd-badge--warning">Nicht sichtbar</span>` : ""}
+      ${product.archived ? html`<span class="fd-badge fd-badge--muted">Archiviert</span>` : ""}
+    `;
+  }
+
+  _renderProductActions(product) {
+    const productLabel = product.name || product.articleNumber || "Produkt";
+    return html`
+      <button
+        type="button"
+        class="fd-button"
+        @click=${() => this._openEdit(product)}
+        aria-label=${`${productLabel} bearbeiten`}
+      >
+        Bearbeiten
+      </button>
+      ${product.archived
+        ? ""
+        : html`
+            <button
+              type="button"
+              class="fd-button"
+              @click=${() => this._requestArchive(product)}
+              aria-label=${`${productLabel} archivieren`}
+            >
+              Archivieren
+            </button>
+          `}
     `;
   }
 
@@ -2430,16 +2949,9 @@ export class FrickeldaveStorePanel extends LitElement {
           </p>
           ${product.description ? html`<p class="fd-product-description">${product.description}</p>` : ""}
 
-          <div class="fd-badges">
-            ${product.customizable ? html`<span class="fd-badge">Personalisierbar</span>` : ""}
-            ${product.visible === false ? html`<span class="fd-badge fd-badge--warning">Nicht sichtbar</span>` : ""}
-            ${archived ? html`<span class="fd-badge fd-badge--muted">Archiviert</span>` : ""}
-          </div>
+          <div class="fd-badges">${this._renderProductBadges(product)}</div>
 
-          <p class="fd-stock-line">
-            Lager: <strong>${formatNumber(product.stock)}</strong> ·
-            Schrank: <strong>${formatNumber(product.salesCabinet)}</strong>
-          </p>
+          <p class="fd-stock-line">${this._renderStockSummary(product)}</p>
           ${product.updatedAt
             ? html`<p class="fd-hint">Zuletzt geändert: ${formatDateTime(product.updatedAt)}</p>`
             : ""}
@@ -2452,44 +2964,7 @@ export class FrickeldaveStorePanel extends LitElement {
               `
             : ""}
 
-          <div class="fd-card-actions">
-            <button
-              type="button"
-              class="fd-button"
-              @click=${() => this._openEdit(product)}
-              aria-label=${`${productLabel} bearbeiten`}
-            >
-              Bearbeiten
-            </button>
-            <button
-              type="button"
-              class="fd-button"
-              @click=${() => this._openImages(product)}
-              aria-label=${`Bilder von ${productLabel} verwalten`}
-            >
-              Bilder
-            </button>
-            <button
-              type="button"
-              class="fd-button"
-              @click=${() => this._openStock(product)}
-              aria-label=${`Bestand von ${productLabel} buchen`}
-            >
-              Bestand
-            </button>
-            ${archived
-              ? ""
-              : html`
-                  <button
-                    type="button"
-                    class="fd-button"
-                    @click=${() => this._requestArchive(product)}
-                    aria-label=${`${productLabel} archivieren`}
-                  >
-                    Archivieren
-                  </button>
-                `}
-          </div>
+          <div class="fd-card-actions">${this._renderProductActions(product)}</div>
         </div>
       </li>
     `;
@@ -2543,11 +3018,12 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     const errors = editor.fieldErrors || {};
     const isCreate = editor.mode === "create";
+    const tab = editor.tab || "general";
 
     return html`
       <dialog
         id="fd-editor-dialog"
-        class="fd-dialog${editor.shake ? " fd-dialog--shake" : ""}"
+        class="fd-dialog fd-dialog--wide${editor.shake ? " fd-dialog--shake" : ""}"
         aria-labelledby="fd-editor-title"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closeEditor())}
         @click=${(event) => {
@@ -2575,6 +3051,30 @@ export class FrickeldaveStorePanel extends LitElement {
           </div>
         </div>
 
+        <div class="fd-editor-tabs" role="tablist" aria-label="Produktbereiche">
+          ${[
+            { id: "general", label: "Grunddaten" },
+            { id: "images", label: "Bilder" },
+            { id: "stock", label: "Bestand" },
+          ].map(
+            (entry) => html`
+              <button
+                id="fd-editor-tab-${entry.id}"
+                type="button"
+                class="fd-tab"
+                role="tab"
+                aria-selected=${tab === entry.id ? "true" : "false"}
+                aria-controls="fd-editor-panel-${entry.id}"
+                tabindex=${tab === entry.id ? "0" : "-1"}
+                @click=${() => this._setEditorTab(entry.id)}
+                @keydown=${(event) => this._onEditorTabKeydown(event)}
+              >
+                ${entry.label}
+              </button>
+            `,
+          )}
+        </div>
+
         <form class="fd-dialog-form" @submit=${(event) => this._saveEditor(event)} novalidate>
           <div class="fd-dialog-body">
           ${editor.error ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.error}</div>` : ""}
@@ -2584,6 +3084,12 @@ export class FrickeldaveStorePanel extends LitElement {
               </p>`
             : ""}
 
+          <div
+            id="fd-editor-panel-general"
+            role="tabpanel"
+            aria-labelledby="fd-editor-tab-general"
+            ?hidden=${tab !== "general"}
+          >
           <div class="fd-form-grid">
             <div class="fd-field">
               <label class="fd-label" for="fd-editor-name">
@@ -2690,9 +3196,22 @@ export class FrickeldaveStorePanel extends LitElement {
               ></textarea>
               ${errors.description ? html`<p class="fd-error-text">${errors.description}</p>` : ""}
 
-              <div class="fd-inline-actions">
-                ${editor.mode === "edit"
-                  ? html`
+              ${editor.mode === "edit"
+                ? html`
+                    <div class="fd-field">
+                      <label class="fd-label" for="fd-editor-instructions">Eigene Hinweise für die KI (optional)</label>
+                      <textarea
+                        id="fd-editor-instructions"
+                        class="fd-input fd-textarea"
+                        rows="2"
+                        maxlength="2000"
+                        placeholder="Zum Beispiel: Betone die Handarbeit und die Pflegehinweise."
+                        .value=${editor.suggestionInstructions || ""}
+                        @input=${(event) => this._setEditorField("suggestionInstructions", event.target.value)}
+                      ></textarea>
+                      <p class="fd-hint">Fließt nur in den nächsten Vorschlag ein, nicht in die Beschreibung.</p>
+                    </div>
+                    <div class="fd-inline-actions">
                       <button
                         type="button"
                         class="fd-button"
@@ -2704,42 +3223,13 @@ export class FrickeldaveStorePanel extends LitElement {
                       <span class="fd-hint">
                         Der Vorschlag wird erst nach „Übernehmen“ und Speichern wirksam.
                       </span>
-                    `
-                  : html`<span class="fd-hint">
-                      Ein KI-Vorschlag ist verfügbar, sobald das Produkt erstellt ist.
-                    </span>`}
-              </div>
-
-              ${editor.suggestion?.error
-                ? html`<p class="fd-error-text" role="alert">${editor.suggestion.error}</p>`
-                : ""}
-
-              ${editor.suggestion && !editor.suggestion.error && !editor.suggestion.loading
-                ? html`
-                    <div class="fd-suggestion">
-                      <label class="fd-label" for="fd-editor-suggestion">Vorschlag (bearbeitbar)</label>
-                      <textarea
-                        id="fd-editor-suggestion"
-                        class="fd-input fd-textarea"
-                        rows="4"
-                        .value=${editor.suggestion.text}
-                        @input=${(event) => this._patchSuggestion(event.target.value)}
-                      ></textarea>
-                      <div class="fd-card-actions">
-                        <button
-                          type="button"
-                          class="fd-button fd-button--primary"
-                          @click=${() => this._applySuggestion()}
-                        >
-                          Übernehmen
-                        </button>
-                        <button type="button" class="fd-button" @click=${() => this._discardSuggestion()}>
-                          Verwerfen
-                        </button>
-                      </div>
                     </div>
                   `
-                : ""}
+                : html`<span class="fd-hint">
+                    Ein KI-Vorschlag ist verfügbar, sobald das Produkt erstellt ist.
+                  </span>`}
+
+              ${this._renderSuggestion(editor)}
             </div>
 
             <div class="fd-field fd-field--full">
@@ -2829,6 +3319,25 @@ export class FrickeldaveStorePanel extends LitElement {
           </div>
           </div>
 
+          <div
+            id="fd-editor-panel-images"
+            role="tabpanel"
+            aria-labelledby="fd-editor-tab-images"
+            ?hidden=${tab !== "images"}
+          >
+            ${this._renderEditorImages(editor)}
+          </div>
+
+          <div
+            id="fd-editor-panel-stock"
+            role="tabpanel"
+            aria-labelledby="fd-editor-tab-stock"
+            ?hidden=${tab !== "stock"}
+          >
+            ${this._renderEditorStock(editor)}
+          </div>
+          </div>
+
           <footer class="fd-dialog-foot">
             <button
               type="button"
@@ -2852,41 +3361,527 @@ export class FrickeldaveStorePanel extends LitElement {
     `;
   }
 
+  _renderSuggestion(editor) {
+    const suggestion = editor.suggestion;
+    if (!suggestion) {
+      return "";
+    }
+    if (suggestion.error) {
+      return html`<p class="fd-error-text" role="alert">${suggestion.error}</p>`;
+    }
+    if (suggestion.loading) {
+      return html`<p class="fd-hint" role="status" aria-live="polite">Vorschlag wird erstellt …</p>`;
+    }
+    return html`
+      <div class="fd-suggestion">
+        <label class="fd-label" for="fd-editor-suggestion">Vorschlag (bearbeitbar)</label>
+        <textarea
+          id="fd-editor-suggestion"
+          class="fd-input fd-textarea"
+          rows="4"
+          .value=${suggestion.text}
+          @input=${(event) => this._patchSuggestion(event.target.value)}
+        ></textarea>
+        <div class="fd-card-actions">
+          <button type="button" class="fd-button fd-button--primary" @click=${() => this._applySuggestion()}>
+            Vorschlag übernehmen
+          </button>
+          <button type="button" class="fd-button" @click=${() => this._discardSuggestion()}>
+            Verwerfen
+          </button>
+        </div>
+
+        ${Array.isArray(suggestion.tags) && suggestion.tags.length > 0
+          ? html`
+              <div class="fd-field">
+                <span class="fd-label" id="fd-suggested-tags-label">Vorgeschlagene Tags</span>
+                <p class="fd-hint" id="fd-suggested-tags-hint">
+                  Nur vorhandene Tags können übernommen werden.
+                </p>
+                <ul
+                  class="fd-chip-row"
+                  role="list"
+                  aria-labelledby="fd-suggested-tags-label"
+                  aria-describedby="fd-suggested-tags-hint"
+                >
+                  ${suggestion.tags.map(
+                    (tag) => html`
+                      <li>
+                        <button type="button" class="fd-chip" @click=${() => this._addSuggestedTag(tag)}>
+                          + ${tag}
+                        </button>
+                      </li>
+                    `,
+                  )}
+                </ul>
+                ${suggestion.tags.length > 1
+                  ? html`<div class="fd-inline-actions">
+                      <button type="button" class="fd-button" @click=${() => this._applySuggestedTags()}>
+                        Alle vorgeschlagenen Tags übernehmen
+                      </button>
+                    </div>`
+                  : ""}
+              </div>
+            `
+          : ""}
+
+        ${Array.isArray(suggestion.rejectedTags) && suggestion.rejectedTags.length > 0
+          ? html`
+              <div class="fd-banner fd-banner--warning" role="note">
+                <p>
+                  Diese Tags gibt es noch nicht und werden nicht automatisch angelegt. Neue Tags musst du
+                  selbst anlegen.
+                </p>
+                <ul class="fd-chip-row" role="list" aria-label="Verworfene Tag-Vorschläge">
+                  ${suggestion.rejectedTags.map(
+                    (tag) => html`<li class="fd-chip fd-chip--rejected">${tag}</li>`,
+                  )}
+                </ul>
+              </div>
+            `
+          : ""}
+      </div>
+    `;
+  }
+
+  _renderEditorImages(editor) {
+    if (!this._canManageImages()) {
+      return html`
+        <div class="fd-state fd-state--inline">
+          <h3>Bilder nach dem Speichern</h3>
+          <p class="fd-hint">
+            Die Artikelnummer wird erst beim Anlegen vergeben. Speichere das Produkt – danach wechselt der
+            Dialog automatisch in diesen Tab und du kannst bis zu ${MAX_IMAGES} Bilder hochladen.
+          </p>
+        </div>
+      `;
+    }
+    const busy = editor.imagesBusy || editor.imagesLoading;
+    const images = Array.isArray(editor.images) ? editor.images : [];
+    const productLabel = editor.name || editor.articleNumber || "Produkt";
+
+    return html`
+      ${editor.imagesError ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.imagesError}</div>` : ""}
+      ${editor.imagesNotice ? html`<div class="fd-banner fd-banner--success" role="status">${editor.imagesNotice}</div>` : ""}
+
+      <p class="fd-muted fd-small">
+        ${images.length} von ${MAX_IMAGES} Bildern · Artikelnummer ${editor.articleNumber}
+      </p>
+
+      <div class="fd-upload">
+        <label class="fd-label" for="fd-image-upload">Bilder hochladen (maximal ${MAX_IMAGES})</label>
+        <input
+          id="fd-image-upload"
+          class="fd-input fd-file"
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          multiple
+          ?disabled=${busy || images.length >= MAX_IMAGES}
+          @change=${(event) => this._onImagesSelected(event)}
+        />
+        <p class="fd-hint">
+          ${images.length >= MAX_IMAGES
+            ? "Die maximale Anzahl ist erreicht. Bitte zuerst ein Bild löschen."
+            : "Mehrere Dateien möglich. Ein Upload über die Höchstzahl wird ohne Teilübernahme abgelehnt."}
+        </p>
+        ${editor.imagesBusy
+          ? html`<p class="fd-hint" role="status">
+              <span class="fd-spinner" aria-hidden="true"></span> Bilder werden übertragen …
+            </p>`
+          : ""}
+      </div>
+
+      ${editor.imagesLoading && images.length === 0
+        ? html`<p class="fd-muted" role="status">
+            <span class="fd-spinner" aria-hidden="true"></span> Bilder werden geladen …
+          </p>`
+        : ""}
+
+      ${!editor.imagesLoading && images.length === 0
+        ? html`<div class="fd-state fd-state--inline">
+            <h3>Noch keine Bilder hinterlegt</h3>
+            <p class="fd-hint">Lade bis zu zehn Bilder hoch. Das erste Bild ist das Hauptbild.</p>
+          </div>`
+        : ""}
+
+      <ul class="fd-image-grid" role="list" aria-label="Bilder in Reihenfolge">
+        ${images.map((image, index) => {
+          const state = this._imageState(this._imageUrl({ articleNumber: editor.articleNumber }, image));
+          const src = state.src;
+          return html`
+            <li class="fd-image-card">
+              <div class="fd-image-preview">
+                ${src
+                  ? html`<img
+                      src=${src}
+                      alt=${image.is_main
+                        ? `Hauptbild von ${productLabel}`
+                        : `Bild ${index + 1} von ${productLabel}`}
+                      loading="lazy"
+                    />`
+                  : html`<div class="fd-image-loading">
+                      ${state.status === "error"
+                        ? html`<span class="fd-image-error">Bild nicht verfügbar</span>`
+                        : html`<span class="fd-spinner" aria-hidden="true"></span>
+                            <span class="fd-sr-only">Bild wird geladen …</span>`}
+                    </div>`}
+                ${image.is_main ? html`<span class="fd-badge fd-badge--main">Hauptbild</span>` : ""}
+              </div>
+              <p class="fd-image-name" title=${image.name}>${image.name}</p>
+              <div class="fd-image-actions">
+                <button
+                  type="button"
+                  class="fd-button fd-button--small"
+                  @click=${() => this._moveImage(index, -1)}
+                  ?disabled=${busy || index === 0}
+                  aria-label=${`Bild ${index + 1} nach links verschieben`}
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  class="fd-button fd-button--small"
+                  @click=${() => this._moveImage(index, 1)}
+                  ?disabled=${busy || index === images.length - 1}
+                  aria-label=${`Bild ${index + 1} nach rechts verschieben`}
+                >
+                  →
+                </button>
+                <button
+                  type="button"
+                  class="fd-button fd-button--small"
+                  @click=${() => this._setMainImage(image.name)}
+                  ?disabled=${busy || image.is_main}
+                  aria-label=${`Bild ${index + 1} als Hauptbild setzen`}
+                >
+                  Als Hauptbild
+                </button>
+                <button
+                  type="button"
+                  class="fd-button fd-button--small fd-button--danger"
+                  @click=${() => this._onDeleteImageClick(image.name)}
+                  ?disabled=${busy}
+                  aria-label=${`Bild ${index + 1} löschen`}
+                >
+                  ${editor.imagesPendingDelete === image.name ? "Wirklich löschen" : "Löschen"}
+                </button>
+              </div>
+              ${editor.imagesPendingDelete === image.name
+                ? html`<p class="fd-hint">Erneut „Wirklich löschen“ wählen, um das Bild zu entfernen.</p>`
+                : ""}
+            </li>
+          `;
+        })}
+      </ul>
+    `;
+  }
+
+  _renderEditorStock(editor) {
+    const isCreate = editor.mode === "create";
+    return html`
+      ${this._locations.length === 0
+        ? html`<div class="fd-banner fd-banner--warning" role="note">
+            <p>
+              ${this._locationsError
+                ? this._locationsError
+                : "Es sind keine Lagerstätten konfiguriert. Lege sie unter Einstellungen → Frickeldave Store → Lagerstätten an."}
+            </p>
+          </div>`
+        : html`
+            <div class="fd-stock-editors">
+              ${this._locations.map((location) => {
+                const value = this._stockValue(editor, location.id);
+                return html`
+                  <div class="fd-stock-editor">
+                    <span class="fd-label">${location.name}</span>
+                    <button
+                      type="button"
+                      class="fd-button"
+                      @click=${() => this._stepStock(location.id, 1)}
+                      aria-label=${`Anzahl für ${location.name} erhöhen`}
+                    >
+                      Anzahl erhöhen
+                    </button>
+                    <input
+                      id=${`fd-editor-stock-${location.id}`}
+                      class="fd-input fd-stock-input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputmode="numeric"
+                      .value=${String(value)}
+                      aria-label=${`Bestand für ${location.name}`}
+                      @input=${(event) => this._setStockValue(location.id, event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      class="fd-button"
+                      @click=${() => this._stepStock(location.id, -1)}
+                      ?disabled=${value <= 0}
+                      aria-label=${`Anzahl für ${location.name} verringern`}
+                    >
+                      Anzahl verringern
+                    </button>
+                  </div>
+                `;
+              })}
+            </div>
+            <p class="fd-hint">
+              Die Buttons ändern nur das Formular. Übernommen wird der Bestand mit „Speichern“.
+            </p>
+          `}
+
+      ${isCreate
+        ? html`<p class="fd-hint">Die Buchungshistorie ist verfügbar, sobald das Produkt erstellt ist.</p>`
+        : this._renderBookings(editor)}
+    `;
+  }
+
+  _renderBookings(editor) {
+    const bookings = Array.isArray(editor.bookings) ? editor.bookings : [];
+    return html`
+      <section class="fd-bookings" aria-labelledby="fd-bookings-title">
+        <div class="fd-config-toolbar">
+          <h3 id="fd-bookings-title">Buchungshistorie</h3>
+          <button
+            type="button"
+            class="fd-button fd-button--small"
+            @click=${() => this._loadBookings(editor.articleNumber)}
+            ?disabled=${editor.bookingsLoading}
+          >
+            Neu laden
+          </button>
+        </div>
+        ${editor.bookingsError
+          ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.bookingsError}</div>`
+          : ""}
+        ${editor.bookingsLoading && bookings.length === 0
+          ? html`<p class="fd-muted" role="status">Buchungen werden geladen …</p>`
+          : ""}
+        ${!editor.bookingsLoading && !editor.bookingsError && bookings.length === 0
+          ? html`<p class="fd-hint">Noch keine Buchungen vorhanden.</p>`
+          : ""}
+        ${bookings.length > 0
+          ? html`
+              <ul class="fd-booking-list" role="list">
+                ${bookings.map(
+                  (booking) => html`
+                    <li class="fd-booking">
+                      <div class="fd-booking-head">
+                        <span class="fd-badge">${this._bookingTypeLabel(booking.type)}</span>
+                        <strong>${formatNumber(booking.quantity)} Stück</strong>
+                        <span class="fd-muted fd-small">${formatDateTime(booking.at)}</span>
+                      </div>
+                      <p class="fd-hint">
+                        ${booking.locationName || "Unbekannte Lagerstätte"}${booking.targetLocationName
+                          ? ` → ${booking.targetLocationName}`
+                          : ""}
+                        ${booking.note ? ` · ${booking.note}` : ""}
+                      </p>
+                    </li>
+                  `,
+                )}
+              </ul>
+            `
+          : ""}
+      </section>
+    `;
+  }
+
   /* --------------------------------------------------------------------- */
-  /* Render: Bildverwaltung                                                 */
+  /* Bild-Aktionen im Editor                                                */
   /* --------------------------------------------------------------------- */
 
   _onDeleteImageClick(name) {
-    const dialog = this._imagesDialog;
-    if (!dialog || dialog.busy) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy()) {
       return;
     }
-    if (dialog.pendingDelete === name) {
+    if (editor.imagesPendingDelete === name) {
       this._deleteImage(name);
       return;
     }
     this._requestDeleteImage(name);
   }
 
-  _renderImagesDialog() {
-    const dialog = this._imagesDialog;
+  /* --------------------------------------------------------------------- */
+  /* Veröffentlichen (dev/prod mit Dry-Run)                                 */
+  /* --------------------------------------------------------------------- */
+
+  _openPublish(target) {
+    if (!this._can("app_admin") || !PUBLISH_TARGET_LABELS[target]) {
+      return;
+    }
+    this._captureFocus();
+    this._publishDialog = {
+      target,
+      phase: "checking",
+      busy: true,
+      error: "",
+      result: null,
+      message: "",
+    };
+    this._requestPublish(true);
+  }
+
+  _closePublish() {
+    if (this._publishDialog?.busy) {
+      return;
+    }
+    this._publishDialog = null;
+    this._restoreFocus();
+  }
+
+  _setPublishMessage(value) {
+    if (!this._publishDialog) {
+      return;
+    }
+    this._publishDialog = { ...this._publishDialog, message: String(value ?? "").slice(0, 200) };
+  }
+
+  _publishErrorText(error) {
+    const text = this._errorText(error);
+    if (
+      error instanceof ApiError &&
+      (error.code === "publish_token_missing" || error.code === "publish_not_configured")
+    ) {
+      return `${text} Hinterlege das Token unter Einstellungen → Frickeldave Store → Veröffentlichen.`;
+    }
+    return text;
+  }
+
+  _publishToastMessage(result) {
+    const target = PUBLISH_TARGET_LABELS[result.target] || result.target;
+    const commit = result.commit
+      ? `Commit ${result.commit.slice(0, 7)}`
+      : result.changed
+        ? "Commit erstellt"
+        : "keine Dateiänderungen";
+    const deployment = result.deployment.triggered
+      ? "Deployment ausgelöst"
+      : "kein Deployment ausgelöst";
+    return `Nach ${target} veröffentlicht: ${commit}, ${deployment}.`;
+  }
+
+  async _requestPublish(dryRun) {
+    const dialog = this._publishDialog;
+    if (!dialog) {
+      return;
+    }
+    if (!dryRun) {
+      this._publishDialog = { ...dialog, busy: true, error: "" };
+    }
+    const message = dialog.message.trim();
+    try {
+      const data = await this._api(`${API_ROOT}/publish`, {
+        method: "POST",
+        body: {
+          target: dialog.target,
+          dry_run: Boolean(dryRun),
+          ...(message ? { message } : {}),
+        },
+        timeoutMs: IMPORT_TIMEOUT_MS,
+      });
+      if (!this._publishDialog) {
+        return;
+      }
+      const result = normalizePublishResult(data);
+      if (dryRun) {
+        this._publishDialog = {
+          ...this._publishDialog,
+          phase: "dry-run",
+          busy: false,
+          error: "",
+          result,
+        };
+      } else {
+        this._publishDialog = {
+          ...this._publishDialog,
+          phase: "done",
+          busy: false,
+          error: "",
+          result,
+        };
+        this._showToast(this._publishToastMessage(result));
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
+      if (!this._publishDialog) {
+        return;
+      }
+      this._publishDialog = {
+        ...this._publishDialog,
+        phase: dryRun ? "error" : "dry-run",
+        busy: false,
+        error: this._publishErrorText(error),
+      };
+    }
+  }
+
+  _renderPublishActions() {
+    return html`
+      <section class="fd-card fd-publish-actions" aria-labelledby="fd-publish-actions-title">
+        <div>
+          <h2 id="fd-publish-actions-title">Website veröffentlichen</h2>
+          <p class="fd-muted fd-small">
+            Jede Veröffentlichung startet mit einem Vergleich (Dry-Run). Erst die Bestätigung im Dialog
+            schreibt Dateien.
+          </p>
+        </div>
+        <div class="fd-publish-buttons">
+          <button type="button" class="fd-button" @click=${() => this._openPublish("dev")}>
+            Nach dev veröffentlichen
+          </button>
+          <button type="button" class="fd-button fd-button--primary" @click=${() => this._openPublish("prod")}>
+            Nach prod veröffentlichen
+          </button>
+        </div>
+      </section>
+    `;
+  }
+
+  _renderCounts(counts) {
+    return html`
+      <dl class="fd-publish-counts">
+        ${["added", "changed", "removed", "unchanged"].map((status) => {
+          const meta = PUBLISH_STATUS_META[status];
+          return html`
+            <div class="fd-publish-count">
+              <dt>
+                <span class="fd-status-icon" aria-hidden="true">${meta.icon}</span>
+                ${meta.label}
+              </dt>
+              <dd>${formatNumber(counts[status])}</dd>
+            </div>
+          `;
+        })}
+      </dl>
+    `;
+  }
+
+  _renderPublishDialog() {
+    const dialog = this._publishDialog;
     if (!dialog) {
       return "";
     }
-    const product = dialog.product;
-    const productLabel = product.name || product.articleNumber || "Produkt";
-    const count = dialog.images.length;
-    const busy = dialog.busy || dialog.loading;
+    const target = PUBLISH_TARGET_LABELS[dialog.target] || dialog.target;
+    const result = dialog.result;
+    const done = dialog.phase === "done";
+    const dryRun = dialog.phase === "dry-run";
+    const deploymentBranch = result?.deployment?.branch || result?.branch || "";
 
     return html`
       <dialog
-        id="fd-images-dialog"
+        id="fd-publish-dialog"
         class="fd-dialog fd-dialog--wide"
-        aria-labelledby="fd-images-title"
-        @cancel=${(event) => this._handleDialogCancel(event, () => this._closeImages())}
+        aria-labelledby="fd-publish-title"
+        aria-describedby="fd-publish-description"
+        @cancel=${(event) => this._handleDialogCancel(event, () => this._closePublish())}
         @click=${(event) => {
           if (event.target === event.currentTarget) {
-            this._closeImages();
+            this._closePublish();
           }
         }}
       >
@@ -2894,7 +3889,7 @@ export class FrickeldaveStorePanel extends LitElement {
           <button
             type="button"
             class="fd-icon-button fd-dialog-close"
-            @click=${() => this._closeImages()}
+            @click=${() => this._closePublish()}
             ?disabled=${dialog.busy}
             aria-label="Dialog schließen"
             title="Dialog schließen"
@@ -2902,277 +3897,177 @@ export class FrickeldaveStorePanel extends LitElement {
             ✕
           </button>
           <div class="fd-dialog-title">
-            <h2 id="fd-images-title">Bilder – ${productLabel}</h2>
-            <p class="fd-muted fd-small">
-              ${count} von ${MAX_IMAGES} Bildern · Artikelnummer ${product.articleNumber}
+            <h2 id="fd-publish-title">${done ? "Veröffentlicht" : `Nach ${target} veröffentlichen`}</h2>
+            <p class="fd-muted fd-small" id="fd-publish-description">
+              ${done
+                ? `Die Veröffentlichung nach ${target} ist abgeschlossen.`
+                : `Dry-Run für das Ziel ${target}. Es wird noch nichts geschrieben.`}
             </p>
           </div>
         </div>
 
         <div class="fd-dialog-body">
-          ${dialog.error ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>` : ""}
-          ${dialog.notice ? html`<div class="fd-banner fd-banner--success" role="status">${dialog.notice}</div>` : ""}
-
-          <div class="fd-upload">
-            <label class="fd-label" for="fd-image-upload">Bilder hochladen (maximal ${MAX_IMAGES})</label>
-            <input
-              id="fd-image-upload"
-              class="fd-input fd-file"
-              type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif"
-              multiple
-              ?disabled=${busy}
-              @change=${(event) => this._onImagesSelected(event)}
-            />
-            <p class="fd-hint">
-              ${count >= MAX_IMAGES
-                ? "Die maximale Anzahl ist erreicht. Bitte zuerst ein Bild löschen."
-                : "Mehrere Dateien möglich. Ein elfter Upload wird ohne Teilübernahme abgelehnt."}
-            </p>
-            ${dialog.busy
-              ? html`<p class="fd-hint" role="status">
-                  <span class="fd-spinner" aria-hidden="true"></span> Bilder werden übertragen …
-                </p>`
-              : ""}
-          </div>
-
-          ${dialog.loading && count === 0
-            ? html`<p class="fd-muted" role="status">
-                <span class="fd-spinner" aria-hidden="true"></span> Bilder werden geladen …
-              </p>`
-            : ""}
-
-          ${!dialog.loading && count === 0
-            ? html`<div class="fd-state fd-state--inline">
-                <h3>Noch keine Bilder hinterlegt</h3>
-                <p class="fd-hint">Laden Sie bis zu zehn Bilder hoch. Das erste Bild ist das Hauptbild.</p>
+          ${dialog.error
+            ? html`<div class="fd-banner fd-banner--error" role="alert">
+                <p>${dialog.error}</p>
+                ${dialog.phase === "error"
+                  ? html`<div class="fd-inline-actions">
+                      <button
+                        type="button"
+                        class="fd-button fd-button--small"
+                        @click=${() => this._requestPublish(true)}
+                      >
+                        Dry-Run erneut starten
+                      </button>
+                    </div>`
+                  : ""}
               </div>`
             : ""}
 
-          <ul class="fd-image-grid" role="list" aria-label="Bilder in Reihenfolge">
-            ${dialog.images.map((image, index) => {
-              const state = this._imageState(this._imageUrl(product, image));
-              const src = state.src;
-              return html`
-                <li class="fd-image-card">
-                  <div class="fd-image-preview">
-                    ${src
-                      ? html`<img
-                          src=${src}
-                          alt=${image.is_main
-                            ? `Hauptbild von ${productLabel}`
-                            : `Bild ${index + 1} von ${productLabel}`}
-                          loading="lazy"
-                        />`
-                      : html`<div class="fd-image-loading">
-                          ${state.status === "error"
-                            ? html`<span class="fd-image-error">Bild nicht verfügbar</span>`
-                            : html`<span class="fd-spinner" aria-hidden="true"></span>
-                                <span class="fd-sr-only">Bild wird geladen …</span>`}
-                        </div>`}
-                    ${image.is_main ? html`<span class="fd-badge fd-badge--main">Hauptbild</span>` : ""}
+          ${dialog.phase === "checking"
+            ? html`
+                <p class="fd-muted" role="status">
+                  <span class="fd-spinner" aria-hidden="true"></span> Repository wird verglichen …
+                </p>
+              `
+            : ""}
+
+          ${result
+            ? html`
+                <dl class="fd-publish-meta">
+                  <div>
+                    <dt>Ziel</dt>
+                    <dd>${target}</dd>
                   </div>
-                  <p class="fd-image-name" title=${image.name}>${image.name}</p>
-                  <div class="fd-image-actions">
-                    <button
-                      type="button"
-                      class="fd-button fd-button--small"
-                      @click=${() => this._moveImage(index, -1)}
-                      ?disabled=${busy || index === 0}
-                      aria-label=${`Bild ${index + 1} nach links verschieben`}
-                    >
-                      ←
-                    </button>
-                    <button
-                      type="button"
-                      class="fd-button fd-button--small"
-                      @click=${() => this._moveImage(index, 1)}
-                      ?disabled=${busy || index === dialog.images.length - 1}
-                      aria-label=${`Bild ${index + 1} nach rechts verschieben`}
-                    >
-                      →
-                    </button>
-                    <button
-                      type="button"
-                      class="fd-button fd-button--small"
-                      @click=${() => this._setMainImage(image.name)}
-                      ?disabled=${busy || image.is_main}
-                      aria-label=${`Bild ${index + 1} als Hauptbild setzen`}
-                    >
-                      Als Hauptbild
-                    </button>
-                    <button
-                      type="button"
-                      class="fd-button fd-button--small fd-button--danger"
-                      @click=${() => this._onDeleteImageClick(image.name)}
-                      ?disabled=${busy}
-                      aria-label=${`Bild ${index + 1} löschen`}
-                    >
-                      ${dialog.pendingDelete === image.name ? "Wirklich löschen" : "Löschen"}
-                    </button>
+                  <div>
+                    <dt>Zielbranch</dt>
+                    <dd>${deploymentBranch || "—"}</dd>
                   </div>
-                  ${dialog.pendingDelete === image.name
-                    ? html`<p class="fd-hint">Erneut „Wirklich löschen“ wählen, um das Bild zu entfernen.</p>`
+                  <div>
+                    <dt>Repository</dt>
+                    <dd>${result.repository || "—"}</dd>
+                  </div>
+                </dl>
+
+                <p class="fd-publish-summary">${result.summary || "Keine Zusammenfassung verfügbar."}</p>
+
+                <section class="fd-publish-section" aria-labelledby="fd-publish-files-title">
+                  <h3 id="fd-publish-files-title">
+                    Dateien
+                    <span class="fd-muted fd-small">(${formatNumber(result.counts.total)} gesamt)</span>
+                  </h3>
+                  ${this._renderCounts(result.counts)}
+                </section>
+
+                <section class="fd-publish-section" aria-labelledby="fd-publish-products-title">
+                  <h3 id="fd-publish-products-title">
+                    Produkte
+                    <span class="fd-muted fd-small">(${formatNumber(result.products.total)} gesamt)</span>
+                  </h3>
+                  ${this._renderCounts(result.products)}
+                </section>
+
+                <section class="fd-publish-section" aria-labelledby="fd-publish-images-title">
+                  <h3 id="fd-publish-images-title">
+                    Bilder
+                    <span class="fd-muted fd-small">(${formatNumber(result.images.total)} gesamt)</span>
+                  </h3>
+                  ${this._renderCounts(result.images)}
+                </section>
+
+                <div class="fd-banner ${result.deployment.wouldTrigger || result.deployment.triggered ? "fd-banner--warning" : "fd-banner--success"}" role="note">
+                  <p>
+                    ${done
+                      ? result.deployment.triggered
+                        ? "Deployment wurde ausgelöst."
+                        : "Kein Deployment wurde ausgelöst."
+                      : result.deployment.wouldTrigger
+                        ? `Ein Deployment würde ausgelöst (${result.deployment.workflow || "Workflow"} über ${result.deployment.mode || "push"}).`
+                        : "Es würde kein Deployment ausgelöst, weil sich nichts ändert."}
+                  </p>
+                </div>
+
+                ${done && result.commit
+                  ? html`<p class="fd-muted fd-small">Commit: ${result.commit}</p>`
+                  : ""}
+
+                <section class="fd-publish-section" aria-labelledby="fd-publish-filelist-title">
+                  <h3 id="fd-publish-filelist-title">Dateiliste</h3>
+                  ${result.files.length === 0
+                    ? html`<p class="fd-hint">Keine Dateien in der Antwort.</p>`
+                    : html`
+                        <ul class="fd-publish-filelist" role="list">
+                          ${result.files.map((entry) => {
+                            const meta = PUBLISH_STATUS_META[entry.status];
+                            return html`
+                              <li class="fd-publish-file">
+                                <span class="fd-status-icon" aria-hidden="true">${meta.icon}</span>
+                                <span class="fd-publish-file-status">${meta.label}</span>
+                                <span class="fd-publish-file-path">${entry.path}</span>
+                                <span class="fd-muted fd-small">
+                                  ${entry.kind === "image" ? "Bild" : "Katalog"}${entry.articleNumber
+                                    ? ` · ${entry.articleNumber}`
+                                    : ""}
+                                </span>
+                              </li>
+                            `;
+                          })}
+                        </ul>
+                      `}
+                  ${result.filesTruncated
+                    ? html`<p class="fd-hint">
+                        Die Liste ist gekürzt: weitere Dateien werden nicht angezeigt. Die Zählungen oben
+                        sind vollständig.
+                      </p>`
                     : ""}
-                </li>
-              `;
-            })}
-          </ul>
+                </section>
+
+                ${dryRun
+                  ? html`
+                      <div class="fd-field">
+                        <label class="fd-label" for="fd-publish-message">Commit-Nachricht (optional)</label>
+                        <input
+                          id="fd-publish-message"
+                          class="fd-input"
+                          type="text"
+                          maxlength="200"
+                          .value=${dialog.message}
+                          @input=${(event) => this._setPublishMessage(event.target.value)}
+                        />
+                        <p class="fd-hint">Höchstens 200 Zeichen. Leer lassen für die Standardmeldung.</p>
+                      </div>
+                    `
+                  : ""}
+              `
+            : ""}
         </div>
 
         <div class="fd-dialog-foot">
-          <button
-            type="button"
-            class="fd-button fd-button--plain"
-            @click=${() => this._closeImages()}
-            ?disabled=${dialog.busy}
-          >
-            Schließen
-          </button>
+          ${done
+            ? html`<button type="button" class="fd-button fd-button--primary" @click=${() => this._closePublish()}>
+                Schließen
+              </button>`
+            : html`
+                <button
+                  type="button"
+                  class="fd-button fd-button--plain"
+                  @click=${() => this._closePublish()}
+                  ?disabled=${dialog.busy}
+                  data-autofocus
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="button"
+                  class="fd-button fd-button--primary"
+                  @click=${() => this._requestPublish(false)}
+                  ?disabled=${!dryRun || dialog.busy}
+                  aria-busy=${dialog.busy ? "true" : "false"}
+                >
+                  ${dialog.busy ? "Veröffentlichen …" : "Jetzt veröffentlichen"}
+                </button>
+              `}
         </div>
-      </dialog>
-    `;
-  }
-
-  /* --------------------------------------------------------------------- */
-  /* Render: Bestandsbuchung                                                */
-  /* --------------------------------------------------------------------- */
-
-  _patchStock(patch) {
-    if (!this._stockDialog) {
-      return;
-    }
-    this._stockDialog = { ...this._stockDialog, ...patch, error: "" };
-  }
-
-  _renderStockDialog() {
-    const dialog = this._stockDialog;
-    if (!dialog) {
-      return "";
-    }
-    const product = dialog.product;
-    const productLabel = product.name || product.articleNumber || "Produkt";
-    const typeEntry = STOCK_TYPES.find((entry) => entry.value === dialog.type) || STOCK_TYPES[0];
-
-    return html`
-      <dialog
-        id="fd-stock-dialog"
-        class="fd-dialog"
-        aria-labelledby="fd-stock-title"
-        @cancel=${(event) => this._handleDialogCancel(event, () => this._closeStock())}
-        @click=${(event) => {
-          if (event.target === event.currentTarget) {
-            this._closeStock();
-          }
-        }}
-      >
-        <div class="fd-dialog-head">
-          <button
-            type="button"
-            class="fd-icon-button fd-dialog-close"
-            @click=${() => this._closeStock()}
-            ?disabled=${dialog.saving}
-            aria-label="Dialog schließen"
-            title="Dialog schließen"
-          >
-            ✕
-          </button>
-          <div class="fd-dialog-title">
-            <h2 id="fd-stock-title">Bestandsbuchung</h2>
-            <p class="fd-muted fd-small">${productLabel} · Artikelnummer ${product.articleNumber}</p>
-          </div>
-        </div>
-
-        <form class="fd-dialog-form" @submit=${(event) => this._saveStock(event)} novalidate>
-          <div class="fd-dialog-body">
-          ${dialog.error ? html`<div class="fd-banner fd-banner--error" role="alert">${dialog.error}</div>` : ""}
-
-          <dl class="fd-stock-summary">
-            <div>
-              <dt>Lager</dt>
-              <dd>${formatNumber(product.stock)}</dd>
-            </div>
-            <div>
-              <dt>Verkaufsschrank</dt>
-              <dd>${formatNumber(product.salesCabinet)}</dd>
-            </div>
-          </dl>
-
-          <div class="fd-form-grid">
-            <div class="fd-field">
-              <label class="fd-label" for="fd-stock-type">Buchungsart</label>
-              <select
-                id="fd-stock-type"
-                class="fd-input"
-                .value=${dialog.type}
-                @change=${(event) => this._patchStock({ type: event.target.value })}
-              >
-                ${STOCK_TYPES.map((entry) => html`<option value=${entry.value}>${entry.label}</option>`)}
-              </select>
-              <p class="fd-hint">${typeEntry.hint}</p>
-            </div>
-
-            <div class="fd-field">
-              <label class="fd-label" for="fd-stock-quantity">
-                Menge <span class="fd-required" aria-hidden="true">*</span>
-              </label>
-              <input
-                id="fd-stock-quantity"
-                data-autofocus
-                class="fd-input"
-                type="number"
-                min="1"
-                step="1"
-                inputmode="numeric"
-                required
-                aria-required="true"
-                aria-invalid=${dialog.error ? "true" : "false"}
-                aria-describedby="fd-stock-quantity-hint"
-                .value=${dialog.quantity}
-                @input=${(event) => this._patchStock({ quantity: event.target.value })}
-              />
-              <p class="fd-hint" id="fd-stock-quantity-hint">Ganze Zahl, mindestens 1.</p>
-            </div>
-
-            <div class="fd-field fd-field--full">
-              <label class="fd-label" for="fd-stock-note">Notiz</label>
-              <input
-                id="fd-stock-note"
-                class="fd-input"
-                type="text"
-                maxlength="200"
-                placeholder="Optional, zum Beispiel Belegnummer"
-                .value=${dialog.note}
-                @input=${(event) => this._patchStock({ note: event.target.value })}
-              />
-            </div>
-          </div>
-
-          <p class="fd-hint">
-            Buchungen werden mit Zeitstempel und auslösendem Home-Assistant-Benutzer erfasst.
-            Personalisierbare Produkte werden durch Verkäufe nicht automatisch abgebucht.
-          </p>
-          </div>
-
-          <div class="fd-dialog-foot">
-            <button
-              type="button"
-              class="fd-button fd-button--plain"
-              @click=${() => this._closeStock()}
-              ?disabled=${dialog.saving}
-            >
-              Abbrechen
-            </button>
-            <button
-              type="submit"
-              class="fd-button fd-button--primary"
-              ?disabled=${dialog.saving}
-              aria-busy=${dialog.saving ? "true" : "false"}
-            >
-              ${dialog.saving ? "Buchen …" : "Buchen"}
-            </button>
-          </div>
-        </form>
       </dialog>
     `;
   }
@@ -3937,13 +4832,13 @@ export class FrickeldaveStorePanel extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      min-height: 36px;
+      min-height: 48px;
       cursor: pointer;
     }
 
     .fd-switch input {
-      width: 18px;
-      height: 18px;
+      width: 20px;
+      height: 20px;
       accent-color: var(--fd-accent);
       cursor: pointer;
     }
@@ -3955,7 +4850,7 @@ export class FrickeldaveStorePanel extends LitElement {
       align-items: center;
       justify-content: center;
       gap: var(--fd-space-2);
-      min-height: 40px;
+      min-height: 48px;
       padding: 8px 16px;
       border: 1px solid var(--fd-border-strong);
       border-radius: var(--fd-radius-pill);
@@ -4071,7 +4966,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-button--small {
-      min-height: 32px;
+      min-height: 48px;
       padding: 4px 12px;
       font-size: var(--fd-font-small);
     }
@@ -4148,7 +5043,7 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-chip {
       appearance: none;
-      min-height: 34px;
+      min-height: 48px;
       padding: 6px 12px;
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius-pill);
@@ -4868,6 +5763,397 @@ export class FrickeldaveStorePanel extends LitElement {
       font-size: var(--fd-font-small);
     }
 
+    /* Ansichtsumschalter -------------------------------------------------- */
+
+    .fd-view-toggle {
+      display: inline-flex;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid var(--fd-border-strong);
+      border-radius: var(--fd-radius-pill);
+      background: var(--fd-surface);
+    }
+
+    .fd-view-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 48px;
+      padding: 8px 16px;
+      border: none;
+      border-radius: var(--fd-radius-pill);
+      background: transparent;
+      color: var(--fd-text);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .fd-view-option svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+
+    .fd-view-option:hover {
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-view-option[aria-pressed="true"] {
+      background: var(--fd-accent-soft);
+      color: var(--fd-on-accent-soft);
+      font-weight: 500;
+      box-shadow: inset 0 0 0 2px var(--fd-accent);
+    }
+
+    /* Veröffentlichung ---------------------------------------------------- */
+
+    .fd-publish-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--fd-space-3);
+      padding: var(--fd-space-4);
+    }
+
+    .fd-publish-actions h2 {
+      margin: 0 0 4px;
+      font-size: var(--ha-font-size-l, 1.125rem);
+      font-weight: 500;
+    }
+
+    .fd-publish-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-publish-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: var(--fd-space-2);
+      margin: 0;
+    }
+
+    .fd-publish-meta div {
+      padding: var(--fd-space-2) var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-publish-meta dt {
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-publish-meta dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .fd-publish-summary {
+      margin: 0;
+    }
+
+    .fd-publish-section {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-publish-section h3 {
+      margin: 0;
+      font-size: var(--ha-font-size-m, 14px);
+      font-weight: 500;
+    }
+
+    .fd-publish-counts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: var(--fd-space-2);
+      margin: 0;
+    }
+
+    .fd-publish-count {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: var(--fd-space-2) var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-publish-count dt {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-publish-count dd {
+      margin: 0;
+      font-size: 1.15rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .fd-status-icon {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .fd-publish-filelist {
+      display: flex;
+      flex-direction: column;
+      max-height: 280px;
+      margin: 0;
+      padding: var(--fd-space-2);
+      overflow-y: auto;
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+      list-style: none;
+    }
+
+    .fd-publish-file {
+      display: grid;
+      grid-template-columns: 20px minmax(90px, auto) minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--fd-space-2);
+      min-height: 40px;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--fd-divider);
+    }
+
+    .fd-publish-file:last-child {
+      border-bottom: none;
+    }
+
+    .fd-publish-file-status {
+      font-size: var(--fd-font-small);
+      font-weight: 500;
+    }
+
+    .fd-publish-file-path {
+      overflow-wrap: anywhere;
+      font-family: var(--ha-font-family-code, monospace);
+      font-size: var(--fd-font-small);
+    }
+
+    /* Listenansicht ------------------------------------------------------- */
+
+    .fd-product-list-wrap {
+      overflow-x: auto;
+      border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--fd-divider));
+      border-radius: var(--fd-radius-lg);
+      background: var(--fd-surface);
+    }
+
+    .fd-product-table {
+      width: 100%;
+      min-width: 960px;
+      border-collapse: collapse;
+    }
+
+    .fd-product-table th,
+    .fd-product-table td {
+      padding: var(--fd-space-2) var(--fd-space-3);
+      border-bottom: 1px solid var(--fd-divider);
+      text-align: start;
+      vertical-align: top;
+    }
+
+    .fd-product-table thead th {
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .fd-product-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .fd-product-table tbody tr:hover {
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-product-row-main {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--fd-space-3);
+      min-width: 220px;
+    }
+
+    .fd-product-thumb {
+      display: flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 56px;
+      height: 56px;
+      overflow: hidden;
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+      color: var(--fd-text-muted);
+      font-size: 1.5rem;
+    }
+
+    .fd-product-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .fd-product-row-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .fd-stock-chips {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .fd-stock-chip {
+      display: flex;
+      gap: 4px;
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-row-actions {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      min-width: 150px;
+    }
+
+    /* Tabs im Produktdialog ----------------------------------------------- */
+
+    .fd-editor-tabs {
+      display: flex;
+      flex: none;
+      gap: 4px;
+      padding: 0 var(--fd-space-6);
+      border-bottom: 1px solid var(--fd-divider);
+      overflow-x: auto;
+    }
+
+    .fd-editor-tabs .fd-tab {
+      min-height: 48px;
+      padding: 8px 16px;
+      border: none;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      color: var(--fd-text-muted);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .fd-editor-tabs .fd-tab:hover {
+      color: var(--fd-text);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-editor-tabs .fd-tab[aria-selected="true"] {
+      border-bottom-color: var(--fd-accent);
+      color: var(--fd-text);
+      font-weight: 500;
+    }
+
+    .fd-dialog-body [hidden] {
+      display: none !important;
+    }
+
+    /* Bestand im Produktdialog -------------------------------------------- */
+
+    .fd-stock-editors {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: var(--fd-space-3);
+    }
+
+    .fd-stock-editor {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      padding: var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+    }
+
+    .fd-stock-editor .fd-button {
+      min-height: 48px;
+    }
+
+    .fd-stock-input {
+      max-width: 140px;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+    }
+
+    .fd-bookings {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      margin-top: var(--fd-space-4);
+      padding-top: var(--fd-space-3);
+      border-top: 1px solid var(--fd-divider);
+    }
+
+    .fd-bookings h3 {
+      margin: 0;
+      font-size: var(--ha-font-size-m, 14px);
+      font-weight: 500;
+    }
+
+    .fd-booking-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      max-height: 240px;
+      margin: 0;
+      padding: 0;
+      overflow-y: auto;
+      list-style: none;
+    }
+
+    .fd-booking {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: var(--fd-space-2) var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-booking-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-chip--rejected {
+      border-style: dashed;
+      border-color: var(--fd-warning-border);
+      color: var(--fd-text);
+      text-decoration: line-through;
+    }
+
     /* Responsive ---------------------------------------------------------- */
 
     @media (max-width: 900px) {
@@ -4911,6 +6197,76 @@ export class FrickeldaveStorePanel extends LitElement {
 
       .fd-image-grid {
         grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      }
+
+      .fd-view-toggle {
+        width: 100%;
+      }
+
+      .fd-view-option {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .fd-publish-file {
+        grid-template-columns: 20px minmax(0, 1fr);
+      }
+
+      .fd-publish-file-status,
+      .fd-publish-file-path {
+        grid-column: 2;
+      }
+
+      .fd-product-list-wrap {
+        overflow-x: visible;
+        border: none;
+        background: transparent;
+      }
+
+      .fd-product-table {
+        min-width: 0;
+      }
+
+      .fd-product-table thead {
+        display: none;
+      }
+
+      .fd-product-table,
+      .fd-product-table tbody,
+      .fd-product-table tr,
+      .fd-product-table td {
+        display: block;
+        width: 100%;
+      }
+
+      .fd-product-table tr {
+        margin-bottom: var(--fd-space-3);
+        padding: var(--fd-space-2);
+        border: 1px solid var(--fd-divider);
+        border-radius: var(--fd-radius-lg);
+        background: var(--fd-surface);
+      }
+
+      .fd-product-table td {
+        display: grid;
+        grid-template-columns: 130px minmax(0, 1fr);
+        gap: var(--fd-space-2);
+        padding: 6px 0;
+        border-bottom: 1px solid var(--fd-divider);
+      }
+
+      .fd-product-table td:last-child {
+        border-bottom: none;
+      }
+
+      .fd-product-table td::before {
+        content: attr(data-label);
+        color: var(--fd-text-muted);
+        font-size: var(--fd-font-small);
+      }
+
+      .fd-editor-tabs {
+        padding: 0 var(--fd-space-3);
       }
     }
 

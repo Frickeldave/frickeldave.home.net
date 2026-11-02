@@ -6,7 +6,35 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-02
+
 ### Added
+
+- **Listenansicht mit Umschalter (#289):** Produkte lassen sich neben den Kacheln als
+  Tabelle mit Bild, Name, Artikelnummer, Kategorie, Preis, Tags, Sichtbarkeit und
+  Beständen anzeigen. Der Umschalter („Kacheln“/„Liste“) sitzt in der Filterleiste,
+  ist tastaturbedienbar, nutzt `aria-pressed` und merkt sich die Wahl in
+  `localStorage`.
+- **Veröffentlichen mit Dry-Run-Dialog (#289):** zwei Aktionen „Nach dev
+  veröffentlichen“ und „Nach prod veröffentlichen“ (nur `app_admin`) öffnen zuerst den
+  Dry-Run mit Zielbranch, Repository, Zusammenfassung, Zählungen für Dateien, Produkte
+  und Bilder sowie der Dateiliste (max. 500, Kürzungshinweis). Erst „Jetzt
+  veröffentlichen“ schreibt; danach nennen Toast und Dialog Ziel, Commit und
+  Deployment-Status. Fehlt das Token, erscheint die deutsche Servermeldung mit Hinweis
+  auf Einstellungen → Frickeldave Store → Veröffentlichen.
+- **Produktdialog mit Tabs (#289):** „Grunddaten“, „Bilder“ und „Bestand“ ersetzen die
+  separaten Bild- und Bestandsdialoge. Bilder (max. 10, Reihenfolge, Hauptbild,
+  Löschen) werden im Tab verwaltet; beim Anlegen wechselt der Dialog nach dem ersten
+  Speichern automatisch in den Bilder-Tab. Der Bestand-Tab zeigt je Lagerstätte eine
+  Nummernbox mit Erhöhen/Verringern-Buttons und die Buchungshistorie.
+- **Lagerstätten und Veröffentlichung in den Einstellungen (#289):** eigene Tabs im
+  Konfigurationspanel pflegen Namen, Reihenfolge und Löschung der Lagerstätten
+  (Löschschutz mit deutscher Meldung) sowie Repository, dev-/prod-Branch,
+  prod-Workflow und ein write-only GitHub-Token mit Statusanzeige.
+- **KI-Bedienung (#289):** optionales Feld „Eigene Hinweise“ (≤2000 Zeichen) für den
+  Beschreibungsvorschlag, vorgeschlagene Tags als übernehmbare Chips und ein klarer
+  Hinweis für verworfene Tags („Diese Tags gibt es noch nicht …“). Übernommen werden
+  ausschließlich vorhandene Tags.
 
 - **Veröffentlichen nach dev und prod (#289):** `POST /api/frickeldave_store/publish`
   committet den Export über die GitHub-Daten-API auf den Integrationsbranch `dev`
@@ -29,6 +57,11 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Changed
 
+- **Bestandsanzeigen folgen der Konfiguration (#289):** Kacheln, Listenansicht,
+  Filter und Produktdialog lesen Lagerstätten und Namen aus `GET /locations`; die
+  festen Filter „Auf Lager“/„Im Schrank“ und die Felder `stock`/`salesCabinet` im
+  Panel entfallen. Die Bestandspflege erfolgt im Produktformular und wird beim
+  Speichern persistiert.
 - **Store-Schema 2:** Migration von `stock`/`salesCabinet` auf Bestände je Lagerstätte,
   verlustfrei auf die beiden Standard-Lagerstätten; `STORAGE_VERSION` 2.
 

@@ -22,8 +22,12 @@ const TOAST_TIMEOUT_MS = 6000;
 
 const TABS = Object.freeze([
   { id: "users", label: "Benutzerverwaltung", panelId: "fd-config-panel-users" },
+  { id: "locations", label: "Lagerstätten", panelId: "fd-config-panel-locations" },
+  { id: "publish", label: "Veröffentlichen", panelId: "fd-config-panel-publish" },
   { id: "ai", label: "KI-Einstellungen", panelId: "fd-config-panel-ai" },
 ]);
+
+const DEFAULT_LOCATION_NAMES = Object.freeze(["Lager", "Verkaufsschrank"]);
 
 class ApiError extends Error {
   constructor(message, status = 0, code = "") {
@@ -37,6 +41,13 @@ class ApiError extends Error {
 const isAbortError = (error) => error?.name === "AbortError";
 
 const asText = (value) => (typeof value === "string" ? value : "");
+
+const numberFormatter = new Intl.NumberFormat("de-DE");
+
+const formatNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? numberFormatter.format(number) : "0";
+};
 
 const normalizeUser = (raw) => {
   const userId = raw?.user_id ?? raw?.userId ?? "";
@@ -70,6 +81,50 @@ const normalizeUsersPayload = (data) => {
   };
 };
 
+const asCount = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
+};
+
+const normalizeLocations = (data) => {
+  const raw = Array.isArray(data) ? data : [];
+  const locations = raw
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => ({
+      id: String(entry.id ?? ""),
+      name: asText(entry.name),
+      position: Number.isFinite(Number(entry.position)) ? Number(entry.position) : index,
+      stockTotal: asCount(entry.stock_total),
+      productsWithStock: asCount(entry.products_with_stock),
+    }))
+    .filter((entry) => entry.name)
+    .sort((a, b) => a.position - b.position);
+  if (locations.length > 0) {
+    return locations;
+  }
+  return DEFAULT_LOCATION_NAMES.map((name, index) => ({
+    id: "",
+    name,
+    position: index,
+    stockTotal: 0,
+    productsWithStock: 0,
+  }));
+};
+
+const normalizePublish = (data) => {
+  const payload = data && typeof data === "object" ? data : {};
+  return {
+    form: {
+      repository: asText(payload.repository),
+      dev_branch: asText(payload.dev_branch),
+      prod_branch: asText(payload.prod_branch),
+      prod_workflow: asText(payload.prod_workflow),
+      token: "",
+    },
+    tokenSet: Boolean(payload.token_set),
+  };
+};
+
 const normalizeSettingsPayload = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : payload;
@@ -81,6 +136,8 @@ const normalizeSettingsPayload = (data) => {
       api_key: "",
     },
     apiKeySet: Boolean(ai?.api_key_set),
+    locations: normalizeLocations(payload.locations),
+    publish: normalizePublish(payload.publish),
   };
 };
 
@@ -105,6 +162,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     _deleteDialog: { state: true },
 
     _ai: { state: true },
+    _locations: { state: true },
+    _publish: { state: true },
     _toast: { state: true },
 
     _forwardAvailable: { state: true },
@@ -142,6 +201,23 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       notice: "",
       form: { endpoint: "", model: "", prompt: "", api_key: "" },
       apiKeySet: false,
+    };
+
+    this._locations = {
+      loading: false,
+      saving: false,
+      error: "",
+      notice: "",
+      items: normalizeLocations(null).map((entry) => ({ ...entry, originalName: entry.name })),
+      loaded: false,
+    };
+
+    this._publish = {
+      saving: false,
+      error: "",
+      notice: "",
+      form: { repository: "", dev_branch: "", prod_branch: "", prod_workflow: "", token: "" },
+      tokenSet: false,
     };
 
     this._toast = null;
@@ -392,6 +468,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       if (this._can("app_admin")) {
         this._accessState = "ready";
         this._loadUsers();
+        this._loadSettings();
       } else {
         this._accessState = "denied";
       }
@@ -423,7 +500,13 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       return;
     }
     this._tab = tab;
-    if (tab === "ai" && this._accessState === "ready" && !this._ai.loaded && !this._ai.loading) {
+    if (
+      tab !== "users" &&
+      this._accessState === "ready" &&
+      !this._ai.loaded &&
+      !this._ai.loading &&
+      !this._locations.loading
+    ) {
       this._loadSettings();
     }
   }
@@ -861,30 +944,49 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
-  /* KI-Einstellungen                                                       */
+  /* Einstellungen (KI, Lagerstätten, Veröffentlichung)                     */
   /* --------------------------------------------------------------------- */
+
+  _applySettingsPayload(data) {
+    const normalized = normalizeSettingsPayload(data);
+    this._ai = {
+      ...this._ai,
+      loading: false,
+      loaded: true,
+      form: normalized.form,
+      apiKeySet: normalized.apiKeySet,
+    };
+    this._locations = {
+      ...this._locations,
+      loading: false,
+      loaded: true,
+      items: normalized.locations.map((entry) => ({ ...entry, originalName: entry.name })),
+    };
+    this._publish = {
+      ...this._publish,
+      form: normalized.publish.form,
+      tokenSet: normalized.publish.tokenSet,
+    };
+  }
 
   async _loadSettings() {
     if (!this._can("app_admin") || this._ai.loading) {
       return;
     }
     this._ai = { ...this._ai, loading: true, error: "", notice: "" };
+    this._locations = { ...this._locations, loading: true, error: "", notice: "" };
     try {
       const data = await this._api(`${API_ROOT}/settings`);
-      const normalized = normalizeSettingsPayload(data);
-      this._ai = {
-        ...this._ai,
-        loading: false,
-        loaded: true,
-        form: normalized.form,
-        apiKeySet: normalized.apiKeySet,
-      };
+      this._applySettingsPayload(data);
     } catch (error) {
       if (isAbortError(error)) {
         this._ai = { ...this._ai, loading: false };
+        this._locations = { ...this._locations, loading: false };
         return;
       }
-      this._ai = { ...this._ai, loading: false, error: this._errorText(error) };
+      const message = this._errorText(error);
+      this._ai = { ...this._ai, loading: false, error: message };
+      this._locations = { ...this._locations, loading: false, error: message };
     }
   }
 
@@ -921,24 +1023,15 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     this._ai = { ...this._ai, saving: true, error: "", notice: "" };
     try {
       const data = await this._api(`${API_ROOT}/settings`, { method: "PATCH", body: { ai } });
-      const normalized = normalizeSettingsPayload(data);
       const hasPayload = Boolean(data && typeof data === "object" && (data.ai || "endpoint" in data));
       if (hasPayload) {
-        this._ai = {
-          ...this._ai,
-          saving: false,
-          loaded: true,
-          error: "",
-          notice: "Einstellungen gespeichert.",
-          form: normalized.form,
-          apiKeySet: normalized.apiKeySet || Boolean(key),
-        };
+        this._applySettingsPayload(data);
+        this._ai = { ...this._ai, saving: false, notice: "Einstellungen gespeichert." };
       } else {
         this._ai = {
           ...this._ai,
           saving: false,
           loaded: true,
-          error: "",
           notice: "Einstellungen gespeichert.",
           form: { ...this._ai.form, api_key: "" },
           apiKeySet: this._ai.apiKeySet || Boolean(key),
@@ -950,6 +1043,181 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         return;
       }
       this._ai = { ...this._ai, saving: false, error: this._errorText(error) };
+    }
+  }
+
+  _setLocationName(index, value) {
+    const items = this._locations.items.map((item, position) =>
+      position === index ? { ...item, name: value } : item,
+    );
+    this._locations = { ...this._locations, items, error: "", notice: "" };
+  }
+
+  _addLocation() {
+    const items = [
+      ...this._locations.items,
+      { id: "", name: "", position: this._locations.items.length, stockTotal: 0, productsWithStock: 0, originalName: "" },
+    ];
+    this._locations = { ...this._locations, items, error: "", notice: "" };
+    this.updateComplete
+      .then(() => {
+        this.renderRoot?.querySelector(`#fd-location-name-${items.length - 1}`)?.focus?.();
+      })
+      .catch(() => {});
+  }
+
+  _removeLocation(index) {
+    const removed = this._locations.items[index];
+    const items = this._locations.items.filter((_, position) => position !== index);
+    const notice = removed?.id
+      ? `„${removed.name}“ wird beim Speichern gelöscht, sofern dort kein Bestand gebucht ist.`
+      : "";
+    this._locations = { ...this._locations, items, error: "", notice };
+  }
+
+  _validateLocations(items) {
+    if (items.length === 0) {
+      return "Mindestens eine Lagerstätte ist erforderlich.";
+    }
+    const seen = new Set();
+    for (const item of items) {
+      const name = item.name.trim();
+      if (!name) {
+        return "Bitte für jede Lagerstätte einen Namen angeben.";
+      }
+      if (name.length > 60) {
+        return "Ein Lagerstätten-Name darf höchstens 60 Zeichen enthalten.";
+      }
+      const key = name.toLocaleLowerCase("de");
+      if (seen.has(key)) {
+        return `Der Name „${name}“ wird mehrfach verwendet.`;
+      }
+      seen.add(key);
+    }
+    return "";
+  }
+
+  async _saveLocations(event) {
+    event?.preventDefault();
+    if (!this._can("app_admin") || this._locations.saving || this._locations.loading) {
+      return;
+    }
+    if (!this._locations.loaded) {
+      this._locations = {
+        ...this._locations,
+        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
+        notice: "",
+      };
+      return;
+    }
+    const items = this._locations.items;
+    const validationError = this._validateLocations(items);
+    if (validationError) {
+      this._locations = { ...this._locations, error: validationError, notice: "" };
+      return;
+    }
+
+    const payload = {
+      locations: items.map((item) => {
+        const name = item.name.trim();
+        return item.id ? { id: item.id, name } : { name };
+      }),
+    };
+
+    this._locations = { ...this._locations, saving: true, error: "", notice: "" };
+    try {
+      const data = await this._api(`${API_ROOT}/settings`, { method: "PATCH", body: payload });
+      if (Array.isArray(data?.locations)) {
+        this._locations = {
+          ...this._locations,
+          saving: false,
+          loaded: true,
+          items: normalizeLocations(data.locations).map((entry) => ({ ...entry, originalName: entry.name })),
+          notice: "Lagerstätten gespeichert.",
+        };
+      } else {
+        await this._loadSettings();
+        this._locations = { ...this._locations, saving: false, notice: "Lagerstätten gespeichert." };
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        this._locations = { ...this._locations, saving: false };
+        return;
+      }
+      this._locations = { ...this._locations, saving: false, error: this._errorText(error) };
+    }
+  }
+
+  _setPublishField(field, value) {
+    this._publish = {
+      ...this._publish,
+      error: "",
+      notice: "",
+      form: { ...this._publish.form, [field]: value },
+    };
+  }
+
+  async _savePublish(event) {
+    event?.preventDefault();
+    if (!this._can("app_admin") || this._publish.saving) {
+      return;
+    }
+    if (!this._locations.loaded) {
+      this._publish = {
+        ...this._publish,
+        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
+        notice: "",
+      };
+      return;
+    }
+    const form = this._publish.form;
+    const publish = {
+      repository: form.repository.trim(),
+      dev_branch: form.dev_branch.trim(),
+      prod_branch: form.prod_branch.trim(),
+      prod_workflow: form.prod_workflow.trim(),
+    };
+    if (!publish.repository || !publish.dev_branch || !publish.prod_branch || !publish.prod_workflow) {
+      this._publish = {
+        ...this._publish,
+        error: "Bitte Repository, dev-Branch, prod-Branch und prod-Workflow angeben.",
+        notice: "",
+      };
+      return;
+    }
+    const token = form.token.trim();
+    if (token) {
+      publish.token = token;
+    }
+
+    this._publish = { ...this._publish, saving: true, error: "", notice: "" };
+    try {
+      const data = await this._api(`${API_ROOT}/settings`, { method: "PATCH", body: { publish } });
+      const hasPayload = Boolean(data && typeof data === "object" && data.publish);
+      if (hasPayload) {
+        const normalized = normalizePublish(data.publish);
+        this._publish = {
+          ...this._publish,
+          saving: false,
+          form: normalized.form,
+          tokenSet: normalized.tokenSet || Boolean(token),
+          notice: "Veröffentlichungs-Einstellungen gespeichert.",
+        };
+      } else {
+        this._publish = {
+          ...this._publish,
+          saving: false,
+          form: { ...this._publish.form, token: "" },
+          tokenSet: this._publish.tokenSet || Boolean(token),
+          notice: "Veröffentlichungs-Einstellungen gespeichert.",
+        };
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        this._publish = { ...this._publish, saving: false };
+        return;
+      }
+      this._publish = { ...this._publish, saving: false, error: this._errorText(error) };
     }
   }
 
@@ -1070,7 +1338,13 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             })}
           </div>
 
-          ${this._tab === "users" ? this._renderUsersTab() : this._renderAiTab()}
+          ${this._tab === "users"
+            ? this._renderUsersTab()
+            : this._tab === "locations"
+              ? this._renderLocationsTab()
+              : this._tab === "publish"
+                ? this._renderPublishTab()
+                : this._renderAiTab()}
         </div>
       </div>
     `;
@@ -1487,6 +1761,241 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   /* Render: KI-Einstellungen                                               */
   /* --------------------------------------------------------------------- */
 
+  _renderLocationsTab() {
+    const state = this._locations;
+    const busy = state.loading || state.saving || !state.loaded;
+
+    return html`
+      <section
+        id="fd-config-panel-locations"
+        role="tabpanel"
+        aria-labelledby="fd-config-tab-locations"
+        class="fd-card fd-config-section"
+      >
+        <div class="fd-config-toolbar">
+          <div>
+            <h2>Lagerstätten</h2>
+            <p class="fd-muted fd-small">
+              Namen und Reihenfolge der Bestände. Produktkacheln, Listenansicht, Filter und der
+              Bestand-Tab im Produktdialog richten sich danach.
+            </p>
+          </div>
+          <button type="button" class="fd-button" @click=${() => this._loadSettings()} ?disabled=${busy}>
+            Neu laden
+          </button>
+        </div>
+
+        <div class="fd-live" role="status" aria-live="polite">
+          ${state.loading ? "Einstellungen werden geladen …" : ""}
+        </div>
+        ${state.error ? html`<div class="fd-banner fd-banner--error" role="alert">${state.error}</div>` : ""}
+        ${state.notice ? html`<div class="fd-banner fd-banner--success" role="status">${state.notice}</div>` : ""}
+
+        <form class="fd-locations-form" @submit=${(event) => this._saveLocations(event)} novalidate>
+          <p class="fd-hint">
+            Mindestens eine Lagerstätte, Namen eindeutig und nicht leer. Löschen wird beim Speichern
+            geprüft; eine Lagerstätte mit Bestand wird mit deutscher Meldung abgelehnt, buche den
+            Bestand zuerst um.
+          </p>
+
+          <ul class="fd-location-list" role="list" aria-label="Konfigurierte Lagerstätten">
+            ${state.items.map((item, index) => html`
+              <li class="fd-location-row">
+                <div class="fd-field">
+                  <label class="fd-label" for=${`fd-location-name-${index}`}>
+                    Name der Lagerstätte ${index + 1}
+                  </label>
+                  <input
+                    id=${`fd-location-name-${index}`}
+                    class="fd-input"
+                    type="text"
+                    maxlength="60"
+                    required
+                    aria-required="true"
+                    .value=${item.name}
+                    ?disabled=${busy}
+                    @input=${(event) => this._setLocationName(index, event.target.value)}
+                  />
+                  <p class="fd-hint">
+                    ${!state.loaded
+                      ? "Standardwert – wird nach dem Laden mit der gespeicherten Konfiguration abgeglichen."
+                      : item.id
+                        ? `${formatNumber(item.stockTotal)} Stück in ${formatNumber(item.productsWithStock)} Produkten`
+                        : "Neue Lagerstätte – wird beim Speichern angelegt."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="fd-button fd-button--small fd-button--danger"
+                  @click=${() => this._removeLocation(index)}
+                  ?disabled=${busy || state.items.length <= 1}
+                  aria-label=${`Lagerstätte ${item.name || index + 1} löschen`}
+                  title=${state.items.length <= 1 ? "Mindestens eine Lagerstätte ist erforderlich." : "Löschen"}
+                >
+                  Löschen
+                </button>
+              </li>
+            `)}
+          </ul>
+
+          <div class="fd-inline-actions">
+            <button type="button" class="fd-button" @click=${() => this._addLocation()} ?disabled=${busy}>
+              Lagerstätte hinzufügen
+            </button>
+            <button
+              type="submit"
+              class="fd-button fd-button--primary"
+              ?disabled=${busy}
+              aria-busy=${state.saving ? "true" : "false"}
+            >
+              ${state.saving ? "Speichern …" : "Lagerstätten speichern"}
+            </button>
+            ${state.loaded
+              ? html`<span class="fd-status ${state.error ? "fd-status--warn" : "fd-status--ok"}">
+                  ${state.error ? "Nicht gespeichert" : "Konfiguration geladen"}
+                </span>`
+              : ""}
+          </div>
+        </form>
+      </section>
+    `;
+  }
+
+  _renderPublishTab() {
+    const publish = this._publish;
+    const state = this._locations;
+    const busy = state.loading || state.saving || !state.loaded;
+    const form = publish.form;
+
+    return html`
+      <section
+        id="fd-config-panel-publish"
+        role="tabpanel"
+        aria-labelledby="fd-config-tab-publish"
+        class="fd-card fd-config-section"
+      >
+        <div class="fd-config-toolbar">
+          <div>
+            <h2>Veröffentlichen</h2>
+            <p class="fd-muted fd-small">
+              Ziel-Repository und Branches für „Nach dev veröffentlichen“ und „Nach prod veröffentlichen“
+              im Store-Panel. Das Token wird nie angezeigt.
+            </p>
+          </div>
+          <button type="button" class="fd-button" @click=${() => this._loadSettings()} ?disabled=${busy}>
+            Neu laden
+          </button>
+        </div>
+
+        <div class="fd-live" role="status" aria-live="polite">
+          ${state.loading ? "Einstellungen werden geladen …" : ""}
+        </div>
+        ${publish.error ? html`<div class="fd-banner fd-banner--error" role="alert">${publish.error}</div>` : ""}
+        ${publish.notice ? html`<div class="fd-banner fd-banner--success" role="status">${publish.notice}</div>` : ""}
+
+        <form class="fd-form-grid" @submit=${(event) => this._savePublish(event)} novalidate>
+          <div class="fd-field fd-field--full">
+            <label class="fd-label" for="fd-publish-repository">Repository</label>
+            <input
+              id="fd-publish-repository"
+              class="fd-input"
+              type="text"
+              placeholder="Frickeldave/frickeldave.github.io"
+              required
+              aria-required="true"
+              .value=${form.repository}
+              ?disabled=${busy || publish.saving}
+              @input=${(event) => this._setPublishField("repository", event.target.value)}
+            />
+            <p class="fd-hint">GitHub-Repository im Format owner/name.</p>
+          </div>
+
+          <div class="fd-field">
+            <label class="fd-label" for="fd-publish-dev-branch">dev-Branch</label>
+            <input
+              id="fd-publish-dev-branch"
+              class="fd-input"
+              type="text"
+              required
+              aria-required="true"
+              .value=${form.dev_branch}
+              ?disabled=${busy || publish.saving}
+              @input=${(event) => this._setPublishField("dev_branch", event.target.value)}
+            />
+          </div>
+
+          <div class="fd-field">
+            <label class="fd-label" for="fd-publish-prod-branch">prod-Branch</label>
+            <input
+              id="fd-publish-prod-branch"
+              class="fd-input"
+              type="text"
+              required
+              aria-required="true"
+              .value=${form.prod_branch}
+              ?disabled=${busy || publish.saving}
+              @input=${(event) => this._setPublishField("prod_branch", event.target.value)}
+            />
+          </div>
+
+          <div class="fd-field">
+            <label class="fd-label" for="fd-publish-workflow">prod-Workflow</label>
+            <input
+              id="fd-publish-workflow"
+              class="fd-input"
+              type="text"
+              required
+              aria-required="true"
+              placeholder="fd-deploy-prd.yml"
+              .value=${form.prod_workflow}
+              ?disabled=${busy || publish.saving}
+              @input=${(event) => this._setPublishField("prod_workflow", event.target.value)}
+            />
+          </div>
+
+          <div class="fd-field">
+            <label class="fd-label" for="fd-publish-token">GitHub-Token</label>
+            <input
+              id="fd-publish-token"
+              class="fd-input"
+              type="password"
+              autocomplete="new-password"
+              placeholder=${publish.tokenSet ? "Token hinterlegt" : "Noch kein Token hinterlegt"}
+              .value=${form.token}
+              ?disabled=${busy || publish.saving}
+              @input=${(event) => this._setPublishField("token", event.target.value)}
+            />
+            <p class="fd-hint">
+              Leer lassen, um das gespeicherte Token beizubehalten. Nur schreibbar, nie lesbar.
+            </p>
+          </div>
+
+          <div class="fd-field fd-field--full">
+            <div class="fd-inline-actions">
+              <button
+                type="submit"
+                class="fd-button fd-button--primary"
+                ?disabled=${busy || publish.saving}
+                aria-busy=${publish.saving ? "true" : "false"}
+              >
+                ${publish.saving ? "Speichern …" : "Speichern"}
+              </button>
+              <span
+                class="fd-status ${!state.loaded || !publish.tokenSet ? "fd-status--warn" : "fd-status--ok"}"
+              >
+                ${!state.loaded
+                  ? "Token-Status wird geladen …"
+                  : publish.tokenSet
+                    ? "Token hinterlegt"
+                    : "Kein Token hinterlegt"}
+              </span>
+            </div>
+          </div>
+        </form>
+      </section>
+    `;
+  }
+
   _renderAiTab() {
     const ai = this._ai;
     const keySet = ai.apiKeySet;
@@ -1780,7 +2289,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     .fd-tab {
       flex: 0 1 auto;
-      min-height: 44px;
+      min-height: 48px;
       padding: 8px 16px;
       border: none;
       border-bottom: 3px solid transparent;
@@ -2091,7 +2600,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       align-items: center;
       justify-content: center;
       gap: var(--fd-space-2);
-      min-height: 40px;
+      min-height: 48px;
       padding: 8px 16px;
       border: 1px solid var(--fd-border-strong);
       border-radius: var(--fd-radius-pill);
@@ -2207,7 +2716,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
 
     .fd-button--small {
-      min-height: 32px;
+      min-height: 48px;
       padding: 4px 12px;
       font-size: var(--fd-font-small);
     }
@@ -2338,6 +2847,44 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     .fd-status--warn {
       border-color: var(--fd-warning);
+    }
+
+    /* Lagerstätten und Veröffentlichung ----------------------------------- */
+
+    .fd-locations-form {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-3);
+    }
+
+    .fd-location-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .fd-location-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--fd-space-3);
+      padding: var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-location-row .fd-button {
+      min-height: 48px;
+    }
+
+    @media (max-width: 640px) {
+      .fd-location-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
     }
 
     /* Dialoge ------------------------------------------------------------- */
