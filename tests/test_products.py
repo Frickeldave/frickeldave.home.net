@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from string import ascii_uppercase
 
 import pytest
 
+import custom_components.frickeldave_store.products as products_module
 from custom_components.frickeldave_store.models import (
     MAX_IMAGES,
     ImageLimitError,
@@ -195,6 +197,193 @@ async def test_sorting_is_stable_and_bidirectional(tmp_path: Path) -> None:
         ProductFilter(sort="price", order="asc", categories=["LA"], limit=2)
     )
     assert [item.price for item in filtered] == [5.0, 10.0]
+
+
+def _sortable_product(
+    article_number: str,
+    *,
+    name: str,
+    category: str = "LA",
+    price: float = 0.0,
+    stock: dict[str, int] | None = None,
+    visible: bool = True,
+    archived: bool = False,
+) -> Product:
+    return Product(
+        article_number=article_number,
+        name=name,
+        category=category,
+        price=price,
+        stock=dict(stock or {}),
+        visible=visible,
+        archived=archived,
+    )
+
+
+@pytest.mark.parametrize("sort", ["name", "price", "category", "stock", "status"])
+def test_filter_accepts_all_sort_keys(sort: str) -> None:
+    assert ProductFilter.from_query({"sort": sort}).sort == sort
+
+
+def test_unknown_sort_value_names_all_allowed_keys() -> None:
+    with pytest.raises(ValidationError) as err:
+        ProductFilter.from_query({"sort": "groesse"})
+    assert err.value.code == "validation_error"
+    message = err.value.message
+    assert message.startswith("sort muss ")
+    for key in ("name", "price", "category", "stock", "status"):
+        assert f"'{key}'" in message
+
+
+def test_sort_by_category_uses_label_order_and_name_tiebreak() -> None:
+    products = [
+        _sortable_product("WO0002", name="Brett", category="WO"),
+        _sortable_product("LA0002", name="Lampe", category="LA"),
+        _sortable_product("EP0002", name="Vase", category="EP"),
+        _sortable_product("WO0001", name="Brett", category="WO"),
+        _sortable_product("3D0001", name="Anhänger", category="3D"),
+        _sortable_product("SB0001", name="Schale", category="SB"),
+    ]
+
+    # Sichtbare Labels: 3D-Druck < Epoxidharz < Holz < Laser < Steinmasse.
+    ascending = sort_products(products, "category", "asc")
+    assert [item.category for item in ascending] == ["3D", "EP", "WO", "WO", "LA", "SB"]
+    assert [item.article_number for item in ascending[2:4]] == ["WO0001", "WO0002"]
+
+    # Innerhalb der Kategorie nach Name, dann Artikelnummer.
+    same_category = [
+        _sortable_product("WO0002", name="Brett", category="WO"),
+        _sortable_product("WO0001", name="Brett", category="WO"),
+        _sortable_product("WO0003", name="Anhänger", category="WO"),
+    ]
+    ordered = sort_products(same_category, "category", "asc")
+    assert [item.article_number for item in ordered] == ["WO0003", "WO0001", "WO0002"]
+
+    descending = sort_products(products, "category", "desc")
+    assert [item.category for item in descending] == ["SB", "LA", "WO", "WO", "EP", "3D"]
+    # desc dreht nur die Kategorie; der Tiebreaker bleibt aufsteigend.
+    assert [item.article_number for item in descending[2:4]] == ["WO0001", "WO0002"]
+
+
+def test_sort_by_stock_uses_total_across_all_locations() -> None:
+    products = [
+        # Gesamt 2, aber auf beide Lagerstätten verteilt.
+        _sortable_product("LA0001", name="Gleich", stock={"lager": 1, "verkaufsschrank": 1}),
+        # Gesamt 2, nur im Lager: nach „Lager“ allein wäre diese Nummer größer.
+        _sortable_product("LA0002", name="Gleich", stock={"lager": 2}),
+        # Gesamt 3, aber kein Lagerbestand.
+        _sortable_product("LA0003", name="Mehr", stock={"verkaufsschrank": 3}),
+        _sortable_product("LA0004", name="Zebra", stock={"lager": 4}),
+        _sortable_product("LA0005", name="Alpha", stock={"lager": 4}),
+    ]
+
+    ascending = sort_products(products, "stock", "asc")
+    assert [item.total_stock() for item in ascending] == [2, 2, 3, 4, 4]
+    # Gleiche Summe: erst Name, dann Artikelnummer.
+    assert [item.article_number for item in ascending[:2]] == ["LA0001", "LA0002"]
+    assert [item.article_number for item in ascending[3:]] == ["LA0005", "LA0004"]
+
+    descending = sort_products(products, "stock", "desc")
+    assert [item.total_stock() for item in descending] == [4, 4, 3, 2, 2]
+    # Auch bei desc bleibt der Tiebreaker aufsteigend.
+    assert [item.article_number for item in descending[:2]] == ["LA0005", "LA0004"]
+    assert [item.article_number for item in descending[3:]] == ["LA0001", "LA0002"]
+
+
+def test_sort_by_status_active_visible_first() -> None:
+    products = [
+        _sortable_product("LA0001", name="Archiv sichtbar", archived=True),
+        _sortable_product("LA0002", name="Unsichtbar", visible=False),
+        _sortable_product("LA0003", name="Archiv unsichtbar", visible=False, archived=True),
+        _sortable_product("LA0004", name="Aktiv", visible=True),
+        _sortable_product("LA0005", name="Aktiv", visible=True),
+    ]
+
+    ascending = sort_products(products, "status", "asc")
+    assert [item.article_number for item in ascending] == [
+        "LA0004",
+        "LA0005",
+        "LA0002",
+        "LA0001",
+        "LA0003",
+    ]
+
+    descending = sort_products(products, "status", "desc")
+    assert [item.article_number for item in descending] == [
+        "LA0003",
+        "LA0001",
+        "LA0002",
+        "LA0004",
+        "LA0005",
+    ]
+
+
+async def test_service_lists_with_new_sort_keys(tmp_path: Path) -> None:
+    _, service = await _service(tmp_path)
+    holz = await _create(service, name="Brett", category="WO", stock={"lager": 1})
+    laser = await _create(
+        service, name="Lampe", category="LA", stock={"lager": 5, "verkaufsschrank": 2}
+    )
+
+    by_category, _ = await service.async_list(ProductFilter(sort="category", order="desc"))
+    assert [item.article_number for item in by_category] == [
+        laser.article_number,
+        holz.article_number,
+    ]
+
+    by_stock, _ = await service.async_list(ProductFilter(sort="stock", order="asc"))
+    assert [item.article_number for item in by_stock] == [holz.article_number, laser.article_number]
+
+
+async def test_preview_article_number_format_and_uniqueness(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    await _create(service, name="Aktiv", category="WO")
+    archived = await _create(service, name="Archiv", category="WO")
+    await service.async_archive(archived.article_number)
+    existing = store.article_numbers()
+    assert archived.article_number in existing
+
+    for _ in range(30):
+        preview = await service.async_preview_article_number("wo")
+        assert preview["category"] == "WO"
+        assert preview["reserved"] is False
+        assert len(preview["articleNumber"]) == 6
+        assert preview["articleNumber"].startswith("WO")
+        assert preview["articleNumber"] not in existing
+
+    # Der Vorschlag reserviert nichts: der Store bleibt unverändert.
+    assert store.article_numbers() == existing
+
+
+async def test_preview_article_number_skips_existing_and_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, service = await _service(tmp_path)
+    active = await _create(service, name="Aktiv", category="SB")
+    archived = await _create(service, name="Archiv", category="SB")
+    await service.async_archive(archived.article_number)
+    taken = store.article_numbers()
+    free = next(
+        number
+        for number in (f"SB{a}{b}ZZ" for a in ascii_uppercase for b in ascii_uppercase)
+        if number not in taken
+    )
+    candidates = iter([archived.article_number, active.article_number, free])
+    monkeypatch.setattr(
+        products_module, "generate_article_number", lambda category: next(candidates)
+    )
+
+    preview = await service.async_preview_article_number("sb")
+
+    assert preview == {"articleNumber": free, "category": "SB", "reserved": False}
+
+
+async def test_preview_article_number_rejects_unknown_category(tmp_path: Path) -> None:
+    _, service = await _service(tmp_path)
+    with pytest.raises(ValidationError) as err:
+        await service.async_preview_article_number("XX")
+    assert err.value.code == "validation_error"
+    assert "Unbekannte Kategorie" in err.value.message
 
 
 def test_filter_combination_semantics_directly() -> None:

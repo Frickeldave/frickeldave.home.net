@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from .models import (
     ARTICLE_NUMBER_LENGTH,
     BOOKING_TYPES,
     CATEGORIES,
+    CATEGORY_LABELS,
     MAX_IMAGES,
     VISIBILITY_VALUES,
     ConflictError,
@@ -34,6 +35,10 @@ from .store import ALLOWED_CONTENT_TYPES, MAX_IMAGE_BYTES, CatalogStore
 
 #: Zeichen ohne Verwechslungsgefahr (kein I, O, 0, 1).
 _ARTICLE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+#: Erlaubte Sortierschlüssel (Panel, HTTP- und WebSocket-API).
+SORT_KEYS: Final[tuple[str, ...]] = ("name", "price", "category", "stock", "status")
+SORT_VALUES_MESSAGE: Final = "sort muss " + ", ".join(f"'{key}'" for key in SORT_KEYS) + " sein."
 
 
 def generate_article_number(category: str) -> str:
@@ -79,8 +84,8 @@ class ProductFilter:
             raise ValidationError("visibility muss 'visible' oder 'invisible' sein.")
 
         sort = (params.get("sort") or "name").strip().lower()
-        if sort not in {"name", "price"}:
-            raise ValidationError("sort muss 'name' oder 'price' sein.")
+        if sort not in SORT_KEYS:
+            raise ValidationError(SORT_VALUES_MESSAGE)
         order = (params.get("order") or "asc").strip().lower()
         if order not in {"asc", "desc"}:
             raise ValidationError("order muss 'asc' oder 'desc' sein.")
@@ -181,14 +186,57 @@ def product_matches(
     return True
 
 
-def sort_products(products: list[Product], sort: str, order: str) -> list[Product]:
-    """Stabile Sortierung nach Name oder Preis mit Artikelnummer als Tiebreaker."""
+def _category_order(category: str) -> tuple[int, str]:
+    """Kategorie nach sichtbarem Label (alphabetisch), unbekannte Codes danach.
 
+    Sortiert wird nach dem Label, nicht nach dem Rohcode: sichtbar ist z. B.
+    ``Holz`` (``WO``) vor ``Laser`` (``LA``). Unbekannte Codes (etwa aus
+    Altbeständen) landen hinter allen bekannten Kategorien und sind dort nach
+    Rohcode stabil.
+    """
+
+    label = CATEGORY_LABELS.get(category.upper(), "")
+    if not label:
+        return (1, category.casefold())
+    return (0, label.casefold())
+
+
+def _status_order(product: Product) -> tuple[int, int]:
+    """Aktiv vor archiviert, sichtbar vor unsichtbar."""
+
+    return (1 if product.archived else 0, 0 if product.visible else 1)
+
+
+def _primary_key(sort: str) -> Callable[[Product], Any]:
     if sort == "price":
-        key = lambda item: (item.price, item.article_number)  # noqa: E731
+        return lambda item: item.price
+    if sort == "category":
+        return lambda item: _category_order(item.category)
+    if sort == "stock":
+        return lambda item: item.total_stock()
+    if sort == "status":
+        return _status_order
+    return lambda item: item.name.casefold()
+
+
+def sort_products(products: list[Product], sort: str, order: str) -> list[Product]:
+    """Stabile Sortierung nach ``sort``; Tiebreaker bleiben immer aufsteigend.
+
+    ``order=desc`` dreht nur das Hauptkriterium. Der Tiebreaker (Name bzw.
+    Artikelnummer) folgt bewusst weiter aufsteigend, damit gleiche Werte in
+    beiden Richtungen dieselbe, deterministische Reihenfolge haben.
+    """
+
+    if sort in {"category", "stock", "status"}:
+        tie_break: Callable[[Product], tuple[str, ...]] = lambda item: (  # noqa: E731
+            item.name.casefold(),
+            item.article_number,
+        )
     else:
-        key = lambda item: (item.name.casefold(), item.article_number)  # noqa: E731
-    return sorted(products, key=key, reverse=order == "desc")
+        tie_break = lambda item: (item.article_number,)  # noqa: E731
+
+    presorted = sorted(products, key=tie_break)
+    return sorted(presorted, key=_primary_key(sort), reverse=order == "desc")
 
 
 class ProductService:
@@ -233,6 +281,29 @@ class ProductService:
                 self._store.add_tag(tag)
             await self._store.async_save()
         return product
+
+    async def async_preview_article_number(self, category: str) -> dict[str, Any]:
+        """Vorschlag für eine Artikelnummer beim Anlegen – bewusst **nicht reserviert**.
+
+        Die Nummer entsteht nach derselben Regel wie in :meth:`async_create`
+        (Kategoriepräfix + Zufallszeichen) und wird gegen alle vorhandenen
+        Artikelnummern geprüft, inklusive archivierter Produkte. Reserviert wird
+        sie nicht: maßgeblich bleibt die Erzeugung in :meth:`async_create`.
+        Kollidiert der Vorschlag bis zum Speichern (paralleles Anlegen), entsteht
+        dort eine andere Nummer und die Antwort von ``POST /products`` enthält die
+        tatsächlich vergebene.
+        """
+
+        normalized = category.strip().upper()
+        article_number = generate_article_number(normalized)
+        existing = self._store.article_numbers()
+        attempts = 0
+        while article_number in existing:
+            attempts += 1
+            if attempts > 1000:  # pragma: no cover - praktisch unerreichbar
+                raise ConflictError("Keine freie Artikelnummer gefunden.")
+            article_number = generate_article_number(normalized)
+        return {"articleNumber": article_number, "category": normalized, "reserved": False}
 
     async def async_update(self, article_number: str, payload: dict[str, Any]) -> Product:
         async with self._store.lock:
@@ -544,6 +615,7 @@ def _validate_image_name(product: Product, name: str) -> None:
 
 
 __all__ = [
+    "SORT_KEYS",
     "ProductFilter",
     "ProductService",
     "generate_article_number",

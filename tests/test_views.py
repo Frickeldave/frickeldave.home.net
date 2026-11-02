@@ -9,16 +9,25 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.ai import AIError, AIService
-from custom_components.frickeldave_store.const import DOMAIN, PANEL_MODULE_URL, VERSION
+from custom_components.frickeldave_store.const import (
+    API_PREFIX,
+    DOMAIN,
+    PANEL_MODULE_URL,
+    VERSION,
+)
 from custom_components.frickeldave_store.models import SCHEMA_VERSION
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.store import CatalogStore
 from custom_components.frickeldave_store.views import (
+    VIEWS,
     ArchiveView,
+    ArticleNumberView,
     DescriptionSuggestView,
     ExportView,
     ImagesView,
@@ -181,6 +190,50 @@ async def test_invalid_filter_returns_validation_error(tmp_path: Path) -> None:
     response = await ProductsView().get(FakeRequest(hass, "user-1", query={"category": "XX"}))
     assert response.status == 400
     assert _payload(response)["error"]["code"] == "validation_error"
+
+
+async def test_article_number_preview_endpoint(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
+
+    response = await ArticleNumberView().get(FakeRequest(hass, "user-1", query={"category": "la"}))
+    assert response.status == 200
+    body = _payload(response)
+    assert body["category"] == "LA"
+    assert body["reserved"] is False
+    assert len(body["articleNumber"]) == 6
+    assert body["articleNumber"].startswith("LA")
+    # Vorschlag reserviert nichts.
+    assert runtime.store.article_numbers() == set()
+
+    denied = await ArticleNumberView().get(FakeRequest(hass, "ghost", query={"category": "LA"}))
+    assert denied.status == 403
+    assert b"articleNumber" not in denied.body
+
+    unknown = await ArticleNumberView().get(FakeRequest(hass, "user-1", query={"category": "XX"}))
+    assert unknown.status == 400
+    assert _payload(unknown)["error"]["code"] == "validation_error"
+
+    missing = await ArticleNumberView().get(FakeRequest(hass, "user-1"))
+    assert missing.status == 400
+    assert _payload(missing)["error"]["code"] == "validation_error"
+
+
+async def test_article_number_route_wins_over_product_route(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"user-1": ["product"]})
+    assert VIEWS.index(ArticleNumberView) < VIEWS.index(ProductView)
+
+    app = web.Application()
+    for view_class in VIEWS:
+        view_class().register(hass, app, app.router)  # type: ignore[arg-type]
+
+    asset = make_mocked_request("GET", f"{API_PREFIX}/products/article-number", app=app)
+    match = await app.router.resolve(asset)
+    assert match.route.resource.canonical == f"{API_PREFIX}/products/article-number"
+
+    product_request = make_mocked_request("GET", f"{API_PREFIX}/products/LA3K3X", app=app)
+    product_match = await app.router.resolve(product_request)
+    assert product_match["article_number"] == "LA3K3X"
+    assert product_match.route.resource.canonical == f"{API_PREFIX}/products/{{article_number}}"
 
 
 async def test_eleventh_image_upload_rejected_via_api(tmp_path: Path) -> None:

@@ -8,6 +8,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [0.1.12] - 2026-11-02
 
+### Added
+
+- **Weitere Sortierschlüssel für die Produktliste (#289).** `sort` kennt neben
+  `name` und `price` jetzt `category` (nach sichtbarem Kategorie-Label, nicht nach
+  Rohcode), `stock` (Gesamtbestand über alle Lagerstätten, unabhängig vom
+  Lagerstätten-Filter) und `status` (aktiv vor archiviert, sichtbar vor unsichtbar).
+  Innerhalb gleicher Werte gilt Name, dann Artikelnummer. `order=desc` dreht nur das
+  Hauptkriterium; der Tiebreaker bleibt aufsteigend und damit deterministisch.
+  HTTP- und WebSocket-API akzeptieren dieselben Werte.
+- **Artikelnummer-Vorschlag für den Anlegen-Dialog (#289).**
+  `GET /api/frickeldave_store/products/article-number?category=LA` liefert
+  `{"articleNumber", "category", "reserved": false}` (Recht `product`). Die Nummer
+  entsteht nach derselben Regel wie beim Speichern und wird gegen alle vorhandenen
+  Artikelnummern geprüft, auch gegen archivierte. Sie wird bewusst **nicht**
+  reserviert: maßgeblich bleibt `POST /products`, dessen Antwort die tatsächlich
+  vergebene Nummer enthält.
+
 ### Changed
 
 - **Einheitliches Symbol für beide Veröffentlichungs-Aktionen (#289).** „Nach dev

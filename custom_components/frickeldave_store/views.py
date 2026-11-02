@@ -294,6 +294,28 @@ class ProductsView(HomeAssistantView):
             return _error_response(err)
 
 
+class ArticleNumberView(HomeAssistantView):
+    """Artikelnummer-Vorschlag für den Anlegen-Dialog (nicht reserviert).
+
+    Muss **vor** :class:`ProductView` registriert werden: ``/products/article-number``
+    ist ein statischer Pfad und würde sonst von ``/products/{article_number}``
+    geschluckt.
+    """
+
+    name = "api:frickeldave_store:article_number"
+    url = f"{API_PREFIX}/products/article-number"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            category = (request.query.get("category") or "").strip()
+            payload = await runtime.products.async_preview_article_number(category)
+            return web.json_response(payload)
+        except StoreError as err:
+            return _error_response(err)
+
+
 class ProductView(HomeAssistantView):
     name = "api:frickeldave_store:product"
     url = f"{API_PREFIX}/products/{{article_number}}"
@@ -830,6 +852,8 @@ class CatalogImportView(HomeAssistantView):
 VIEWS: tuple[type[HomeAssistantView], ...] = (
     MeView,
     ProductsView,
+    # statischer Pfad vor dem parametrisierten ``/products/{article_number}``
+    ArticleNumberView,
     ProductView,
     ArchiveView,
     ImagesView,

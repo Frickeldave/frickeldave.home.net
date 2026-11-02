@@ -296,6 +296,7 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | --- | --- |
 | GET | `/me` |
 | GET, POST | `/products` |
+| GET | `/products/article-number` (`product`; Vorschlag, nicht reserviert) |
 | GET, PATCH | `/products/{article_number}` |
 | POST | `/products/{article_number}/archive` |
 | GET, POST | `/products/{article_number}/images` |
@@ -317,7 +318,17 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`/`in_cabinet` (erste/zweite Lagerstätte), `location` +
 `in_location` (beliebige Lagerstätte), `visibility=visible|invisible`, `archived`,
-`sort=name|price`, `order=asc|desc`, `limit`, `offset`.
+`sort=name|price|category|stock|status`, `order=asc|desc`, `limit`, `offset`.
+
+Sortierung: `category` ordnet nach dem sichtbaren Kategorie-Label, `stock` nach dem
+Gesamtbestand über alle Lagerstätten (unabhängig von `location`/`in_location`),
+`status` nach aktiv vor archiviert und sichtbar vor unsichtbar. Bei Gleichstand gilt
+Name, dann Artikelnummer – auch bei `order=desc`, das nur das Hauptkriterium dreht.
+
+`GET /products/article-number?category=LA` liefert
+`{"articleNumber": "LAH3K3", "category": "LA", "reserved": false}` für den
+Anlegen-Dialog (Recht `product`). Der Vorschlag wird nicht reserviert; beim Anlegen
+erzeugt `POST /products` die Nummer erneut und gibt die tatsächliche zurück.
 
 `GET /settings` liefert neben `ai`, `publish` (ohne Token, nur `token_set`), `users`,
 `export_path` und `locations` den Abschnitt `storage` mit `data_path`,
