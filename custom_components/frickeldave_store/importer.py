@@ -1,11 +1,17 @@
 """Import des bestehenden Website-Katalogs inklusive Bilder.
 
-Der Import ist idempotent: Bestehende Artikelnummern werden nie überschrieben,
-sondern als ``skipped`` gemeldet. Es gibt keinen Hard-Delete-Pfad – ein Import
-kann ausschließlich neue Produkte anlegen. Fachliche Fehler einzelner Produkte
-oder Bilder landen in ``errors`` und brechen den Lauf nicht ab; nur ein nicht
-lesbares oder strukturell ungültiges Katalogdokument lehnt die Anfrage
-vollständig ab, bevor der Store verändert wird.
+Standardmäßig ist der Import rein additiv und idempotent: Bestehende
+Artikelnummern werden nie überschrieben, sondern als ``skipped`` gemeldet. Es
+gibt keinen Hard-Delete-Pfad. Mit ``overwrite=True`` werden vorhandene Produkte
+zusätzlich mit dem Katalogstand überschrieben (Artikelnummer, ``createdAt``,
+Bilder, Buchungen und Archiv-Status bleiben lokal). Mit ``dry_run=True`` wird
+der Katalog zwar geladen und geprüft, aber nichts geschrieben: kein
+Store-Schreibzugriff, keine Bilddatei, kein Snapshot und kein ``updatedAt``.
+
+Fachliche Fehler einzelner Produkte oder Bilder landen in ``errors`` und brechen
+den Lauf nicht ab; nur ein nicht lesbares oder strukturell ungültiges
+Katalogdokument lehnt die Anfrage vollständig ab, bevor der Store verändert
+wird.
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ from .models import (
     normalise_text,
     to_iso,
 )
-from .store import CatalogStore
+from .store import CatalogStore, ImageStorage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +73,8 @@ IMAGE_SIGNATURES: Final[tuple[bytes, ...]] = (
 #: zusätzlich kurze Altbestandsnummern (z. B. ``LAX``), damit der bestehende
 #: Katalog vollständig übernommen wird.
 ARTICLE_NUMBER_RE = re.compile(r"^[A-Z0-9]{1,12}$")
+#: Dateinamensschema der Bildablage (``<artikel>-NN.jpg``).
+_IMAGE_INDEX_RE = re.compile(r"-(\d{2})\.[A-Za-z]+$")
 
 
 class CatalogUnavailable(StoreError):
@@ -83,7 +91,12 @@ class CatalogInvalid(StoreError):
 
 @dataclass(slots=True)
 class ImportResult:
-    """Ergebnis eines Imports in der Form der API-Antwort."""
+    """Ergebnis eines Imports in der Form der API-Antwort.
+
+    ``would_create``/``would_overwrite``/``unchanged`` sind reine
+    Vorschau-Zähler und nur bei ``dry_run=True`` gefüllt. ``overwritten`` zählt
+    ausschließlich tatsächlich überschriebene Produkte.
+    """
 
     created: int = 0
     skipped: int = 0
@@ -91,6 +104,15 @@ class ImportResult:
     images_imported: int = 0
     products_total: int = 0
     errors: list[dict[str, str]] = field(default_factory=list)
+    dry_run: bool = False
+    would_create: int = 0
+    would_overwrite: int = 0
+    overwritten: int = 0
+    unchanged: int = 0
+    summary: str = ""
+    #: Nur für die Zusammenfassung: archivierte Produkte, die bewusst
+    #: unangetastet bleiben (in ``skipped``/``unchanged`` enthalten).
+    archived_skipped: int = 0
 
     def add_error(self, article_number: str, message: str) -> None:
         self.errors.append({"articleNumber": article_number, "message": message})
@@ -103,7 +125,55 @@ class ImportResult:
             "images_imported": self.images_imported,
             "products_total": self.products_total,
             "errors": list(self.errors),
+            "dry_run": self.dry_run,
+            "would_create": self.would_create,
+            "would_overwrite": self.would_overwrite,
+            "overwritten": self.overwritten,
+            "unchanged": self.unchanged,
+            "summary": self.summary,
         }
+
+
+@dataclass(slots=True)
+class ImportPlan:
+    """Vorberechneter, noch nicht geschriebener Importplan."""
+
+    create: list[Product] = field(default_factory=list)
+    update: list[Product] = field(default_factory=list)
+    unchanged: int = 0
+    archived_skipped: int = 0
+    #: Je Artikelnummer die in diesem Lauf geladenen (neuen) Bildnamen.
+    fetched_images: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _count(value: int, singular: str, plural: str) -> str:
+    return f"{value} {singular if value == 1 else plural}"
+
+
+def build_summary(result: ImportResult) -> str:
+    """Deutsche Zusammenfassung des Laufs für die API-Antwort."""
+
+    if result.images_imported == 1:
+        planned, imported = "1 Bild würde importiert", "1 Bild importiert"
+    else:
+        images = _count(result.images_imported, "Bild", "Bilder")
+        planned, imported = f"{images} würden importiert", f"{images} importiert"
+    if result.dry_run:
+        text = (
+            f"Vorschau: {_count(result.products_total, 'Produkt', 'Produkte')} im Katalog, "
+            f"{result.would_create} neu, {result.would_overwrite} zu überschreiben, "
+            f"{result.unchanged} unverändert, {result.failed} fehlerhaft, "
+            f"{planned}. Es wurde nichts geschrieben."
+        )
+    else:
+        text = (
+            f"Import abgeschlossen: {result.created} neu angelegt, "
+            f"{result.overwritten} überschrieben, {result.skipped} unverändert, "
+            f"{result.failed} fehlerhaft, {imported}."
+        )
+    if result.archived_skipped:
+        text += f" Davon archiviert und übersprungen: {result.archived_skipped}."
+    return text
 
 
 def validate_import_url(url: Any, *, label: str) -> str:
@@ -175,12 +245,20 @@ async def async_import_catalog(
     source_url: str = DEFAULT_CATALOG_URL,
     image_base_url: str = DEFAULT_IMAGE_BASE_URL,
     import_images: bool = True,
+    dry_run: bool = False,
+    overwrite: bool = False,
     session: aiohttp.ClientSession | None = None,
     request_timeout: float = IMPORT_TIMEOUT,
     max_concurrency: int = IMPORT_MAX_CONCURRENCY,
     stamp: str | None = None,
 ) -> ImportResult:
-    """Katalog idempotent importieren; bestehende Produkte bleiben unverändert."""
+    """Katalog importieren.
+
+    Ohne ``overwrite`` bleiben bestehende Produkte unverändert. ``dry_run``
+    erzeugt ausschließlich eine Vorschau: Der Plan wird berechnet, aber weder
+    Store noch Bildablage werden geschrieben (kein ``async_save``, damit auch
+    kein Snapshot und kein ``updatedAt``).
+    """
 
     source_url = validate_import_url(source_url, label="source_url")
     image_base = validate_import_url(image_base_url, label="image_base_url").rstrip("/")
@@ -191,43 +269,57 @@ async def async_import_catalog(
     )
     try:
         document = await _async_fetch_document(client, source_url, request_timeout=request_timeout)
-        result = ImportResult(products_total=len(document["products"]))
-        candidates = _collect_candidates(document["products"], result, store, stamp)
-        if import_images and candidates:
+        result = ImportResult(products_total=len(document["products"]), dry_run=dry_run)
+        plan = _plan_import(document["products"], result, store, stamp, overwrite=overwrite)
+        if import_images:
+            # Im Dry-Run existiert keine Bildablage als Schreibziel.
+            sink = None if dry_run else store.images
             await _async_collect_images(
-                store,
-                candidates,
+                plan,
                 image_base,
                 client=client,
                 request_timeout=request_timeout,
                 max_concurrency=max_concurrency,
                 result=result,
+                sink=sink,
             )
-        await _async_store_candidates(store, candidates, result)
+        if dry_run:
+            result.would_create = len(plan.create)
+            result.would_overwrite = len(plan.update)
+            result.unchanged = plan.unchanged + plan.archived_skipped
+            result.skipped = result.unchanged
+            result.images_imported = sum(len(names) for names in plan.fetched_images.values())
+        else:
+            await _async_apply_plan(store, plan, result)
+        result.archived_skipped = plan.archived_skipped
+        result.summary = build_summary(result)
     finally:
         if own_session:
             await client.close()
     return result
 
 
-def _collect_candidates(
+def _plan_import(
     raw_products: list[Any],
     result: ImportResult,
     store: CatalogStore,
     stamp: str | None,
-) -> list[Product]:
-    """Payload prüfen, Duplikate und Bestand erkennen – ohne den Store zu verändern."""
+    *,
+    overwrite: bool,
+) -> ImportPlan:
+    """Payload prüfen und den Schreibplan berechnen – ohne den Store zu verändern."""
 
     existing = store.article_numbers()
+    location_ids = store.location_ids()
     seen: set[str] = set()
-    candidates: list[Product] = []
+    plan = ImportPlan()
     moment = stamp or to_iso()
     for raw in raw_products:
         article_number = ""
         if isinstance(raw, dict):
             article_number = str(raw.get("articleNumber", "")).strip().upper()
         try:
-            product = map_catalog_product(raw, stamp=moment, location_ids=store.location_ids())
+            product = map_catalog_product(raw, stamp=moment, location_ids=location_ids)
         except StoreError as err:
             result.failed += 1
             result.add_error(article_number, err.message)
@@ -237,22 +329,91 @@ def _collect_candidates(
             result.add_error(product.article_number, "Doppelte Artikelnummer im Katalog.")
             continue
         seen.add(product.article_number)
-        if product.article_number in existing:
-            result.skipped += 1
+        if product.article_number not in existing:
+            plan.create.append(product)
             continue
-        candidates.append(product)
-    return candidates
+        local_raw = store.get_raw_product(product.article_number)
+        if local_raw is None:  # pragma: no cover - existing und get_raw sind synchron
+            plan.create.append(product)
+            continue
+        if local_raw.get("archived"):
+            # Archivierte Produkte werden nie reaktiviert.
+            plan.archived_skipped += 1
+            continue
+        if not overwrite:
+            plan.unchanged += 1
+            continue
+        local = Product.from_dict(local_raw, location_ids=location_ids)
+        if _catalog_signature(local) == _catalog_signature(product):
+            plan.unchanged += 1
+            continue
+        plan.update.append(_merge_catalog_product(local, product, stamp=moment))
+    return plan
 
 
-async def _async_store_candidates(
-    store: CatalogStore, candidates: list[Product], result: ImportResult
-) -> None:
-    """Kandidaten unter dem Store-Lock anlegen; nichts Bestehendes überschreiben."""
+#: Felder, die beim Überschreiben aus dem Katalog übernommen werden.
+OVERWRITE_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "description",
+    "price",
+    "size",
+    "tags",
+    "visible",
+    "customizable",
+    "stock",
+)
+
+
+def _catalog_signature(product: Product) -> tuple[Any, ...]:
+    """Vergleichbare Katalogfelder (ohne lokale Felder wie Bilder/Archiv)."""
+
+    values: list[Any] = []
+    for field_name in OVERWRITE_FIELDS:
+        value = getattr(product, field_name)
+        if field_name == "tags":
+            value = tuple(sorted(tag.casefold() for tag in value))
+        elif field_name == "stock":
+            value = tuple(sorted((key, int(amount)) for key, amount in value.items()))
+        values.append(value)
+    return tuple(values)
+
+
+def _merge_catalog_product(local: Product, catalog: Product, *, stamp: str) -> Product:
+    """Katalogstand über den lokalen Bestand legen.
+
+    Übernommen werden :data:`OVERWRITE_FIELDS`. Lokal bleiben Artikelnummer,
+    ``createdAt``, Bilder, Archiv-Status, Buchungen (separat gespeichert) und
+    die Kategorie – letztere ist unveränderlich, weil die Artikelnummer sie
+    kodiert.
+    """
+
+    return Product(
+        article_number=local.article_number,
+        name=catalog.name,
+        category=local.category,
+        price=catalog.price,
+        description=catalog.description,
+        size=catalog.size,
+        tags=list(catalog.tags),
+        customizable=catalog.customizable,
+        visible=catalog.visible,
+        stock=dict(catalog.stock),
+        images=list(local.images),
+        archived=local.archived,
+        created_at=local.created_at or stamp,
+        updated_at=stamp,
+        schema_version=SCHEMA_VERSION,
+    )
+
+
+async def _async_apply_plan(store: CatalogStore, plan: ImportPlan, result: ImportResult) -> None:
+    """Plan unter dem Store-Lock schreiben; nur hier entstehen Store-Änderungen."""
 
     async with store.lock:
-        for product in candidates:
-            if store.get_raw_product(product.article_number) is not None:
-                await _discard_images(store, product)
+        for product in plan.create:
+            winner = store.get_raw_product(product.article_number)
+            if winner is not None:
+                await _discard_images(store, product, winner)
                 result.skipped += 1
                 continue
             store.put_product(product)
@@ -260,14 +421,50 @@ async def _async_store_candidates(
                 store.add_tag(tag)
             result.created += 1
             result.images_imported += len(product.images)
-        if result.created:
+
+        for product in plan.update:
+            winner = store.get_raw_product(product.article_number)
+            fetched = plan.fetched_images.get(product.article_number, [])
+            if winner is None:
+                # Zwischen Planung und Anwendung verschwunden: wie neu anlegen.
+                store.put_product(product)
+                for tag in product.tags:
+                    store.add_tag(tag)
+                result.created += 1
+                result.images_imported += len(fetched)
+                continue
+            if winner.get("archived"):
+                # Archiv bleibt archiviert – auch bei overwrite.
+                await _discard_images(store, product, winner)
+                result.skipped += 1
+                continue
+            _merge_winner_images(product, winner)
+            store.put_product(product)
+            for tag in product.tags:
+                store.add_tag(tag)
+            result.overwritten += 1
+            result.images_imported += len(fetched)
+
+        result.skipped += plan.unchanged + plan.archived_skipped
+        if result.created or result.overwritten:
+            # Erst hier entstehen Store-Datei, Snapshot und ``updatedAt``.
             await store.async_save()
 
 
-async def _discard_images(store: CatalogStore, product: Product) -> None:
-    """Bilder eines inzwischen vorhandenen Produkts entfernen (nur eigene Dateien)."""
+def _merge_winner_images(product: Product, winner: dict[str, Any]) -> None:
+    """Zwischenzeitlich ergänzte lokale Bilder nicht verlieren."""
 
-    winner = store.get_raw_product(product.article_number) or {}
+    known = {image.name for image in product.images}
+    for item in winner.get("images", []) or []:
+        name = str(item.get("name", ""))
+        if name and name not in known:
+            product.images.append(Image.from_dict(item))
+            known.add(name)
+
+
+async def _discard_images(store: CatalogStore, product: Product, winner: dict[str, Any]) -> None:
+    """Nur die in diesem Lauf geladenen Bilder entfernen, die der Bestand nicht nutzt."""
+
     keep = {str(item.get("name")) for item in winner.get("images", []) or []}
     for image in product.images:
         if image.name in keep:
@@ -304,36 +501,40 @@ async def _async_fetch_document(
 
 
 async def _async_collect_images(
-    store: CatalogStore,
-    products: list[Product],
+    plan: ImportPlan,
     image_base: str,
     *,
     client: aiohttp.ClientSession,
     request_timeout: float,
     max_concurrency: int,
     result: ImportResult,
+    sink: ImageStorage | None,
 ) -> None:
-    """Bilder mit begrenzter Parallelität laden; Fehler je Produkt sammeln."""
+    """Bilder mit begrenzter Parallelität laden; Fehler je Produkt sammeln.
+
+    ``sink`` ist im Trockenlauf ``None``; dann werden Bilddaten nur geprüft,
+    aber nirgends geschrieben.
+    """
 
     limit = max(1, max_concurrency)
     semaphore = asyncio.Semaphore(limit)
 
     async def _load(product: Product) -> None:
-        product.images = await _async_product_images(
-            store,
+        product.images, fetched = await _async_product_images(
             product,
             image_base,
             client=client,
             request_timeout=request_timeout,
             semaphore=semaphore,
             result=result,
+            sink=sink,
         )
+        plan.fetched_images[product.article_number] = fetched
 
-    await asyncio.gather(*(_load(product) for product in products))
+    await asyncio.gather(*(_load(product) for product in (*plan.create, *plan.update)))
 
 
 async def _async_product_images(
-    store: CatalogStore,
     product: Product,
     image_base: str,
     *,
@@ -341,11 +542,29 @@ async def _async_product_images(
     request_timeout: float,
     semaphore: asyncio.Semaphore,
     result: ImportResult,
-) -> list[Image]:
-    """``<artikel>-01`` bis ``<artikel>-10`` prüfen; fehlende Indizes werden übersprungen."""
+    sink: ImageStorage | None,
+) -> tuple[list[Image], list[str]]:
+    """``<artikel>-01`` bis ``<artikel>-10`` prüfen; fehlende Indizes werden übersprungen.
 
-    images: list[Image] = []
+    Bereits lokal vorhandene Bilder bleiben unangetastet und werden nicht erneut
+    geladen. Zurückgegeben werden das vollständige Bildverzeichnis und die in
+    diesem Lauf neu geladenen Namen.
+    """
+
+    images: list[Image] = list(product.images)
+    existing = {image.name for image in images}
+    used_indices = {
+        int(match.group(1))
+        for match in (_IMAGE_INDEX_RE.search(name) for name in existing)
+        if match is not None
+    }
+    fetched: list[str] = []
     for index in range(1, MAX_IMAGES + 1):
+        if len(images) >= MAX_IMAGES:
+            break
+        if index in used_indices:
+            # Lokales Bild bleibt erhalten; nichts nachladen oder schreiben.
+            continue
         found: tuple[str, bytes] | None = None
         for suffix in IMAGE_SUFFIXES:
             name = f"{product.article_number}-{index:02d}{suffix}"
@@ -355,7 +574,7 @@ async def _async_product_images(
             )
             if outcome.error:
                 result.add_error(product.article_number, f"Bild {name}: {outcome.error}")
-                return images
+                return images, fetched
             if outcome.status == 404:
                 continue
             if outcome.status != 200 or outcome.data is None:
@@ -363,15 +582,17 @@ async def _async_product_images(
                     product.article_number,
                     f"Bild {name} konnte nicht geladen werden (HTTP {outcome.status}).",
                 )
-                return images
+                return images, fetched
             found = (name, outcome.data)
             break
         if found is None:
             continue
         name, data = found
-        await store.images.async_write(product.article_number, name, data)
+        if sink is not None:
+            await sink.async_write(product.article_number, name, data)
         images.append(Image(name=name, is_main=not images))
-    return images
+        fetched.append(name)
+    return images, fetched
 
 
 @dataclass(slots=True)

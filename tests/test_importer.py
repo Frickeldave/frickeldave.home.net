@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +28,12 @@ from custom_components.frickeldave_store.importer import (
     async_import_catalog,
     validate_import_url,
 )
-from custom_components.frickeldave_store.models import Product, ValidationError
+from custom_components.frickeldave_store.models import (
+    Image,
+    Product,
+    StockBooking,
+    ValidationError,
+)
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.store import CatalogStore
@@ -235,6 +241,15 @@ async def test_import_creates_full_catalog_with_field_mapping(tmp_path: Path) ->
         "images_imported": 0,
         "products_total": 63,
         "errors": [],
+        "dry_run": False,
+        "would_create": 0,
+        "would_overwrite": 0,
+        "overwritten": 0,
+        "unchanged": 0,
+        "summary": (
+            "Import abgeschlossen: 63 neu angelegt, 0 überschrieben, "
+            "0 unverändert, 0 fehlerhaft, 0 Bilder importiert."
+        ),
     }
     assert len(store.product_dicts()) == 63
     assert session.requests == [DEFAULT_CATALOG_URL]
@@ -610,6 +625,300 @@ async def test_existing_products_are_skipped_and_images_untouched(tmp_path: Path
     assert image_url("3D", "3D0000", "3D0000-01.jpg") not in session.requests
 
 
+# --------------------------------------------------------------------------- Dry-Run
+def tree_hashes(root: Path) -> dict[str, str]:
+    """Alle Dateien unter ``root`` mit SHA-256 – belegt Schreibfreiheit."""
+
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+async def test_dry_run_writes_nothing_and_reports_full_preview(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    document = catalog_payload(2)
+    images = {
+        image_url("3D", "3D0000", "3D0000-01.jpg"): (200, jpeg(b"-3d")),
+        image_url("EP", "EP0001", "EP0001-01.jpg"): (200, jpeg(b"-ep")),
+    }
+    first = await async_import_catalog(
+        store, session=FakeSession(document, images=images), stamp="2026-01-01T00:00:00Z"
+    )
+    assert first.created == 2
+
+    changed = catalog_payload(3)
+    changed["products"][0]["name"] = "Produkt 0 neu"
+    changed["products"][0]["price"] = 99.0
+    changed_images = {
+        image_url("LA", "LA0002", "LA0002-01.jpg"): (200, jpeg(b"-la")),
+    }
+    before = tree_hashes(tmp_path)
+
+    result = await async_import_catalog(
+        store,
+        session=FakeSession(changed, images=changed_images),
+        dry_run=True,
+        overwrite=True,
+    )
+
+    assert tree_hashes(tmp_path) == before
+    assert not store.images.product_dir("LA0002").exists()
+    assert result.dry_run is True
+    assert result.created == 0
+    assert result.overwritten == 0
+    assert result.would_create == 1
+    assert result.would_overwrite == 1
+    assert result.unchanged == 1
+    assert result.skipped == 1
+    assert result.images_imported == 1
+    assert result.errors == []
+    assert result.summary == (
+        "Vorschau: 3 Produkte im Katalog, 1 neu, 1 zu überschreiben, 1 unverändert, "
+        "0 fehlerhaft, 1 Bild würde importiert. Es wurde nichts geschrieben."
+    )
+
+    # Der gespeicherte Stand bleibt unverändert – auch nach erneutem Laden.
+    reloaded = CatalogStore(data_dir=tmp_path)
+    await reloaded.async_load()
+    assert reloaded.get_raw_product("3D0000")["name"] == "Produkt 0"  # type: ignore[index]
+    assert reloaded.get_raw_product("LA0002") is None
+
+
+async def test_dry_run_without_overwrite_never_proposes_overwrites(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    document = catalog_payload(2)
+    await async_import_catalog(store, session=FakeSession(document), import_images=False)
+    before = tree_hashes(tmp_path)
+
+    result = await async_import_catalog(
+        store, session=FakeSession(document), import_images=False, dry_run=True
+    )
+
+    assert tree_hashes(tmp_path) == before
+    assert result.would_create == 0
+    assert result.would_overwrite == 0
+    assert result.unchanged == 2
+    assert result.skipped == 2
+    assert result.created == 0
+    assert "Es wurde nichts geschrieben." in result.summary
+
+
+async def test_dry_run_reports_archived_products_as_unchanged(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    store.put_product(
+        Product(
+            article_number="3D0000",
+            name="Archiviert",
+            category="3D",
+            archived=True,
+            created_at="2020-01-01T00:00:00Z",
+        )
+    )
+    await store.async_save()
+    before = tree_hashes(tmp_path)
+
+    result = await async_import_catalog(
+        store,
+        session=FakeSession(catalog_payload(1)),
+        import_images=False,
+        dry_run=True,
+        overwrite=True,
+    )
+
+    assert tree_hashes(tmp_path) == before
+    assert result.would_overwrite == 0
+    assert result.unchanged == 1
+    assert "Davon archiviert und übersprungen: 1." in result.summary
+
+
+# --------------------------------------------------------------------------- Overwrite
+def _local_product(**overrides: Any) -> Product:
+    values: dict[str, Any] = {
+        "article_number": "LA0002",
+        "name": "Lokal",
+        "category": "LA",
+        "price": 1.0,
+        "description": "alter Text",
+        "size": "5cm",
+        "tags": ["Alt"],
+        "customizable": False,
+        "visible": False,
+        "stock": {"lager": 7, "verkaufsschrank": 2},
+        "images": [Image(name="LA0002-01.jpg", is_main=True)],
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2020-01-01T00:00:00Z",
+    }
+    values.update(overrides)
+    return Product(**values)
+
+
+async def _seed_local_with_image_and_booking(store: CatalogStore) -> None:
+    await store.images.async_write("LA0002", "LA0002-01.jpg", jpeg(b"-lokal"))
+    store.put_product(_local_product())
+    store.add_booking(
+        StockBooking(
+            id="b1",
+            article_number="LA0002",
+            type="in",
+            quantity=7,
+            at="2020-01-02T00:00:00Z",
+        )
+    )
+    await store.async_save()
+
+
+async def test_overwrite_false_never_changes_existing_products(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    await _seed_local_with_image_and_booking(store)
+    before = store_state(store)
+
+    result = await async_import_catalog(
+        store,
+        session=FakeSession(
+            catalog_payload(3),
+            images={
+                image_url("LA", "LA0002", "LA0002-02.jpg"): (200, jpeg(b"-2")),
+            },
+        ),
+    )
+
+    assert result.created == 2
+    assert result.overwritten == 0
+    assert result.skipped == 1
+    assert result.unchanged == 0
+    assert result.images_imported == 0
+    local = store.get_raw_product("LA0002")
+    assert local is not None
+    assert local["name"] == "Lokal"
+    assert local["stock"] == {"lager": 7, "verkaufsschrank": 2}
+    assert store_state(store) != before  # neue Produkte wurden angelegt
+    assert store.bookings("LA0002")[0]["id"] == "b1"
+
+
+async def test_overwrite_replaces_catalog_fields_and_keeps_local_state(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    await _seed_local_with_image_and_booking(store)
+
+    result = await async_import_catalog(
+        store,
+        session=FakeSession(catalog_payload(3)),
+        import_images=False,
+        overwrite=True,
+        stamp="2026-02-02T00:00:00Z",
+    )
+
+    assert result.created == 2
+    assert result.overwritten == 1
+    assert result.skipped == 0
+    product = store.get_raw_product("LA0002")
+    assert product is not None
+    assert product["articleNumber"] == "LA0002"
+    assert product["createdAt"] == "2020-01-01T00:00:00Z"
+    assert product["updatedAt"] != "2020-01-01T00:00:00Z"
+    # Katalogfelder übernommen
+    assert product["name"] == "Produkt 2"
+    assert product["description"] == "Beschreibung 2"
+    assert product["price"] == 12.5
+    assert product["size"] == "10cm"
+    assert product["tags"] == ["Deko"]
+    assert product["visible"] is True
+    assert product["customizable"] is True
+    assert product["stock"] == {"lager": 2, "verkaufsschrank": 0}
+    # Lokale Felder erhalten
+    assert product["archived"] is False
+    assert product["images"] == [{"name": "LA0002-01.jpg", "is_main": True}]
+    assert store.bookings("LA0002")[0]["id"] == "b1"
+    assert store.images.path_for("LA0002", "LA0002-01.jpg").read_bytes() == jpeg(b"-lokal")
+    assert result.summary.startswith("Import abgeschlossen: 2 neu angelegt, 1 überschrieben")
+
+
+async def test_overwrite_keeps_local_category(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    store.put_product(_local_product())
+    document = catalog_payload(3)
+    document["products"][2]["category"] = "SB"
+
+    await async_import_catalog(
+        store, session=FakeSession(document), import_images=False, overwrite=True
+    )
+
+    product = store.get_raw_product("LA0002")
+    assert product is not None
+    assert product["articleNumber"] == "LA0002"
+    assert product["category"] == "LA"
+    assert product["name"] == "Produkt 2"
+
+
+async def test_overwrite_adds_only_missing_images(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    await _seed_local_with_image_and_booking(store)
+    images = {
+        image_url("LA", "LA0002", "LA0002-01.jpg"): (200, jpeg(b"-soll-nicht")),
+        image_url("LA", "LA0002", "LA0002-02.jpg"): (200, jpeg(b"-neu")),
+    }
+
+    session = FakeSession(catalog_payload(3), images=images)
+    result = await async_import_catalog(store, session=session, overwrite=True)
+
+    assert result.overwritten == 1
+    assert result.images_imported == 1
+    product = store.get_raw_product("LA0002")
+    assert product is not None
+    assert product["images"] == [
+        {"name": "LA0002-01.jpg", "is_main": True},
+        {"name": "LA0002-02.jpg", "is_main": False},
+    ]
+    # Bestehendes Bild bleibt byte-identisch und wird nicht erneut geladen.
+    assert store.images.path_for("LA0002", "LA0002-01.jpg").read_bytes() == jpeg(b"-lokal")
+    assert image_url("LA", "LA0002", "LA0002-01.jpg") not in session.requests
+
+
+async def test_overwrite_skips_archived_products(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    store.put_product(_local_product(archived=True, name="Archiv"))
+    await store.async_save()
+    before = store_state(store)
+
+    result = await async_import_catalog(
+        store, session=FakeSession(catalog_payload(3)), import_images=False, overwrite=True
+    )
+
+    assert result.created == 2
+    assert result.overwritten == 0
+    assert result.skipped == 1
+    product = store.get_raw_product("LA0002")
+    assert product is not None
+    assert product["name"] == "Archiv"
+    assert product["archived"] is True
+    assert product["createdAt"] == "2020-01-01T00:00:00Z"
+    assert "Davon archiviert und übersprungen: 1." in result.summary
+    assert store_state(store) != before
+
+
+async def test_overwrite_is_idempotent_for_unchanged_products(tmp_path: Path) -> None:
+    store = await make_store(tmp_path)
+    document = catalog_payload(3)
+    await async_import_catalog(
+        store, session=FakeSession(document), import_images=False, overwrite=True
+    )
+    first = store.get_raw_product("LA0002")
+    assert first is not None
+    marker = first["updatedAt"]
+
+    result = await async_import_catalog(
+        store, session=FakeSession(document), import_images=False, overwrite=True
+    )
+
+    assert result.created == 0
+    assert result.overwritten == 0
+    assert result.skipped == 3
+    second = store.get_raw_product("LA0002")
+    assert second is not None
+    assert second["updatedAt"] == marker
+
+
 # --------------------------------------------------------------------------- URLs
 @pytest.mark.parametrize(
     "url",
@@ -689,6 +998,15 @@ async def test_import_endpoint_with_defaults_needs_product_role(
         "images_imported": 0,
         "products_total": 2,
         "errors": [],
+        "dry_run": False,
+        "would_create": 0,
+        "would_overwrite": 0,
+        "overwritten": 0,
+        "unchanged": 0,
+        "summary": (
+            "Import abgeschlossen: 2 neu angelegt, 0 überschrieben, "
+            "0 unverändert, 0 fehlerhaft, 0 Bilder importiert."
+        ),
     }
     assert len(runtime.store.product_dicts()) == 2
 
@@ -787,6 +1105,43 @@ async def test_import_endpoint_rejects_unknown_fields_and_bad_flags(
     )
     assert empty_url.status == 400
     assert payload(empty_url)["error"]["code"] == "validation_error"
+
+
+async def test_import_endpoint_preview_and_overwrite_need_only_product_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass, runtime = await _setup_runtime(tmp_path, {"user-1": ["product"]})
+    _patch_import(monkeypatch, FakeSession(catalog_payload(2)))
+
+    preview = await CatalogImportView().post(
+        FakeRequest(hass, "user-1", body={"dry_run": True, "overwrite": True})
+    )
+    assert preview.status == 200
+    body = payload(preview)
+    assert body["dry_run"] is True
+    assert body["would_create"] == 2
+    assert body["created"] == 0
+    assert body["summary"].startswith("Vorschau:")
+    assert runtime.store.product_dicts() == []
+
+    applied = await CatalogImportView().post(FakeRequest(hass, "user-1", body={"overwrite": True}))
+    assert applied.status == 200
+    assert payload(applied)["created"] == 2
+    assert payload(applied)["overwritten"] == 0
+
+
+async def test_import_endpoint_rejects_non_boolean_dry_run_and_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass, _ = await _setup_runtime(tmp_path, {"user-1": ["product"]})
+    _patch_import(monkeypatch, FakeSession(catalog_payload(1)))
+
+    for field, value in (("dry_run", "true"), ("overwrite", 1)):
+        response = await CatalogImportView().post(FakeRequest(hass, "user-1", body={field: value}))
+        assert response.status == 400
+        error = payload(response)["error"]
+        assert error["code"] == "validation_error"
+        assert error["message"] == f"{field} muss ein Wahrheitswert sein."
 
 
 async def test_import_endpoint_reports_catalog_errors(

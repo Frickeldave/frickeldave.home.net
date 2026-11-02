@@ -17,6 +17,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Innerhalb gleicher Werte gilt Name, dann Artikelnummer. `order=desc` dreht nur das
   Hauptkriterium; der Tiebreaker bleibt aufsteigend und damit deterministisch.
   HTTP- und WebSocket-API akzeptieren dieselben Werte.
+- **Katalogimport mit Vorschau und wählbarem Überschreiben (#289).**
+  `POST /api/frickeldave_store/import/catalog` kennt zwei neue optionale
+  Body-Felder, beide Standard `false`. `dry_run: true` lädt und prüft den Katalog,
+  schreibt aber nichts – kein Store-Schreibzugriff, keine Bilddatei, kein Snapshot,
+  kein `updatedAt` – und liefert die vollständige Vorschau mit `dry_run`,
+  `would_create`, `would_overwrite`, `unchanged`, `failed`, `images_imported`,
+  `errors` und einer deutschen `summary`. `overwrite: true` überschreibt vorhandene,
+  nicht archivierte Produkte mit dem Katalogstand und zählt sie getrennt als
+  `overwritten`: übernommen werden Name, Beschreibung, Preis, Größe, Tags,
+  Sichtbarkeit, Personalisierbarkeit und Bestände; Artikelnummer, `createdAt`,
+  Bilder, Buchungen, Archiv-Status und Kategorie bleiben lokal. Bilder werden nur
+  ergänzt, nie gelöscht; archivierte Produkte werden nicht reaktiviert, sondern als
+  `skipped` gemeldet. Ohne die neuen Felder bleibt die Antwort abwärtskompatibel
+  (neue Zähler sind dann `0`). Nicht-boolesche Werte für `dry_run`/`overwrite`
+  lehnt der Endpunkt mit einer deutschen `validation_error` ab; `overwrite` bleibt
+  bei der Rolle `product`, weil es ein Sammel-Update auf ohnehin änderbare Daten ist
+  und der Store vor dem ersten Schreiben einen Snapshot anlegt.
 - **Artikelnummer-Vorschlag für den Anlegen-Dialog (#289).**
   `GET /api/frickeldave_store/products/article-number?category=LA` liefert
   `{"articleNumber", "category", "reserved": false}` (Recht `product`). Die Nummer

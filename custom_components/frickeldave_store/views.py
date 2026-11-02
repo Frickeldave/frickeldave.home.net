@@ -818,7 +818,7 @@ class ExportView(HomeAssistantView):
 
 
 class CatalogImportView(HomeAssistantView):
-    """Bestehenden Website-Katalog importieren (idempotent, ohne Überschreiben)."""
+    """Bestehenden Website-Katalog importieren (optional Vorschau und Überschreiben)."""
 
     name = "api:frickeldave_store:import_catalog"
     url = f"{API_PREFIX}/import/catalog"
@@ -827,7 +827,13 @@ class CatalogImportView(HomeAssistantView):
     async def post(self, request: web.Request) -> web.Response:
         try:
             payload = await _optional_json_body(request)
-            unknown = set(payload) - {"source_url", "image_base_url", "import_images"}
+            unknown = set(payload) - {
+                "source_url",
+                "image_base_url",
+                "import_images",
+                "dry_run",
+                "overwrite",
+            }
             if unknown:
                 raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
             # Eigene Quellen können interne Adressen ansprechen: nur App-Admins.
@@ -838,11 +844,22 @@ class CatalogImportView(HomeAssistantView):
             import_images = payload.get("import_images", True)
             if not isinstance(import_images, bool):
                 raise ValidationError("import_images muss ein Wahrheitswert sein.")
+            dry_run = payload.get("dry_run", False)
+            if not isinstance(dry_run, bool):
+                raise ValidationError("dry_run muss ein Wahrheitswert sein.")
+            overwrite = payload.get("overwrite", False)
+            if not isinstance(overwrite, bool):
+                raise ValidationError("overwrite muss ein Wahrheitswert sein.")
+            # Überschreiben bleibt bei der Rolle ``product``: es ist ein
+            # Sammel-Update auf Daten, die diese Rolle einzeln ändern darf. Der
+            # Store legt vor dem ersten Schreiben einen Snapshot an.
             result = await async_import_catalog(
                 runtime.store,
                 source_url=source_url or DEFAULT_CATALOG_URL,
                 image_base_url=image_base_url or DEFAULT_IMAGE_BASE_URL,
                 import_images=import_images,
+                dry_run=dry_run,
+                overwrite=overwrite,
             )
             return web.json_response(result.to_dict())
         except StoreError as err:

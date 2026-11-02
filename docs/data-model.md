@@ -82,8 +82,15 @@ nicht automatisch abgebucht.
 
 `POST /api/frickeldave_store/import/catalog` übernimmt den Live-Katalog der Website
 (`https://frickeldave.de/data/handmade.json`) und die zugehörigen Bilder in den Store.
-Der Import ist eine reine Anlege-Operation: bestehende Produkte bleiben unverändert, es
-gibt keinen Hard-Delete-Pfad.
+Ohne `overwrite` ist der Import eine reine Anlege-Operation: bestehende Produkte bleiben
+unverändert. Es gibt keinen Hard-Delete-Pfad.
+
+Optionen (beide Standard `false`):
+
+| Feld | Wirkung |
+| --- | --- |
+| `dry_run` | lädt und prüft den Katalog, schreibt aber nichts (kein Store-Schreibzugriff, keine Bilddatei, kein Snapshot, kein `updatedAt`) und liefert die Vorschau |
+| `overwrite` | überschreibt vorhandene, nicht archivierte Produkte mit dem Katalogstand |
 
 ### Feldabbildung
 
@@ -98,9 +105,22 @@ gibt keinen Hard-Delete-Pfad.
 | `tags` | `tags` | Liste, case-insensitiv dedupliziert, zusätzlich in die Store-Tag-Liste |
 | `visible`, `customizable` | dito | boolesch, Standard `true` |
 | `stock`, `salesCabinet` | dito | ganze Zahl ≥ 0 |
-| – | `archived` | immer `false` |
-| – | `schemaVersion` | immer `1` |
+| – | `archived` | immer `false` (archivierte Produkte werden nie reaktiviert) |
+| – | `schemaVersion` | aktuelle Schema-Version |
 | – | `createdAt`, `updatedAt` | Zeitstempel des Imports (ISO-8601, `Z`) |
+
+### Überschreiben (`overwrite: true`)
+
+| Feld | Quelle beim Überschreiben |
+| --- | --- |
+| `articleNumber` | lokal (stabil, kein Wechsel) |
+| `createdAt` | lokal (bleibt erhalten) |
+| `name`, `description`, `price`, `size`, `tags`, `visible`, `customizable`, `stock` | Katalog |
+| `category` | lokal – unveränderlich, weil die Artikelnummer sie kodiert |
+| `images` | lokal; nur fehlende Bilder werden ergänzt, nie gelöscht |
+| `archived` | lokal; archivierte Produkte werden übersprungen und nicht reaktiviert |
+| Buchungen (`bookings`) | bleiben erhalten (separater Speicher) |
+| `updatedAt` | Zeitpunkt des Überschreibens |
 
 Panel und Import erzeugen sechsstellige Artikelnummern (Kategoriepräfix + 4 Zeichen). Der
 Import akzeptiert zusätzlich kurze Altbestandsnummern wie `LAX`, damit der gewachsene
@@ -111,13 +131,21 @@ Katalog vollständig übernommen wird; neu angelegte Produkte bleiben sechsstell
 | Zähler | Bedeutung |
 | --- | --- |
 | `created` | neu angelegte Produkte |
-| `skipped` | Artikelnummer existiert bereits (Produkt bleibt unverändert) |
+| `overwritten` | tatsächlich überschriebene Produkte (nur mit `overwrite`) |
+| `skipped` | Artikelnummer existiert bereits (Produkt bleibt unverändert, inkl. archivierter) |
 | `failed` | ungültiges Produkt oder doppelte Artikelnummer im Dokument |
-| `images_imported` | in diesem Lauf geschriebene Bilddateien neu angelegter Produkte |
+| `images_imported` | in diesem Lauf geschriebene Bilddateien (im Dry-Run: würde geschrieben) |
 | `products_total` | Anzahl der Produkte im gelieferten Dokument |
 | `errors` | Liste aus `{"articleNumber", "message"}` |
+| `dry_run` | ob es sich um eine Vorschau handelte |
+| `would_create` | nur Dry-Run: Produkte, die angelegt würden |
+| `would_overwrite` | nur Dry-Run: Produkte, die überschrieben würden (Inhalt weicht ab) |
+| `unchanged` | nur Dry-Run: vorhandene Produkte, die unverändert blieben |
+| `summary` | deutsche Zusammenfassung des Laufs |
 
 Ein zweiter Lauf über dasselbe Dokument liefert `created=0` und `skipped=<products_total>`.
+Mit `overwrite` zählt ein inhaltsgleiches Produkt als `skipped`; nur abweichende
+Katalogstände erhöhen `overwritten`.
 Doppelte Artikelnummern innerhalb eines Dokuments werden nur beim ersten Vorkommen
 angelegt; alle weiteren zählen als `failed`. Produktfehler sind nicht fatal – nur ein
 nicht lesbares oder strukturell ungültiges Dokument (`catalog_invalid`, HTTP 422) oder ein

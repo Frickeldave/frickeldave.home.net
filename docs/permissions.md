@@ -17,7 +17,7 @@
 
 | Rolle | Bedeutung | Endpunkte |
 | --- | --- | --- |
-| `product` | Produktpflege | `/products*`, `/tags*`, `/products/*/stock`, `/products/*/description/suggest`, `/import/catalog` (Standardquellen) |
+| `product` | Produktpflege | `/products*`, `/tags*`, `/products/*/stock`, `/products/*/description/suggest`, `/import/catalog` (Standardquellen, auch `dry_run`/`overwrite`) |
 | `finance` | Finanzen (spätere Ausbaustufe) | derzeit keine Endpunkte |
 | `app_admin` | Anwendungsverwaltung | `/settings`, `/export`, `/import/catalog` mit eigener Quelle |
 
@@ -43,7 +43,7 @@ Rollen sind beliebig kombinierbar.
 | `/api/frickeldave_store/users/{user_id}` | PUT, DELETE | `app_admin` |
 | `/api/frickeldave_store/settings` | GET, PATCH | `app_admin` |
 | `/api/frickeldave_store/export` | POST | `app_admin` |
-| `/api/frickeldave_store/import/catalog` | POST | `product` ohne eigene Quelle, sonst `app_admin` |
+| `/api/frickeldave_store/import/catalog` | POST | `product` ohne eigene Quelle (auch `dry_run`/`overwrite`), sonst `app_admin` |
 | `frickeldave_store/me` | WS | nur Anmeldung |
 | `frickeldave_store/products` | WS | `product` |
 | `frickeldave_store/subscribe` | WS | `product` (bei jedem Push erneut geprüft) |

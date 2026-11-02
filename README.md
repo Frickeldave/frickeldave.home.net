@@ -188,12 +188,25 @@ Der Import übernimmt den bestehenden Website-Katalog
 (`https://frickeldave.de/data/handmade.json`) samt Bildern in den Store. Er ist für die
 Übernahme des Altbestands gedacht und bleibt gefahrlos wiederholbar:
 
-- Zuordnung ausschließlich über die `articleNumber`. Bereits vorhandene Produkte werden
-  **nie überschrieben** (Zähler `skipped`), doppelte Artikelnummern im gelieferten
-  Dokument gelten als `failed`. Ein Import legt nur neue Produkte an und löscht nichts.
+- Zuordnung ausschließlich über die `articleNumber`. Ohne `overwrite` werden bereits
+  vorhandene Produkte **nie überschrieben** (Zähler `skipped`), doppelte Artikelnummern
+  im gelieferten Dokument gelten als `failed`. Ein Import löscht nichts (kein
+  Hard-Delete-Pfad).
+- `dry_run: true` lädt den Katalog und liefert eine vollständige Vorschau, schreibt aber
+  nichts: kein Store-Schreibzugriff, keine Bilddatei, kein Snapshot, kein `updatedAt`.
+  Der Plan trennt `would_create`, `would_overwrite` und `unchanged`.
+- `overwrite: true` überschreibt vorhandene, nicht archivierte Produkte mit dem
+  Katalogstand (Zähler `overwritten`). Übernommen werden `name`, `description`, `price`,
+  `size`, `tags`, `visible`, `customizable` und `stock`/`salesCabinet`. Lokal bleiben
+  Artikelnummer, `createdAt`, Bilder, Buchungen und der Archiv-Status; die Kategorie
+  bleibt ebenfalls lokal, weil die Artikelnummer sie kodiert. Archivierte Produkte
+  werden nie reaktiviert, sondern als `skipped` gemeldet. Vorhandene Bilder werden
+  nicht überschrieben, nur fehlende ergänzt. Der Bestand wird auf den Katalogstand
+  gesetzt; die Buchungshistorie bleibt dabei erhalten, sodass sie vom neuen Bestand
+  abweichen kann.
 - Übernommen werden alle Felder des Live-Schemas: `name`, `description`, `category`,
   `price`, `size`, `tags`, `visible`, `customizable`, `stock`, `salesCabinet`. Neue
-  Produkte erhalten `archived=false`, `schemaVersion=1` sowie `createdAt`/`updatedAt`
+  Produkte erhalten `archived=false`, `schemaVersion=2` sowie `createdAt`/`updatedAt`
   des Imports.
 - Bilder werden aus dem Website-Repository geladen
   (`<image_base_url>/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg`, `NN` = 01…10,
@@ -226,15 +239,44 @@ Beispielantwort für den aktuellen Bestand (63 Produkte):
   "failed": 0,
   "images_imported": 170,
   "products_total": 63,
-  "errors": []
+  "errors": [],
+  "dry_run": false,
+  "would_create": 0,
+  "would_overwrite": 0,
+  "overwritten": 0,
+  "unchanged": 0,
+  "summary": "Import abgeschlossen: 63 neu angelegt, 0 überschrieben, 0 unverändert, 0 fehlerhaft, 170 Bilder importiert."
 }
 ```
 
-Alle Felder im Anfragekörper sind optional: `source_url`, `image_base_url` und
-`import_images` (Standard `true`). Die Standardquellen genügen der Rolle `product`; wer
-eigene `source_url` oder `image_base_url` angibt, braucht `app_admin`. Erlaubt sind
-ausschließlich `https`-URLs auf `frickeldave.de` und `raw.githubusercontent.com`
-(SSRF-Schutz).
+Vorschau desselben Laufs:
+
+```json
+{
+  "created": 0,
+  "skipped": 58,
+  "failed": 0,
+  "images_imported": 4,
+  "products_total": 63,
+  "errors": [],
+  "dry_run": true,
+  "would_create": 2,
+  "would_overwrite": 3,
+  "overwritten": 0,
+  "unchanged": 58,
+  "summary": "Vorschau: 63 Produkte im Katalog, 2 neu, 3 zu überschreiben, 58 unverändert, 0 fehlerhaft, 4 Bilder würden importiert. Es wurde nichts geschrieben."
+}
+```
+
+Alle Felder im Anfragekörper sind optional: `source_url`, `image_base_url`,
+`import_images` (Standard `true`), `dry_run` (Standard `false`) und `overwrite`
+(Standard `false`). Nicht-boolesche Werte für `dry_run`/`overwrite` lehnt der Endpunkt
+mit einer deutschen `validation_error` ab. Die Standardquellen genügen der Rolle
+`product`; wer eigene `source_url` oder `image_base_url` angibt, braucht `app_admin`.
+Auch `overwrite: true` bleibt bei `product`, weil es ein Sammel-Update auf Daten ist,
+die diese Rolle einzeln ändern darf; der Store legt vor dem ersten Schreiben einen
+Snapshot an. Erlaubt sind ausschließlich `https`-URLs auf `frickeldave.de` und
+`raw.githubusercontent.com` (SSRF-Schutz).
 
 ## Veröffentlichen nach dev und prod
 
