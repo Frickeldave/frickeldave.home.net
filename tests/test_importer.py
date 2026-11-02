@@ -247,31 +247,28 @@ async def test_import_creates_full_catalog_with_field_mapping(tmp_path: Path) ->
     assert first["price"] == 10.5
     assert first["size"] == "10cm"
     assert first["tags"] == ["Deko"]
-    assert first["stock"] == 0
-    assert first["salesCabinet"] == 0
+    assert first["stock"] == {"lager": 0, "verkaufsschrank": 0}
     assert first["visible"] is False
     assert first["customizable"] is False
     assert first["archived"] is False
-    assert first["schemaVersion"] == 1
+    assert first["schemaVersion"] == 2
     assert first["images"] == []
     assert first["createdAt"] == first["updatedAt"]
     assert first["createdAt"].endswith("Z")
 
     second = store.get_raw_product("EP0001")
     assert second is not None
-    assert second["stock"] == 1
-    assert second["salesCabinet"] == 1
+    assert second["stock"] == {"lager": 1, "verkaufsschrank": 1}
     assert second["visible"] is True
     assert second["customizable"] is True
     assert second["tags"] == ["Deko", "Hochzeit"]
 
     third = store.get_raw_product("LA0002")
     assert third is not None
-    assert third["stock"] == 2
-    assert third["salesCabinet"] == 0
+    assert third["stock"] == {"lager": 2, "verkaufsschrank": 0}
 
     assert store.get_raw_product("LA0007")["visible"] is False  # type: ignore[index]
-    assert store.get_raw_product("SB0003")["salesCabinet"] == 1  # type: ignore[index]
+    assert store.get_raw_product("SB0003")["stock"]["verkaufsschrank"] == 1  # type: ignore[index]
 
     # Tags landen zusätzlich in der Tag-Liste des Stores.
     assert set(store.tag_names()) == {"Deko", "Hochzeit"}

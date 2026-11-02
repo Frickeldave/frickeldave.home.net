@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from custom_components.frickeldave_store.const import STORAGE_KEY
-from custom_components.frickeldave_store.models import SCHEMA_VERSION, StoreError
+from custom_components.frickeldave_store.models import SCHEMA_VERSION, ConflictError, StoreError
 from custom_components.frickeldave_store.store import CatalogStore, FileBackend
 
 
@@ -95,3 +95,128 @@ def test_image_storage_paths(tmp_path: Path) -> None:
     path = store.images.path_for("LAH3K3", "LAH3K3-01.jpg")
     assert path == tmp_path / "images" / "LAH3K3" / "LAH3K3-01.jpg"
     assert store.images.path_for("LAH3K3", "../../etc/passwd").parent.name == "LAH3K3"
+
+
+async def test_v1_migration_maps_stock_to_default_locations(tmp_path: Path) -> None:
+    store_file = tmp_path / STORAGE_KEY
+    legacy = {
+        "schemaVersion": 1,
+        "products": [
+            {
+                "articleNumber": "LAH3K3",
+                "name": "Schild",
+                "category": "LA",
+                "price": 35,
+                "stock": 4,
+                "salesCabinet": 2,
+            }
+        ],
+        "tags": ["Holz"],
+        "bookings": [
+            {
+                "id": "b1",
+                "articleNumber": "LAH3K3",
+                "type": "in",
+                "quantity": 4,
+                "at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "b2",
+                "articleNumber": "LAH3K3",
+                "type": "transfer",
+                "quantity": 2,
+                "at": "2026-01-02T00:00:00Z",
+            },
+        ],
+        "settings": {
+            "ai": {"endpoint": "x", "model": "m", "prompt": "p", "api_key": "secret"},
+        },
+    }
+    store_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+
+    assert store.locations() == [
+        {"id": "lager", "name": "Lager"},
+        {"id": "verkaufsschrank", "name": "Verkaufsschrank"},
+    ]
+    product = store.get_raw_product("LAH3K3")
+    assert product is not None
+    assert product["stock"] == {"lager": 4, "verkaufsschrank": 2}
+
+    bookings = {item["id"]: item for item in store.bookings()}
+    assert bookings["b1"]["locationId"] == "lager"
+    assert bookings["b2"]["locationId"] == "lager"
+    assert bookings["b2"]["targetLocationId"] == "verkaufsschrank"
+
+    snapshots = sorted((tmp_path / "backups").glob("*.json"))
+    assert len(snapshots) == 1
+    assert "pre-load-v1" in snapshots[0].name
+    assert json.loads(store_file.read_text(encoding="utf-8"))["schemaVersion"] == 2
+    # Bestand bleibt über einen Reload hinweg erhalten (idempotent).
+    reloaded = CatalogStore(data_dir=tmp_path)
+    await reloaded.async_load()
+    assert reloaded.get_raw_product("LAH3K3")["stock"] == {  # type: ignore[index]
+        "lager": 4,
+        "verkaufsschrank": 2,
+    }
+
+
+async def test_rename_keeps_stock_and_delete_requires_empty_location(tmp_path: Path) -> None:
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+    product = await _add_product(store)
+    raw = store.get_raw_product(str(product["articleNumber"]))
+    assert raw is not None
+    raw["stock"] = {"lager": 3, "verkaufsschrank": 2}
+    await store.async_save()
+
+    renamed = store.set_locations(
+        [
+            {"id": "lager", "name": "Werkstatt"},
+            {"id": "verkaufsschrank", "name": "Verkaufsschrank"},
+        ]
+    )
+    assert renamed[0] == {"id": "lager", "name": "Werkstatt"}
+    assert store.get_raw_product(str(product["articleNumber"]))["stock"] == {  # type: ignore[index]
+        "lager": 3,
+        "verkaufsschrank": 2,
+    }
+
+    with pytest.raises(ConflictError) as err:
+        store.set_locations([{"id": "lager", "name": "Werkstatt"}])
+    assert "Verkaufsschrank" in err.value.message
+    assert "2 Stück" in err.value.message
+    assert store.locations()[1]["id"] == "verkaufsschrank"
+
+    # Positioneller Weg (Options-Flow): Zeile 1 benennt um, Zeile 2 bleibt.
+    positional = store.set_locations(["Werkstatt", "Verkaufsschrank"], match_by="position")
+    assert positional[0]["id"] == "lager"
+
+    # Eine neue, leere Lagerstätte darf hinzukommen und wieder verschwinden.
+    with_new = store.set_locations(["Werkstatt", "Verkaufsschrank", "Auto"], match_by="position")
+    assert with_new[2]["id"] == "auto"
+    assert store.get_raw_product(str(product["articleNumber"]))["stock"]["auto"] == 0  # type: ignore[index]
+
+    raw = store.get_raw_product(str(product["articleNumber"]))
+    assert raw is not None
+    raw["stock"]["verkaufsschrank"] = 0
+    store.set_locations([{"id": "lager", "name": "Werkstatt"}, {"id": "auto", "name": "Auto"}])
+    assert set(store.locations()[0]) == {"id", "name"}
+    assert [item["id"] for item in store.locations()] == ["lager", "auto"]
+    contents = store.get_raw_product(str(product["articleNumber"]))["stock"]  # type: ignore[index]
+    assert "verkaufsschrank" not in contents
+
+    # Eigene IDs überleben einen Reload (Coercion darf sie nicht auf Defaults zurücksetzen).
+    await store.async_save()
+    reloaded = CatalogStore(data_dir=tmp_path)
+    await reloaded.async_load()
+    assert reloaded.locations() == [
+        {"id": "lager", "name": "Werkstatt"},
+        {"id": "auto", "name": "Auto"},
+    ]
+    assert reloaded.get_raw_product(str(product["articleNumber"]))["stock"] == {  # type: ignore[index]
+        "lager": 3,
+        "auto": 0,
+    }

@@ -58,6 +58,11 @@ Die stabile HA-Benutzer-ID findet man in Home Assistant unter **Einstellungen �
 | `ai_api_key` | Zugangsschlüssel; wird nie zurückgegeben, geloggt oder exportiert |
 | `ai_prompt` | Prompt, Standard „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“ |
 | `export_path` | Exportverzeichnis relativ zu `config/` (Standard `frickeldave_store/export`) |
+| `stock_locations` | Lagerstätten, eine pro Zeile (Standard: `Lager` und `Verkaufsschrank`); Zeile 1 → `stock`, Zeile 2 → `salesCabinet` im Website-Export |
+| `github_repository` | Website-Repository, Standard `Frickeldave/frickeldave.github.io` |
+| `github_dev_branch` | Integrationsbranch, Standard `dev` |
+| `github_prod_workflow` | Produktions-Workflow, Standard `fd-deploy-prd.yml` |
+| `github_token` | Fine-grained Token mit `Contents: write` und `Actions: write`; wird nie zurückgegeben, geloggt oder exportiert |
 
 YAML-Konfiguration wird nicht unterstützt (`config_entry_only_config_schema`).
 
@@ -88,7 +93,7 @@ sodass ein Rechteentzug ohne Neustart greift.
 | --- | --- |
 | `product` | Produkte, Bilder, Tags, Bestände, Sichtbarkeit, Archivierung, KI-Vorschläge |
 | `finance` | spätere Finanzfunktionen (in dieser Ausbaustufe keine Endpunkte) |
-| `app_admin` | Einstellungen, Export, Benutzerfreigaben |
+| `app_admin` | Einstellungen, Export, Veröffentlichen (dev/prod), Benutzerfreigaben |
 
 Rollen sind kombinierbar. Finanzrechte folgen **nie** implizit aus `product` oder
 `app_admin`. Jede geschützte HTTP- und WebSocket-Route prüft serverseitig pro Anfrage;
@@ -135,10 +140,37 @@ der Wechsel mit `409 conflict` ab. Schreibvorgänge sind atomar (temporäre Date
 `os.replace`), Datei-I/O läuft im Executor.
 Details: [docs/backup-restore.md](docs/backup-restore.md).
 
+## Lagerstätten und Bestände
+
+Bestände werden **je Lagerstätte** geführt. Standard sind `Lager` und
+`Verkaufsschrank`; damit bleibt das bisherige Verhalten unverändert. Die Administration
+pflegt die Liste an zwei Stellen, die dieselbe Quelle nutzen:
+
+- **Konfigurationspanel** (Zahnrad am Integrationseintrag, `PATCH /settings`)
+- **Options-Flow** (Einstellungen → Geräte & Dienste → Frickeldave Store → Konfigurieren),
+  eine Zeile pro Lagerstätte
+
+Regeln: mindestens eine Lagerstätte, eindeutige Namen, keine leeren Namen, maximal 40
+Zeichen und 20 Einträge. **Umbenennen erhält den Bestand** (die interne ID bleibt
+stabil). Das **Löschen** einer Lagerstätte mit Bestand wird mit `409 conflict`
+abgelehnt und nennt Produkte und Stückzahl; erst umbuchen, dann löschen.
+
+Buchungen (`POST /products/{article_number}/stock`) tragen `locationId`; eine
+Umlagerung zusätzlich `targetLocationId`. Ohne Angabe gilt die erste Lagerstätte als
+Quelle und die zweite als Ziel. `GET /locations` liefert `id`, `name`, `position`,
+`stock_total` und `products_with_stock` für alle mit der Rolle `product`.
+
+Beim Laden migriert die Integration Bestände der Schema-Version 1 verlustfrei:
+`stock` → erste Lagerstätte, `salesCabinet` → zweite. Vorher wird ein Snapshot unter
+`backups/pre-load-v1-*.json` abgelegt.
+
 ## Katalogexport
 
 Der Export ist idempotent, enthält ausschließlich nicht archivierte Produkte und schreibt
-das Schema von `public/data/handmade.json` (inklusive `stock` und `salesCabinet`).
+das Schema von `public/data/handmade.json`. Weil die Website nur zwei Zahlen kennt,
+bildet der Export die **erste** Lagerstätte auf `stock` und die **zweite** auf
+`salesCabinet` ab; ohne zweite Lagerstätte bleibt `salesCabinet` bei `0`. Diese
+Abbildung ist unabhängig von den Namen und bleibt stabil, solange die Reihenfolge bleibt.
 Artikelnummer bleibt der Schlüssel; Bilder werden als
 `src/assets/handmade/<kategorie>/<artikelnummer>/<artikelnummer>-NN.jpg` abgelegt, das
 Hauptbild zuerst.
@@ -204,12 +236,56 @@ eigene `source_url` oder `image_base_url` angibt, braucht `app_admin`. Erlaubt s
 ausschließlich `https`-URLs auf `frickeldave.de` und `raw.githubusercontent.com`
 (SSRF-Schutz).
 
+## Veröffentlichen nach dev und prod
+
+`POST /publish` (`app_admin`) überträgt den Export über die GitHub-Daten-API in das
+Website-Repository und löst das passende Deployment aus:
+
+| Ziel | Ablauf |
+| --- | --- |
+| `dev` | Commit auf den Integrationsbranch `dev` → `fd-ci` → `fd-deploy-dev` (Pre-Release `dev-v<version>`) |
+| `prod` | Commit auf `dev`, danach `workflow_dispatch` von `fd-deploy-prd` – der einzige Weg, `main` zu aktualisieren (Merge `dev` → `main`, Pages-Deploy, stabiles Release) |
+
+Ein direkter Commit auf `main` ist im Website-Repository unzulässig und wird von der
+Integration nie versucht. Ist der Stand bereits identisch, entsteht kein zweiter Commit;
+`prod` dispatcht dennoch, damit ein liegengebliebener Stand promotet werden kann.
+
+Mit `"dry_run": true` liefert derselbe Endpunkt einen vollständigen Plan je Datei
+(`added`/`changed`/`removed`/`unchanged`), Zählungen für Produkte und Bilder,
+Zielbranch, Deployment-Hinweis und eine deutsche Zusammenfassung. Der Dry-Run liest
+ausschließlich: kein Commit, kein Workflow-Dispatch, kein Store-Schreibzugriff.
+
+Fehlt das Token, antwortet der Endpunkt mit `400 publish_token_missing` und einer
+deutschen Meldung. Ein abgelehntes Token ergibt `502 github_unauthorized`, ein
+unbekanntes Repository `404 github_not_found`, ein währenddessen bewegter Branch
+`409 github_conflict`.
+
 ## KI-Beschreibungen
 
 Der Vorschlag wird **nie automatisch gespeichert**. Es werden nur Produktdaten und
 Produktbilder übertragen; Bilder werden vorher von EXIF/GPS und Textmetadaten befreit.
 Kunden-, Finanz- und personenbezogene Daten sind ausgeschlossen. Fehler, Timeouts und
 Nutzungslimits werden als lesbare Meldung angezeigt.
+
+`POST /products/{article_number}/description/suggest` akzeptiert optional
+`{"instructions": "..."}` (max. 2000 Zeichen); der Text wird als zusätzlicher Abschnitt
+an den konfigurierten Basis-Prompt gehängt. Ohne das Feld bleibt das Verhalten
+unverändert. Die Antwort enthält neben `suggestion` die Tag-Vorschläge:
+
+```json
+{
+  "suggestion": "…",
+  "tags": ["Holz"],
+  "rejected_tags": ["Rakete"],
+  "available_tags": ["Deko", "Holz"],
+  "instructions_used": true
+}
+```
+
+Serverseitig werden ausschließlich **vorhandene** Tags durchgelassen (Vergleich ohne
+Groß-/Kleinschreibung, Ausgabe in der gespeicherten Schreibweise). Neue Tags legt nur der
+Nutzer über `POST /tags` an; verworfene Vorschläge stehen in `rejected_tags`, damit die
+Oberfläche auf „Neue Tags musst du selbst anlegen“ hinweisen kann.
 
 ## API
 
@@ -233,20 +309,25 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | GET | `/users` (nur `app_admin`) |
 | PUT, DELETE | `/users/{user_id}` (nur `app_admin`) |
 | GET, PATCH | `/settings` (nur `app_admin`) |
+| GET | `/locations` (`product`) |
+| POST | `/publish` (nur `app_admin`; `dry_run` möglich) |
 | POST | `/export` (nur `app_admin`) |
 | POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
 
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
-`customizable`, `in_stock`, `in_cabinet`, `visibility=visible|invisible`, `archived`,
+`customizable`, `in_stock`/`in_cabinet` (erste/zweite Lagerstätte), `location` +
+`in_location` (beliebige Lagerstätte), `visibility=visible|invisible`, `archived`,
 `sort=name|price`, `order=asc|desc`, `limit`, `offset`.
 
-`GET /settings` liefert neben `ai`, `users` und `export_path` den Abschnitt
-`storage` mit `data_path`, `effective_path`, `backup_included`,
-`exclude_from_backup`, `paths` (Metadaten, Bilder, Snapshots) und `choices`.
-`PATCH /settings` akzeptiert `{"ai": {...}}` und `{"storage": {"data_path":
+`GET /settings` liefert neben `ai`, `publish` (ohne Token, nur `token_set`), `users`,
+`export_path` und `locations` den Abschnitt `storage` mit `data_path`,
+`effective_path`, `backup_included`, `exclude_from_backup`, `paths` (Metadaten, Bilder,
+Snapshots) und `choices`. `PATCH /settings` akzeptiert `{"ai": {...}}`,
+`{"publish": {"repository|dev_branch|prod_branch|prod_workflow|token": ...}}`,
+`{"locations": [{"id"?: "...", "name": "..."}]}` und `{"storage": {"data_path":
 "config|share|media"}}`; nach einer erfolgreichen Migration enthält die Antwort
 `"reload_required": true`. Ungültige Werte oder unbekannte Felder → `400`, ein
-belegtes Ziel → `409`.
+belegtes Ziel oder eine Lagerstätte mit Bestand → `409`.
 
 `GET /users` liefert `users` (Freigaben mit `user_id`, `name`, `roles`, `role_labels`),
 `available_users` (aktive, noch nicht freigegebene HA-Benutzer – nur ID und Name) sowie

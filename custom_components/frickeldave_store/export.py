@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .models import Product
+from .models import Product, default_locations
 from .store import CatalogStore, ImageStorage, write_json_atomic
 
 CATALOG_SCHEMA = "http://json-schema.org/draft-04/schema#"
@@ -22,7 +22,30 @@ CATALOG_RELATIVE_PATH = Path("public/data/handmade.json")
 IMAGES_RELATIVE_PATH = Path("src/assets/handmade")
 
 
-def build_catalog(products: Iterable[Product], *, visible_only: bool = False) -> dict[str, Any]:
+def export_stock_fields(
+    product: Product, locations: list[dict[str, str]] | None = None
+) -> dict[str, int]:
+    """Website-Schema ``stock``/``salesCabinet`` aus den Lagerstätten ableiten.
+
+    Die Website kennt nur zwei Zahlen. Die erste Lagerstätte wird zu ``stock``,
+    die zweite zu ``salesCabinet``; ohne zweite Lagerstätte bleibt
+    ``salesCabinet`` bei 0. Diese Abbildung ist bewusst stabil und unabhängig
+    von den Namen der Lagerstätten.
+    """
+
+    ids = [str(item["id"]) for item in (locations or default_locations())]
+    return {
+        "salesCabinet": product.stock_for(ids[1]) if len(ids) > 1 else 0,
+        "stock": product.stock_for(ids[0]) if ids else 0,
+    }
+
+
+def build_catalog(
+    products: Iterable[Product],
+    *,
+    visible_only: bool = False,
+    locations: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     """Katalog im Live-Schema der Website erzeugen (ohne interne Felder)."""
 
     entries: list[dict[str, Any]] = []
@@ -40,8 +63,7 @@ def build_catalog(products: Iterable[Product], *, visible_only: bool = False) ->
                 "size": product.size,
                 "visible": product.visible,
                 "customizable": product.customizable,
-                "salesCabinet": product.sales_cabinet,
-                "stock": product.stock,
+                **export_stock_fields(product, locations),
                 "articleNumber": product.article_number,
                 "category": product.category,
             }
@@ -53,7 +75,19 @@ def build_catalog(products: Iterable[Product], *, visible_only: bool = False) ->
     }
 
 
-def _ordered_images(product: Product) -> list[Any]:
+def catalog_bytes(
+    products: Iterable[Product],
+    *,
+    locations: list[dict[str, str]] | None = None,
+    visible_only: bool = False,
+) -> bytes:
+    """Serialisierter Katalog, byte-identisch zum Datei-Export."""
+
+    catalog = build_catalog(products, visible_only=visible_only, locations=locations)
+    return (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def ordered_images(product: Product) -> list[Any]:
     main = [image for image in product.images if image.is_main]
     rest = sorted(
         (image for image in product.images if not image.is_main), key=lambda item: item.name
@@ -64,7 +98,7 @@ def _ordered_images(product: Product) -> list[Any]:
     return ordered
 
 
-def _desired_image_name(product: Product, index: int, source_name: str) -> str:
+def desired_image_name(product: Product, index: int, source_name: str) -> str:
     suffix = Path(source_name).suffix.casefold() or ".jpg"
     return f"{product.article_number}-{index:02d}{suffix}"
 
@@ -73,8 +107,8 @@ def _sync_images(product: Product, images: ImageStorage, images_root: Path) -> P
     target_dir = images_root / product.category / product.article_number
     target_dir.mkdir(parents=True, exist_ok=True)
     desired: set[str] = set()
-    for index, image in enumerate(_ordered_images(product), start=1):
-        target_name = _desired_image_name(product, index, image.name)
+    for index, image in enumerate(ordered_images(product), start=1):
+        target_name = desired_image_name(product, index, image.name)
         desired.add(target_name)
         target = target_dir / target_name
         source = images.path_for(product.article_number, image.name)
@@ -104,10 +138,11 @@ def export_catalog_sync(
     target_dir: Path,
     *,
     visible_only: bool = False,
+    locations: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Export synchron ausführen (läuft im Executor des Aufrufers)."""
 
-    catalog = build_catalog(products, visible_only=visible_only)
+    catalog = build_catalog(products, visible_only=visible_only, locations=locations)
     catalog_path = target_dir / CATALOG_RELATIVE_PATH
     images_root = target_dir / IMAGES_RELATIVE_PATH
     image_count = 0
@@ -120,8 +155,8 @@ def export_catalog_sync(
             _sync_images(product, images, images_root)
             image_count += len(product.images)
 
-    serialised = json.dumps(catalog, ensure_ascii=False, indent=2) + "\n"
-    current = catalog_path.read_text(encoding="utf-8") if catalog_path.is_file() else None
+    serialised = (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    current = catalog_path.read_bytes() if catalog_path.is_file() else None
     if current != serialised:
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(catalog_path, catalog)
@@ -139,6 +174,7 @@ async def async_export_catalog(
     target_dir: Path,
     *,
     visible_only: bool = False,
+    locations: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Export im Executor ausführen (kein blockierendes I/O im Event-Loop)."""
 
@@ -148,19 +184,29 @@ async def async_export_catalog(
         images,
         target_dir,
         visible_only=visible_only,
+        locations=locations,
     )
 
 
 def export_store_sync(data: dict[str, Any], target_dir: Path) -> dict[str, Any]:
     """Export direkt aus einem Store-JSON (CLI-Pfad, ohne HA-Laufzeit)."""
 
-    products = [Product.from_dict(item) for item in data.get("products", []) or []]
+    locations = [
+        {"id": str(item["id"]), "name": str(item["name"])}
+        for item in (data.get("locations") or default_locations())
+    ]
+    ids = [item["id"] for item in locations]
+    products = [
+        Product.from_dict(item, location_ids=ids) for item in data.get("products", []) or []
+    ]
     images_base = target_dir / "images"
-    return export_catalog_sync(products, ImageStorage(images_base), target_dir)
+    return export_catalog_sync(products, ImageStorage(images_base), target_dir, locations=locations)
 
 
 async def async_export_store(store: CatalogStore, target_dir: Path) -> dict[str, Any]:
-    return await async_export_catalog(store.products(), store.images, target_dir)
+    return await async_export_catalog(
+        store.products(), store.images, target_dir, locations=store.locations()
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,9 +248,18 @@ def main(argv: list[str] | None = None) -> int:
     payload = json.loads(args.store.read_text(encoding="utf-8"))
     if isinstance(payload, dict) and "data" in payload and "products" not in payload:
         payload = payload["data"]
-    products = [Product.from_dict(item) for item in payload.get("products", []) or []]
+    locations = [
+        {"id": str(item["id"]), "name": str(item["name"])}
+        for item in (payload.get("locations") or default_locations())
+    ]
+    ids = [item["id"] for item in locations]
+    products = [
+        Product.from_dict(item, location_ids=ids) for item in payload.get("products", []) or []
+    ]
     images = ImageStorage(args.images_dir or (args.target / "images"))
-    result = export_catalog_sync(products, images, args.target, visible_only=args.visible_only)
+    result = export_catalog_sync(
+        products, images, args.target, visible_only=args.visible_only, locations=locations
+    )
 
     manifest = args.target / "frickeldave_store_export.json"
     write_json_atomic(manifest, result)

@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "frickeldave_store"
 NAME: Final = "Frickeldave Store"
 MANUFACTURER: Final = "Frickeldave"
-VERSION: Final = "0.1.8"
+VERSION: Final = "0.1.9"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/frickeldave.home.net"
 
@@ -16,8 +16,8 @@ CONFIG_ENTRY_TITLE: Final = "Frickeldave Store"
 #: HA-Store-Schlüssel und -Pfad. HA legt die Datei unter ``config/<STORAGE_PATH>/<STORAGE_KEY>`` ab.
 STORAGE_KEY: Final = "frickeldave_store.data"
 STORAGE_PATH: Final = "frickeldave_store"
-STORAGE_VERSION: Final = 1
-STORAGE_MINOR_VERSION: Final = 1
+STORAGE_VERSION: Final = 2
+STORAGE_MINOR_VERSION: Final = 0
 
 #: Datenverzeichnis unterhalb von ``config/`` (Backups des HA-Containers enthalten es).
 DATA_DIR_NAME: Final = "frickeldave_store"
@@ -44,6 +44,13 @@ DEFAULT_AI_PROMPT: Final = (
 )
 
 DEFAULT_EXPORT_PATH: Final = "frickeldave_store/export"
+
+#: Veröffentlichung im Website-Repository. ``dev`` ist der Integrationsbranch,
+#: ``main`` wird ausschließlich vom Workflow ``fd-deploy-prd`` aktualisiert.
+DEFAULT_PUBLISH_REPOSITORY: Final = "Frickeldave/frickeldave.github.io"
+DEFAULT_PUBLISH_DEV_BRANCH: Final = "dev"
+DEFAULT_PUBLISH_PROD_BRANCH: Final = "main"
+DEFAULT_PUBLISH_PROD_WORKFLOW: Final = "fd-deploy-prd.yml"
 
 #: Katalogimport: vertrauenswürdige Quellen und SSRF-Allowlist.
 DEFAULT_CATALOG_URL: Final = "https://frickeldave.de/data/handmade.json"

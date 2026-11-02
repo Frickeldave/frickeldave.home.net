@@ -203,8 +203,7 @@ def test_filter_combination_semantics_directly() -> None:
         name="Schild",
         category="LA",
         tags=["Hochzeit", "Holz"],
-        stock=2,
-        sales_cabinet=1,
+        stock={"lager": 2, "verkaufsschrank": 1},
     )
     assert product_matches(product, ProductFilter(categories=["LA"]))
     assert not product_matches(product, ProductFilter(categories=["EP"]))
@@ -285,22 +284,24 @@ async def test_stock_bookings_update_both_counters(tmp_path: Path) -> None:
     result = await service.async_book_stock(
         product.article_number, {"type": "in", "quantity": 5}, ha_user_id="user-1"
     )
-    assert result["product"]["stock"] == 5
+    assert result["product"]["stock"]["lager"] == 5
     assert result["booking"]["ha_user_id"] == "user-1"
+    assert result["booking"]["locationId"] == "lager"
 
     result = await service.async_book_stock(
         product.article_number, {"type": "transfer", "quantity": 2}
     )
-    assert result["product"]["stock"] == 3
-    assert result["product"]["salesCabinet"] == 2
+    assert result["product"]["stock"]["lager"] == 3
+    assert result["product"]["stock"]["verkaufsschrank"] == 2
+    assert result["booking"]["targetLocationId"] == "verkaufsschrank"
 
     result = await service.async_book_stock(product.article_number, {"type": "out", "quantity": 1})
-    assert result["product"]["stock"] == 2
+    assert result["product"]["stock"]["lager"] == 2
 
     result = await service.async_book_stock(
         product.article_number, {"type": "correction", "quantity": 7}
     )
-    assert result["product"]["stock"] == 7
+    assert result["product"]["stock"]["lager"] == 7
 
     bookings = await service.async_list_bookings(product.article_number)
     assert len(bookings) == 4

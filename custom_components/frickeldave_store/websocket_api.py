@@ -29,6 +29,8 @@ _FILTER_NAMES: tuple[str, ...] = (
     "customizable",
     "in_stock",
     "in_cabinet",
+    "location",
+    "in_location",
     "visibility",
     "archived",
     "sort",
@@ -47,6 +49,8 @@ _FILTER_SCHEMA: dict[Any, Any] = {
     schema_lib.Optional("customizable"): bool,
     schema_lib.Optional("in_stock"): bool,
     schema_lib.Optional("in_cabinet"): bool,
+    schema_lib.Optional("location"): str,
+    schema_lib.Optional("in_location"): bool,
     schema_lib.Optional("visibility"): str,
     schema_lib.Optional("archived"): bool,
     schema_lib.Optional("sort", default="name"): str,
@@ -162,7 +166,10 @@ def _list_sync(runtime: FrickeldaveStoreRuntime, filters: ProductFilter) -> tupl
 
     from .products import product_matches, sort_products
 
-    products = [item for item in runtime.store.products() if product_matches(item, filters)]
+    locations = runtime.store.locations()
+    products = [
+        item for item in runtime.store.products() if product_matches(item, filters, locations)
+    ]
     products = sort_products(products, filters.sort, filters.order)
     total = len(products)
     if filters.offset:

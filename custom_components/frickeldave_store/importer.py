@@ -33,9 +33,11 @@ from .models import (
     Product,
     StoreError,
     ValidationError,
+    default_location_ids,
     normalise_bool,
     normalise_price,
     normalise_stock,
+    normalise_stock_map,
     normalise_tags,
     normalise_text,
     to_iso,
@@ -124,8 +126,8 @@ def validate_import_url(url: Any, *, label: str) -> str:
     return value
 
 
-def map_catalog_product(raw: Any, *, stamp: str) -> Product:
-    """Ein Katalogprodukt in das Store-Modell überführen (Schema-Version 1)."""
+def map_catalog_product(raw: Any, *, stamp: str, location_ids: list[str] | None = None) -> Product:
+    """Ein Katalogprodukt in das Store-Modell überführen (Schema-Version 2)."""
 
     if not isinstance(raw, dict):
         raise ValidationError("Produkt muss ein JSON-Objekt sein.")
@@ -143,6 +145,11 @@ def map_catalog_product(raw: Any, *, stamp: str) -> Product:
     if not name:
         raise ValidationError("Name ist ein Pflichtfeld.")
 
+    ids = list(location_ids or default_location_ids())
+    stock = normalise_stock_map(raw.get("stock", 0), ids, field_name="stock")
+    if raw.get("salesCabinet") is not None and len(ids) > 1:
+        stock[ids[1]] = normalise_stock(raw.get("salesCabinet"), "salesCabinet")
+
     return Product(
         article_number=article_number,
         name=name,
@@ -153,8 +160,7 @@ def map_catalog_product(raw: Any, *, stamp: str) -> Product:
         tags=normalise_tags(raw.get("tags", [])),
         customizable=normalise_bool(raw.get("customizable", True)),
         visible=normalise_bool(raw.get("visible", True)),
-        stock=normalise_stock(raw.get("stock", 0), "stock"),
-        sales_cabinet=normalise_stock(raw.get("salesCabinet", 0), "salesCabinet"),
+        stock=stock,
         images=[],
         archived=False,
         created_at=stamp,
@@ -221,7 +227,7 @@ def _collect_candidates(
         if isinstance(raw, dict):
             article_number = str(raw.get("articleNumber", "")).strip().upper()
         try:
-            product = map_catalog_product(raw, stamp=moment)
+            product = map_catalog_product(raw, stamp=moment, location_ids=store.location_ids())
         except StoreError as err:
             result.failed += 1
             result.add_error(article_number, err.message)

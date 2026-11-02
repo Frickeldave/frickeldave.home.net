@@ -25,28 +25,40 @@
         "title": "Frickeldave Store – settings",
         "data": {
           "users": "Authorised Home Assistant users (ID: roles)",
+          "stock_locations": "Storage locations (one per line, order matters)",
           "ai_endpoint": "AI endpoint",
           "ai_model": "AI model",
           "ai_api_key": "AI API key",
           "ai_prompt": "Prompt for descriptions",
           "export_path": "Export directory (relative to config/)",
-          "data_path": "Data location"
+          "data_path": "Data location",
+          "github_repository": "Website repository (owner/name)",
+          "github_dev_branch": "Integration branch (dev)",
+          "github_prod_workflow": "Production workflow (fd-deploy-prd.yml)",
+          "github_token": "GitHub token (write access only)"
         },
         "data_description": {
           "users": "One line per user, for example `ha_user_id: product,finance,app_admin`.",
+          "stock_locations": "One line per storage location, for example “Lager” and “Verkaufsschrank”. Line 1 becomes `stock` in the website export, line 2 becomes `salesCabinet`. Renaming keeps stock; deleting is rejected while stock is booked there.",
           "ai_endpoint": "Full URL of the chat completions API.",
           "ai_model": "Default: deepseek-flash (accepts images).",
           "ai_api_key": "Never returned, logged or exported. Leave empty to keep the stored key.",
           "ai_prompt": "Default: “Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.”",
           "export_path": "The export writes the catalogue to public/data/handmade.json and images to src/assets/handmade/, relative to the configured directory.",
-          "data_path": "config: included in Home Assistant backups (default). share/media: excluded from backups, separate backup required; the directory must be mounted."
+          "data_path": "config: included in Home Assistant backups (default). share/media: excluded from backups, separate backup required; the directory must be mounted.",
+          "github_repository": "Website repository. Commits go to the integration branch; main is only updated by the fd-deploy-prd workflow.",
+          "github_dev_branch": "Branch for publications. A commit here triggers fd-ci and fd-deploy-dev.",
+          "github_prod_workflow": "Workflow that promotes dev to main and deploys production.",
+          "github_token": "Fine-grained token with Contents: write and Actions: write. Never returned, logged or exported. Leave empty to keep the stored token."
         }
       }
     },
     "error": {
       "invalid_users": "Invalid grants. Use one line per user in the format `ha_user_id: role,role` with roles product, finance or app_admin.",
       "invalid_data_path": "The data location is not available or not writable. For share/media the directory must be mounted as a volume.",
-      "target_not_empty": "The target directory already contains catalogue data. Empty it or choose another location."
+      "target_not_empty": "The target directory already contains catalogue data. Empty it or choose another location.",
+      "invalid_locations": "Invalid storage locations. At least one, no empty or duplicate names (max. 40 characters).",
+      "location_in_use": "A storage location still holds stock and cannot be deleted. Move the stock first."
     }
   }
 }

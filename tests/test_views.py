@@ -21,6 +21,7 @@ from custom_components.frickeldave_store.views import (
     DescriptionSuggestView,
     ExportView,
     ImagesView,
+    LocationsView,
     MeView,
     ProductsView,
     ProductView,
@@ -63,6 +64,7 @@ class FakeRequest:
         self.query = query or {}
         self._body = body
         self._upload = upload
+        self.can_read_body = body is not None
 
     def get(self, key: str, default: Any = None) -> Any:
         if key == "hass_user":
@@ -82,7 +84,7 @@ class FailingProvider:
     def __init__(self, error: AIError) -> None:
         self._error = error
 
-    async def async_suggest(self, product: Any, images: Any) -> str:
+    async def async_suggest(self, product: Any, images: Any, **kwargs: Any) -> Any:
         raise self._error
 
     async def async_close(self) -> None:
@@ -285,3 +287,130 @@ async def test_unknown_user_cannot_reach_any_protected_view(tmp_path: Path, role
         handler = getattr(view, method)
         response = await handler(FakeRequest(hass, "ghost", body={"name": "x", "category": "LA"}))
         assert response.status == 403
+
+
+async def test_locations_endpoint_lists_stock_for_product_role(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
+    await runtime.products.async_create(
+        {"name": "Schild", "category": "LA", "stock": {"lager": 2, "verkaufsschrank": 0}}
+    )
+
+    response = await LocationsView().get(FakeRequest(hass, "user-1"))
+    assert response.status == 200
+    locations = _payload(response)["locations"]
+    assert [item["id"] for item in locations] == ["lager", "verkaufsschrank"]
+    assert [item["name"] for item in locations] == ["Lager", "Verkaufsschrank"]
+    assert locations[0]["position"] == 0
+    assert locations[0]["stock_total"] == 2
+    assert locations[0]["products_with_stock"] == 1
+    assert locations[1]["stock_total"] == 0
+
+    denied = await LocationsView().get(FakeRequest(hass, "ghost"))
+    assert denied.status == 403
+
+
+async def test_settings_patch_renames_and_deletes_locations(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
+    product = await runtime.products.async_create(
+        {"name": "Schild", "category": "LA", "stock": {"lager": 2, "verkaufsschrank": 1}}
+    )
+
+    renamed = await SettingsView().patch(
+        FakeRequest(
+            hass,
+            "admin",
+            body={
+                "locations": [
+                    {"id": "lager", "name": "Werkstatt"},
+                    {"id": "verkaufsschrank", "name": "Verkaufsschrank"},
+                ]
+            },
+        )
+    )
+    assert renamed.status == 200
+    body = _payload(renamed)
+    assert [item["name"] for item in body["locations"]] == ["Werkstatt", "Verkaufsschrank"]
+    assert runtime.store.get_product(product.article_number).stock == {
+        "lager": 2,
+        "verkaufsschrank": 1,
+    }
+
+    rejected = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"locations": [{"id": "lager", "name": "Werkstatt"}]})
+    )
+    assert rejected.status == 409
+    error = _payload(rejected)["error"]
+    assert error["code"] == "conflict"
+    assert "Verkaufsschrank" in error["message"]
+    assert "1 Stück" in error["message"]
+    assert len(runtime.store.locations()) == 2
+
+
+async def test_settings_patch_publish_token_is_write_only(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
+    response = await SettingsView().patch(
+        FakeRequest(
+            hass,
+            "admin",
+            body={"publish": {"token": "ghp-streng-geheim", "repository": "a/b"}},
+        )
+    )
+    assert response.status == 200
+    assert b"ghp-streng-geheim" not in response.body
+    body = _payload(response)
+    assert body["publish"]["token_set"] is True
+    assert "token" not in body["publish"]
+    assert body["publish"]["repository"] == "a/b"
+
+    # Fehlendes Token behält das gespeicherte Geheimnis.
+    kept = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"publish": {"dev_branch": "dev"}})
+    )
+    assert kept.status == 200
+    assert runtime.store.settings["publish"]["token"] == "ghp-streng-geheim"
+
+
+async def test_description_suggest_accepts_optional_instructions(tmp_path: Path) -> None:
+    class RecordingProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def async_suggest(self, product: Any, images: Any, **kwargs: Any) -> Any:
+            from custom_components.frickeldave_store.ai import Suggestion
+
+            self.calls.append(kwargs)
+            return Suggestion(text="Vorschlag", tags=["Holz", "Neu"])
+
+        async def async_close(self) -> None:
+            return None
+
+    provider = RecordingProvider()
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]}, provider=provider)
+    create = await ProductsView().post(
+        FakeRequest(hass, "user-1", body={"name": "Schild", "category": "LA"})
+    )
+    article = _payload(create)["articleNumber"]
+    runtime.store.add_tag("Holz")
+    await runtime.store.async_save()
+
+    plain = await DescriptionSuggestView().post(FakeRequest(hass, "user-1"), article)
+    assert plain.status == 200
+    assert _payload(plain)["instructions_used"] is False
+    assert provider.calls[0]["instructions"] == ""
+
+    extended = await DescriptionSuggestView().post(
+        FakeRequest(hass, "user-1", body={"instructions": "Erwähne die Gravur."}), article
+    )
+    assert extended.status == 200
+    result = _payload(extended)
+    assert provider.calls[1]["instructions"] == "Erwähne die Gravur."
+    assert result["instructions_used"] is True
+    assert result["tags"] == ["Holz"]
+    assert result["rejected_tags"] == ["Neu"]
+    assert set(result["available_tags"]) == {"Holz"}
+    assert "Neu" not in runtime.store.tag_names()
+
+    invalid = await DescriptionSuggestView().post(
+        FakeRequest(hass, "user-1", body={"unbekannt": True}), article
+    )
+    assert invalid.status == 400

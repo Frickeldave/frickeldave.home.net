@@ -12,6 +12,7 @@ from custom_components.frickeldave_store.models import (
     next_image_name,
     normalise_tags,
     validate_create_payload,
+    validate_locations,
     validate_update_payload,
 )
 from custom_components.frickeldave_store.products import generate_article_number
@@ -71,14 +72,48 @@ def test_product_roundtrip_uses_camel_case() -> None:
         name="Schild",
         category="LA",
         price=35.0,
-        stock=2,
-        sales_cabinet=1,
+        stock={"lager": 2, "verkaufsschrank": 1},
     )
     data = product.to_dict()
     assert data["articleNumber"] == "LAH3K3"
-    assert data["salesCabinet"] == 1
-    assert data["schemaVersion"] == 1
+    assert data["stock"] == {"lager": 2, "verkaufsschrank": 1}
+    assert "salesCabinet" not in data
+    assert data["schemaVersion"] == 2
     assert Product.from_dict(data).to_dict() == data
+
+
+def test_legacy_stock_ints_map_to_first_and_second_location() -> None:
+    product = Product.from_dict(
+        {
+            "articleNumber": "LAH3K3",
+            "name": "Schild",
+            "category": "LA",
+            "stock": 4,
+            "salesCabinet": 2,
+        }
+    )
+    assert product.stock == {"lager": 4, "verkaufsschrank": 2}
+
+    only_stock = Product.from_dict(
+        {"articleNumber": "LAH3K4", "name": "Schild", "category": "LA", "stock": 3}
+    )
+    assert only_stock.stock["lager"] == 3
+    assert only_stock.stock["verkaufsschrank"] == 0
+
+
+def test_locations_validation_rejects_duplicates_and_empty_names() -> None:
+    assert validate_locations(["Lager", "Verkaufsschrank"], existing_ids=[]) == [
+        {"id": "lager", "name": "Lager"},
+        {"id": "verkaufsschrank", "name": "Verkaufsschrank"},
+    ]
+    with pytest.raises(ValidationError):
+        validate_locations([], existing_ids=[])
+    with pytest.raises(ValidationError):
+        validate_locations(["Lager", " lager "], existing_ids=[])
+    with pytest.raises(ValidationError):
+        validate_locations(["   "], existing_ids=[])
+    with pytest.raises(ValidationError):
+        validate_locations([{"id": "unbekannt", "name": "X"}], existing_ids=["lager"])
 
 
 def test_next_image_name_skips_used_numbers() -> None:

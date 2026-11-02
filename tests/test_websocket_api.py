@@ -57,6 +57,8 @@ def test_schema_accepts_realistic_filter_message(command: str) -> None:
         "customizable": True,
         "in_stock": False,
         "in_cabinet": True,
+        "location": "lager",
+        "in_location": False,
         "visibility": "visible",
         "archived": False,
         "sort": "price",
@@ -71,6 +73,8 @@ def test_schema_accepts_realistic_filter_message(command: str) -> None:
     assert result["customizable"] is True
     assert result["in_stock"] is False
     assert result["in_cabinet"] is True
+    assert result["location"] == "lager"
+    assert result["in_location"] is False
     assert result["visibility"] == "visible"
     assert result["archived"] is False
     assert result["sort"] == "price"

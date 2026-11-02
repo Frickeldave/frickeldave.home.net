@@ -22,6 +22,7 @@ from .models import (
     StockBooking,
     StoreError,
     ValidationError,
+    default_location_ids,
     next_image_name,
     normalise_bool,
     normalise_tags,
@@ -56,6 +57,8 @@ class ProductFilter:
     customizable: bool | None = None
     in_stock: bool | None = None
     in_cabinet: bool | None = None
+    location: str | None = None
+    in_location: bool | None = None
     visibility: str | None = None
     archived: bool = False
     sort: str = "name"
@@ -107,6 +110,8 @@ class ProductFilter:
             customizable=_optional_bool("customizable"),
             in_stock=_optional_bool("in_stock"),
             in_cabinet=_optional_bool("in_cabinet"),
+            location=(params.get("location") or "").strip() or None,
+            in_location=_optional_bool("in_location"),
             visibility=visibility,
             archived=_optional_bool("archived") or False,
             sort=sort,
@@ -116,8 +121,18 @@ class ProductFilter:
         )
 
 
-def product_matches(product: Product, filters: ProductFilter) -> bool:
-    """Alle Filterregeln anwenden (Kategorie ODER, Tags ODER, übrige UND)."""
+def product_matches(
+    product: Product,
+    filters: ProductFilter,
+    locations: list[dict[str, str]] | None = None,
+) -> bool:
+    """Alle Filterregeln anwenden (Kategorie ODER, Tags ODER, übrige UND).
+
+    ``in_stock``/``in_cabinet`` bleiben aus Kompatibilität auf die erste bzw.
+    zweite Lagerstätte bezogen; ``location`` + ``in_location`` filtern dynamisch.
+    """
+
+    ids = [str(item["id"]) for item in locations] if locations else default_location_ids()
 
     if product.archived != filters.archived:
         return False
@@ -140,10 +155,23 @@ def product_matches(product: Product, filters: ProductFilter) -> bool:
             return False
     if filters.customizable is not None and product.customizable != filters.customizable:
         return False
-    if filters.in_stock is not None and (product.stock > 0) != filters.in_stock:
-        return False
-    if filters.in_cabinet is not None and (product.sales_cabinet > 0) != filters.in_cabinet:
-        return False
+    if filters.in_stock is not None:
+        first = ids[0] if ids else ""
+        if (product.stock_for(first) > 0) != filters.in_stock:
+            return False
+    if filters.in_cabinet is not None:
+        second = ids[1] if len(ids) > 1 else ""
+        if (product.stock_for(second) > 0) != filters.in_cabinet:
+            return False
+    if filters.location is not None or filters.in_location is not None:
+        target = filters.location or (ids[0] if ids else "")
+        if target and target not in ids:
+            raise ValidationError(f"Unbekannte Lagerstätte: {target!r}.")
+        if (
+            filters.in_location is not None
+            and (product.stock_for(target) > 0) != filters.in_location
+        ):
+            return False
     if filters.visibility is not None:
         is_visible = product.visible
         if filters.visibility == "visible" and not is_visible:
@@ -175,7 +203,7 @@ class ProductService:
 
     # ------------------------------------------------------------------ Produkte
     async def async_create(self, payload: dict[str, Any], *, actor: str = "") -> Product:
-        values = validate_create_payload(payload)
+        values = validate_create_payload(payload, location_ids=self._store.location_ids())
         async with self._store.lock:
             existing = self._store.article_numbers()
             article_number = generate_article_number(values["category"])
@@ -199,7 +227,6 @@ class ProductService:
                 customizable=values["customizable"],
                 visible=values["visible"],
                 stock=values["stock"],
-                sales_cabinet=values["salesCabinet"],
             )
             self._store.put_product(product)
             for tag in product.tags:
@@ -210,10 +237,14 @@ class ProductService:
     async def async_update(self, article_number: str, payload: dict[str, Any]) -> Product:
         async with self._store.lock:
             product = self._store.get_product(article_number)
-            changes = validate_update_payload(payload, immutable_category=product.category)
+            changes = validate_update_payload(
+                payload,
+                immutable_category=product.category,
+                location_ids=self._store.location_ids(),
+            )
             for key, value in changes.items():
-                if key == "salesCabinet":
-                    product.sales_cabinet = value
+                if key == "stock":
+                    product.stock.update(value)
                 else:
                     setattr(product, key, value)
             for tag in product.tags:
@@ -247,7 +278,10 @@ class ProductService:
 
     async def async_list(self, filters: ProductFilter | None = None) -> tuple[list[Product], int]:
         rules = filters or ProductFilter()
-        products = [item for item in self._store.products() if product_matches(item, rules)]
+        locations = self._store.locations()
+        products = [
+            item for item in self._store.products() if product_matches(item, rules, locations)
+        ]
         products = sort_products(products, rules.sort, rules.order)
         total = len(products)
         if rules.offset:
@@ -298,19 +332,57 @@ class ProductService:
         if booking_type == "correction" and quantity < 0:
             raise ValidationError("quantity muss bei der Korrektur positiv sein.")
         note = str(payload.get("note", "") or "").strip()
+        unknown = set(payload) - {
+            "type",
+            "quantity",
+            "note",
+            "locationId",
+            "location_id",
+            "targetLocationId",
+            "target_location_id",
+        }
+        if unknown:
+            raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+
+        requested = payload.get("locationId", payload.get("location_id", ""))
+        target_requested = payload.get("targetLocationId", payload.get("target_location_id", ""))
 
         async with self._store.lock:
             product = self._store.get_product(article_number)
+            location_id = (
+                self._store.require_location(str(requested))
+                if requested
+                else self._store.default_location_id()
+            )
+            target_id = ""
+            if booking_type == "transfer":
+                if target_requested:
+                    target_id = self._store.require_location(str(target_requested))
+                else:
+                    ids = self._store.location_ids()
+                    if len(ids) < 2:
+                        raise ValidationError(
+                            "Für eine Umlagerung sind zwei Lagerstätten erforderlich."
+                        )
+                    target_id = ids[1]
+                if target_id == location_id:
+                    raise ValidationError(
+                        "Quelle und Ziel der Umlagerung müssen unterschiedliche Lagerstätten sein."
+                    )
+            elif target_requested:
+                raise ValidationError("targetLocationId ist nur bei der Umlagerung erlaubt.")
+
+            current = product.stock_for(location_id)
             if booking_type == "in":
-                product.stock += quantity
+                product.stock[location_id] = current + quantity
             elif booking_type == "out":
-                product.stock = max(0, product.stock - quantity)
+                product.stock[location_id] = max(0, current - quantity)
             elif booking_type == "transfer":
-                moved = min(quantity, product.stock)
-                product.stock -= moved
-                product.sales_cabinet += moved
+                moved = min(quantity, current)
+                product.stock[location_id] = current - moved
+                product.stock[target_id] = product.stock_for(target_id) + moved
             elif booking_type == "correction":
-                product.stock = quantity
+                product.stock[location_id] = quantity
             booking = StockBooking(
                 id=secrets.token_hex(8),
                 article_number=product.article_number,
@@ -319,6 +391,8 @@ class ProductService:
                 note=note,
                 at=to_iso(),
                 ha_user_id=ha_user_id,
+                location_id=location_id,
+                target_location_id=target_id,
             )
             self._store.put_product(product)
             self._store.add_booking(booking)
@@ -327,11 +401,20 @@ class ProductService:
 
     async def async_list_bookings(self, article_number: str) -> list[dict[str, Any]]:
         self._store.get_product(article_number, include_archived=True)
-        return sorted(
+        names = {item["id"]: item["name"] for item in self._store.locations()}
+        bookings = sorted(
             self._store.bookings(article_number),
             key=lambda item: str(item.get("at", "")),
             reverse=True,
         )
+        return [
+            {
+                **item,
+                "locationName": names.get(str(item.get("locationId", "")), ""),
+                "targetLocationName": names.get(str(item.get("targetLocationId", "")), ""),
+            }
+            for item in bookings
+        ]
 
     # ------------------------------------------------------------------ Bilder
     def _sync_images(self, product: Product) -> None:

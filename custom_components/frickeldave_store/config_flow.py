@@ -31,9 +31,12 @@ from .const import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
     DEFAULT_EXPORT_PATH,
+    DEFAULT_PUBLISH_DEV_BRANCH,
+    DEFAULT_PUBLISH_PROD_WORKFLOW,
+    DEFAULT_PUBLISH_REPOSITORY,
     DOMAIN,
 )
-from .models import StoreError
+from .models import StoreError, default_locations
 from .permissions import format_user_grants, parse_user_grants
 from .storage import (
     DATA_PATH_CONFIG,
@@ -135,25 +138,62 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
                         "target_not_empty" if err.code == "conflict" else "invalid_data_path"
                     )
                 else:
-                    api_key = str(user_input.get("ai_api_key", "") or "")
-                    options: dict[str, Any] = {
-                        "users": format_user_grants(grants),
-                        "data_path": data_path,
-                        "ai_endpoint": str(user_input.get("ai_endpoint") or DEFAULT_AI_ENDPOINT),
-                        "ai_model": str(user_input.get("ai_model") or DEFAULT_AI_MODEL),
-                        "ai_prompt": str(user_input.get("ai_prompt") or DEFAULT_AI_PROMPT),
-                        "export_path": str(user_input.get("export_path") or DEFAULT_EXPORT_PATH),
-                    }
-                    if api_key:
-                        options["ai_api_key"] = api_key
+                    locations_text = str(
+                        user_input.get("stock_locations", current.get("stock_locations", ""))
+                    )
+                    location_error = self._validate_locations(locations_text)
+                    if location_error:
+                        errors["stock_locations"] = location_error
                     else:
-                        # Leeres Feld behält den gespeicherten Key; er wird nie angezeigt.
-                        options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
-                    return self.async_create_entry(title="", data=options)
+                        api_key = str(user_input.get("ai_api_key", "") or "")
+                        options: dict[str, Any] = {
+                            "users": format_user_grants(grants),
+                            "data_path": data_path,
+                            "stock_locations": locations_text,
+                            "ai_endpoint": str(
+                                user_input.get("ai_endpoint") or DEFAULT_AI_ENDPOINT
+                            ),
+                            "ai_model": str(user_input.get("ai_model") or DEFAULT_AI_MODEL),
+                            "ai_prompt": str(user_input.get("ai_prompt") or DEFAULT_AI_PROMPT),
+                            "export_path": str(
+                                user_input.get("export_path") or DEFAULT_EXPORT_PATH
+                            ),
+                            "github_repository": str(
+                                user_input.get("github_repository") or DEFAULT_PUBLISH_REPOSITORY
+                            ),
+                            "github_dev_branch": str(
+                                user_input.get("github_dev_branch") or DEFAULT_PUBLISH_DEV_BRANCH
+                            ),
+                            "github_prod_workflow": str(
+                                user_input.get("github_prod_workflow")
+                                or DEFAULT_PUBLISH_PROD_WORKFLOW
+                            ),
+                        }
+                        if api_key:
+                            options["ai_api_key"] = api_key
+                        else:
+                            # Leeres Feld behält den gespeicherten Key; er wird nie angezeigt.
+                            options["ai_api_key"] = str(current.get("ai_api_key", "") or "")
+                        github_token = str(user_input.get("github_token", "") or "")
+                        options["github_token"] = github_token or str(
+                            current.get("github_token", "") or ""
+                        )
+                        return self.async_create_entry(title="", data=options)
+
+        locations_default = str(current.get("stock_locations") or "")
+        if not locations_default:
+            from . import runtime_for
+
+            runtime = runtime_for(self.hass)
+            if runtime is not None:
+                locations_default = "\n".join(runtime.store.location_names())
+        if not locations_default:
+            locations_default = "\n".join(item["name"] for item in default_locations())
 
         schema = schema_lib.Schema(
             {
                 schema_lib.Optional("users", default=str(current.get("users", ""))): str,
+                schema_lib.Optional("stock_locations", default=locations_default): str,
                 schema_lib.Optional("data_path", default=current_data_path): SelectSelector(
                     SelectSelectorConfig(
                         options=[
@@ -176,6 +216,36 @@ class FrickeldaveStoreOptionsFlow(OptionsFlow):
                 schema_lib.Optional(
                     "export_path", default=str(current.get("export_path", DEFAULT_EXPORT_PATH))
                 ): str,
+                schema_lib.Optional(
+                    "github_repository",
+                    default=str(current.get("github_repository", DEFAULT_PUBLISH_REPOSITORY)),
+                ): str,
+                schema_lib.Optional(
+                    "github_dev_branch",
+                    default=str(current.get("github_dev_branch", DEFAULT_PUBLISH_DEV_BRANCH)),
+                ): str,
+                schema_lib.Optional(
+                    "github_prod_workflow",
+                    default=str(current.get("github_prod_workflow", DEFAULT_PUBLISH_PROD_WORKFLOW)),
+                ): str,
+                schema_lib.Optional("github_token", default=""): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+
+    def _validate_locations(self, text: str) -> str | None:
+        """Options-Flow-Prüfung: liefert den Fehlerschlüssel oder ``None``."""
+
+        names = [line for line in (text or "").splitlines() if line.strip()]
+        if not names:
+            return "invalid_locations"
+        from . import runtime_for
+
+        runtime = runtime_for(self.hass)
+        if runtime is None:  # pragma: no cover - Options-Flow läuft nur mit Runtime
+            return None
+        try:
+            runtime.store.validate_location_change(names, match_by="position")
+        except StoreError as err:
+            return "location_in_use" if err.code == "conflict" else "invalid_locations"
+        return None

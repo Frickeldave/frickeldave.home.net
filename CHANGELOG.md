@@ -6,6 +6,32 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Added
+
+- **Veröffentlichen nach dev und prod (#289):** `POST /api/frickeldave_store/publish`
+  committet den Export über die GitHub-Daten-API auf den Integrationsbranch `dev`
+  (löst `fd-ci` und `fd-deploy-dev` aus) oder dispatcht zusätzlich `fd-deploy-prd`,
+  der als einziger Weg `main` aktualisiert. GitHub-Token und Repository liegen in den
+  Einstellungen, das Token wird nie zurückgegeben oder geloggt.
+- **Dry-Run (#289):** derselbe Endpunkt liefert mit `dry_run: true` einen vollständigen
+  Diff je Datei (`added`/`changed`/`removed`/`unchanged`), Zählungen für Produkte und
+  Bilder, Zielbranch, Deployment-Hinweis und eine deutsche Zusammenfassung – ohne
+  Commit, Workflow-Dispatch oder Store-Schreibzugriff.
+- **Konfigurierbare Lagerstätten (#289):** Bestände werden je Lagerstätte geführt
+  (Default „Lager“ und „Verkaufsschrank“). Umbenennen erhält den Bestand, Löschen ist
+  gesperrt, solange dort Stück gebucht sind. `GET /locations` und `PATCH /settings`
+  (`locations`) liefern bzw. ändern die Liste; der Website-Export bildet Lagerstätte 1
+  weiterhin auf `stock` und Lagerstätte 2 auf `salesCabinet` ab.
+- **KI: eigene Anweisungen und Tag-Vorschläge (#289):** der Beschreibungsvorschlag
+  akzeptiert optional `instructions`, schlägt Tags ausschließlich aus der vorhandenen
+  Tag-Liste vor und meldet verworfene Vorschläge (`rejected_tags`) für den Hinweis
+  „Neue Tags musst du selbst anlegen“.
+
+### Changed
+
+- **Store-Schema 2:** Migration von `stock`/`salesCabinet` auf Bestände je Lagerstätte,
+  verlustfrei auf die beiden Standard-Lagerstätten; `STORAGE_VERSION` 2.
+
 ## [0.1.8] - 2026-10-28
 
 ### Added

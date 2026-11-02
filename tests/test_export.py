@@ -25,8 +25,7 @@ def _product(**overrides: object) -> Product:
         "tags": ["Holz"],
         "customizable": True,
         "visible": True,
-        "stock": 2,
-        "sales_cabinet": 1,
+        "stock": {"lager": 2, "verkaufsschrank": 1},
     }
     data.update(overrides)
     return Product(**data)  # type: ignore[arg-type]
@@ -94,6 +93,23 @@ def test_export_is_idempotent_and_orders_main_image_first(tmp_path: Path) -> Non
     assert second["products"] == 1
     assert catalog_file.read_bytes() == first_bytes
     assert sorted(item.name for item in image_dir.iterdir()) == exported
+
+
+def test_export_maps_first_location_to_stock_and_second_to_sales_cabinet() -> None:
+    product = _product(stock={"werkstatt": 7, "auto": 3})
+    catalog = build_catalog(
+        [product],
+        locations=[{"id": "werkstatt", "name": "Werkstatt"}, {"id": "auto", "name": "Auto"}],
+    )
+    entry = catalog["products"][0]
+    assert entry["stock"] == 7
+    assert entry["salesCabinet"] == 3
+
+    only_one = build_catalog([product], locations=[{"id": "werkstatt", "name": "Werkstatt"}])[
+        "products"
+    ][0]
+    assert only_one["stock"] == 7
+    assert only_one["salesCabinet"] == 0
 
 
 def test_export_can_filter_visible_only(tmp_path: Path) -> None:

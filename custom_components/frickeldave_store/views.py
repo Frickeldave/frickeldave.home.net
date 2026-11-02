@@ -44,6 +44,7 @@ from .permissions import (
     normalise_roles,
 )
 from .products import ProductFilter
+from .publish import PUBLISH_TARGETS, PublishService
 from .storage import data_path_from_entry, storage_payload
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,6 +69,14 @@ STATUS_BY_CODE: dict[str, int] = {
     "not_loaded": 503,
     "catalog_unavailable": 502,
     "catalog_invalid": 422,
+    "publish_not_configured": 400,
+    "publish_token_missing": 400,
+    "publish_failed": 502,
+    "github_unauthorized": 502,
+    "github_not_found": 404,
+    "github_conflict": 409,
+    "github_failed": 502,
+    "github_unavailable": 502,
 }
 
 
@@ -487,8 +496,17 @@ class DescriptionSuggestView(HomeAssistantView):
     async def post(self, request: web.Request, article_number: str) -> web.Response:
         try:
             runtime, _ = _authorize(request, ROLE_PRODUCT)
-            suggestion = await runtime.ai.async_suggest_description(article_number)
-            return web.json_response({"suggestion": suggestion})
+            payload = await _optional_json_body(request)
+            unknown = set(payload) - {"instructions"}
+            if unknown:
+                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+            instructions = payload.get("instructions", "")
+            if not isinstance(instructions, str):
+                raise ValidationError("instructions muss eine Zeichenkette sein.")
+            suggestion = await runtime.ai.async_suggest_description(
+                article_number, instructions=instructions
+            )
+            return web.json_response(suggestion)
         except AIError as err:
             return _error_response(err)
         except StoreError as err:
@@ -573,6 +591,7 @@ def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> 
     ]
     payload["export_path"] = str(runtime.export_path)
     payload["storage"] = storage_payload(hass, data_path_from_entry(runtime.entry))
+    payload["locations"] = runtime.store.locations_payload()
     return payload
 
 
@@ -593,14 +612,21 @@ class SettingsView(HomeAssistantView):
             hass = _hass(request)
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
             payload = await _json_body(request)
-            unknown = set(payload) - {"ai", "storage"}
+            unknown = set(payload) - {"ai", "storage", "publish", "locations"}
             if unknown:
                 raise ValidationError(
                     f"Unbekannte Felder: {', '.join(sorted(unknown))}. "
                     "Benutzerfreigaben werden über den Options-Flow verwaltet.",
                 )
 
+            location_entries = payload.get("locations")
+            new_locations = None
+            if location_entries is not None:
+                # Erst prüfen (inkl. Löschschutz), dann anwenden.
+                new_locations = runtime.store.validate_location_change(location_entries)
+
             changes = dict(payload)
+            changes.pop("locations", None)
             storage_changes = changes.pop("storage", None)
             new_data_path: str | None = None
             if storage_changes is not None:
@@ -618,7 +644,15 @@ class SettingsView(HomeAssistantView):
             ai_changes = changes.get("ai")
             if isinstance(ai_changes, dict) and not ai_changes.get("api_key"):
                 ai_changes.pop("api_key", None)
+            publish_changes = changes.get("publish")
+            if isinstance(publish_changes, dict) and not publish_changes.get("token"):
+                publish_changes.pop("token", None)
             runtime.store.update_settings(changes)
+            if new_locations is not None:
+                runtime.store.set_locations(new_locations)
+                self._persist_locations(hass, runtime, new_locations)
+            if isinstance(publish_changes, dict) and publish_changes:
+                self._persist_publish_options(hass, runtime, publish_changes)
             await runtime.store.async_save()
 
             reload_required = False
@@ -634,6 +668,103 @@ class SettingsView(HomeAssistantView):
         except StoreError as err:
             return _error_response(err)
 
+    @staticmethod
+    def _persist_publish_options(
+        hass: HomeAssistant,
+        runtime: FrickeldaveStoreRuntime,
+        changes: dict[str, Any],
+    ) -> None:
+        """Panel-Änderungen in die Optionen spiegeln (eine Quelle der Wahrheit)."""
+
+        entry = runtime.entry
+        config_entries = getattr(hass, "config_entries", None)
+        if entry is None or config_entries is None:
+            return
+        options = dict(getattr(entry, "options", None) or {})
+        mapping = {
+            "repository": "github_repository",
+            "dev_branch": "github_dev_branch",
+            "prod_branch": "github_prod_branch",
+            "prod_workflow": "github_prod_workflow",
+        }
+        updated = False
+        for key, option in mapping.items():
+            if key in changes and options.get(option) != changes[key]:
+                options[option] = changes[key]
+                updated = True
+        token = changes.get("token")
+        if token and options.get("github_token") != token:
+            options["github_token"] = token
+            updated = True
+        if updated:
+            config_entries.async_update_entry(entry, options=options)
+
+    @staticmethod
+    def _persist_locations(
+        hass: HomeAssistant,
+        runtime: FrickeldaveStoreRuntime,
+        locations: list[dict[str, str]],
+    ) -> None:
+        """Options-Flow und Panel teilen sich eine Quelle der Wahrheit."""
+
+        entry = runtime.entry
+        config_entries = getattr(hass, "config_entries", None)
+        options = dict(getattr(entry, "options", None) or {})
+        if entry is None or config_entries is None:
+            return
+        text = "\n".join(item["name"] for item in locations)
+        if options.get("stock_locations") == text:
+            return
+        options["stock_locations"] = text
+        config_entries.async_update_entry(entry, options=options)
+
+
+class LocationsView(HomeAssistantView):
+    """Lagerstätten für alle mit Produktpflege (Grundlage der Bestandsdialoge)."""
+
+    name = "api:frickeldave_store:locations"
+    url = f"{API_PREFIX}/locations"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        try:
+            runtime, _ = _authorize(request, ROLE_PRODUCT)
+            return web.json_response({"locations": runtime.store.locations_payload()})
+        except StoreError as err:
+            return _error_response(err)
+
+
+class PublishView(HomeAssistantView):
+    """Katalog nach dev oder prod veröffentlichen (Dry-Run ohne Schreibwirkung)."""
+
+    name = "api:frickeldave_store:publish"
+    url = f"{API_PREFIX}/publish"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            runtime, user = _authorize(request, ROLE_APP_ADMIN)
+            payload = await _optional_json_body(request)
+            unknown = set(payload) - {"target", "dry_run", "message"}
+            if unknown:
+                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+            target = payload.get("target")
+            if target not in PUBLISH_TARGETS:
+                raise ValidationError("target muss 'dev' oder 'prod' sein.")
+            dry_run = payload.get("dry_run", False)
+            if not isinstance(dry_run, bool):
+                raise ValidationError("dry_run muss ein Wahrheitswert sein.")
+            message = payload.get("message", "")
+            if not isinstance(message, str):
+                raise ValidationError("message muss eine Zeichenkette sein.")
+            service = runtime.publish or PublishService(runtime.store)
+            result = await service.async_publish(
+                str(target), dry_run=dry_run, message=message, user_id=str(user.id)
+            )
+            return web.json_response(result)
+        except StoreError as err:
+            return _error_response(err)
+
 
 class ExportView(HomeAssistantView):
     name = "api:frickeldave_store:export"
@@ -645,7 +776,10 @@ class ExportView(HomeAssistantView):
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
             target = Path(_hass(request).config.path(str(runtime.export_path)))
             result = await async_export_catalog(
-                runtime.store.products(), runtime.store.images, target
+                runtime.store.products(),
+                runtime.store.images,
+                target,
+                locations=runtime.store.locations(),
             )
             return web.json_response(result)
         except StoreError as err:
@@ -701,6 +835,8 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     UsersView,
     UserView,
     SettingsView,
+    LocationsView,
+    PublishView,
     ExportView,
     CatalogImportView,
 )

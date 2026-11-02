@@ -115,7 +115,8 @@ async def test_provider_returns_suggestion_and_sends_cleaned_image(product: Prod
         session=session,  # type: ignore[arg-type]
     )
     suggestion = await provider.async_suggest(product, [(_jpeg_with_metadata(), "image/jpeg")])
-    assert suggestion == "Schön."
+    assert suggestion.text == "Schön."
+    assert suggestion.tags == []
     call = session.calls[0]
     assert call["headers"]["Authorization"] == "Bearer secret-key"
     image_url = call["json"]["messages"][1]["content"][1]["image_url"]["url"]
@@ -201,6 +202,64 @@ async def test_ai_error_does_not_mutate_store(tmp_path: Path) -> None:
     assert (await service.async_get(created.article_number)).description == ""
 
 
+async def test_provider_parses_description_and_tag_blocks(product: Product) -> None:
+    content = "BESCHREIBUNG:\nEin schönes Schild.\nTAGS: Holz, Deko"
+    session = FakeSession(FakeResponse(200, {"choices": [{"message": {"content": content}}]}))
+    provider = DeepSeekProvider(
+        endpoint="https://api.example.test",
+        model="deepseek-flash",
+        api_key="key",
+        prompt="x",
+        session=session,  # type: ignore[arg-type]
+    )
+    result = await provider.async_suggest(product, [], available_tags=["Holz", "Deko"])
+    assert result.text == "Ein schönes Schild."
+    assert result.tags == ["Holz", "Deko"]
+
+
+async def test_provider_appends_optional_instructions(product: Product) -> None:
+    session = FakeSession(FakeResponse(200, {"choices": [{"message": {"content": "Text"}}]}))
+    provider = DeepSeekProvider(
+        endpoint="https://api.example.test",
+        model="deepseek-flash",
+        api_key="key",
+        prompt="Basis-Prompt",
+        session=session,  # type: ignore[arg-type]
+    )
+    await provider.async_suggest(product, [])
+    without = session.calls[0]["json"]["messages"][1]["content"][0]["text"]
+    assert "Zusätzliche Anweisungen" not in without
+
+    session.calls.clear()
+    await provider.async_suggest(product, [], instructions="Betonе die Größe")
+    with_instructions = session.calls[0]["json"]["messages"][1]["content"][0]["text"]
+    assert with_instructions.startswith("Basis-Prompt")
+    assert "Zusätzliche Anweisungen des Nutzers:\nBetonе die Größe" in with_instructions
+
+
+async def test_suggestion_filters_tags_to_existing_ones(tmp_path: Path) -> None:
+    from custom_components.frickeldave_store.ai import Suggestion
+
+    class TagProvider:
+        async def async_suggest(self, product: Any, images: Any, **kwargs: Any) -> Suggestion:
+            return Suggestion(text="Beschreibung", tags=["holz", "Neu", "Deko"])
+
+        async def async_close(self) -> None:
+            return None
+
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+    for name in ("Holz", "Deko"):
+        store.add_tag(name)
+    created = await ProductService(store).async_create({"name": "Schild", "category": "LA"})
+    ai = AIService(store, provider_factory=lambda: TagProvider())
+    result = await ai.async_suggest_description(created.article_number)
+    assert result["tags"] == ["Holz", "Deko"]
+    assert result["rejected_tags"] == ["Neu"]
+    assert result["available_tags"] == ["Deko", "Holz"]
+    assert store.tag_names() == ["Deko", "Holz"]
+
+
 async def test_ai_service_never_persists_suggestion(tmp_path: Path) -> None:
     store = CatalogStore(data_dir=tmp_path)
     await store.async_load()
@@ -218,5 +277,8 @@ async def test_ai_service_never_persists_suggestion(tmp_path: Path) -> None:
         ),
     )
     ai = AIService(store, provider_factory=lambda: provider)
-    assert await ai.async_suggest_description(created.article_number) == "Vorschlag"
+    result = await ai.async_suggest_description(created.article_number)
+    assert result["suggestion"] == "Vorschlag"
+    assert result["tags"] == []
+    assert result["instructions_used"] is False
     assert json.dumps(store.data, sort_keys=True, ensure_ascii=False) == before

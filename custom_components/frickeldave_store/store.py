@@ -26,6 +26,10 @@ from .const import (
     DEFAULT_AI_ENDPOINT,
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROMPT,
+    DEFAULT_PUBLISH_DEV_BRANCH,
+    DEFAULT_PUBLISH_PROD_BRANCH,
+    DEFAULT_PUBLISH_PROD_WORKFLOW,
+    DEFAULT_PUBLISH_REPOSITORY,
     IMAGES_DIR_NAME,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
@@ -34,14 +38,19 @@ from .const import (
 from .models import (
     IMAGE_SUFFIXES,
     SCHEMA_VERSION,
+    ConflictError,
     Image,
     NotFoundError,
     Product,
     StockBooking,
     StoreError,
     ValidationError,
+    default_locations,
+    location_totals,
+    normalise_stock_map,
     normalise_tags,
     to_iso,
+    validate_locations,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,7 +67,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 def default_settings() -> dict[str, Any]:
-    """Standard-Einstellungen inklusive KI-Anbieter."""
+    """Standard-Einstellungen inklusive KI-Anbieter und Veröffentlichung."""
 
     return {
         "ai": {
@@ -66,7 +75,14 @@ def default_settings() -> dict[str, Any]:
             "model": DEFAULT_AI_MODEL,
             "prompt": DEFAULT_AI_PROMPT,
             "api_key": "",
-        }
+        },
+        "publish": {
+            "repository": DEFAULT_PUBLISH_REPOSITORY,
+            "dev_branch": DEFAULT_PUBLISH_DEV_BRANCH,
+            "prod_branch": DEFAULT_PUBLISH_PROD_BRANCH,
+            "prod_workflow": DEFAULT_PUBLISH_PROD_WORKFLOW,
+            "token": "",
+        },
     }
 
 
@@ -75,6 +91,7 @@ def new_payload() -> dict[str, Any]:
 
     return {
         "schemaVersion": SCHEMA_VERSION,
+        "locations": default_locations(),
         "products": [],
         "tags": [],
         "bookings": [],
@@ -92,11 +109,45 @@ def _migrate_0_to_1(payload: dict[str, Any]) -> dict[str, Any]:
         products.append(product.to_dict())
     return {
         "schemaVersion": 1,
+        "locations": default_locations(),
         "products": products,
         "tags": normalise_tags(payload.get("tags", [])),
         "bookings": [
             StockBooking.from_dict(item).to_dict() for item in payload.get("bookings", [])
         ],
+        "settings": {**default_settings(), **(payload.get("settings") or {})},
+        "updatedAt": payload.get("updatedAt") or to_iso(),
+    }
+
+
+def _migrate_1_to_2(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bestände von ``stock``/``salesCabinet`` auf zwei Lagerstätten abbilden.
+
+    Verlustfrei: ``stock`` wird Bestand der ersten Lagerstätte („Lager“),
+    ``salesCabinet`` der zweiten („Verkaufsschrank“). Buchungen erhalten die
+    Lagerstätte, auf die sie sich bisher implizit bezogen haben.
+    """
+
+    locations = default_locations()
+    location_ids = [item["id"] for item in locations]
+    products = [
+        Product.from_dict(raw, location_ids=location_ids).to_dict()
+        for raw in payload.get("products", []) or []
+    ]
+    bookings: list[dict[str, Any]] = []
+    for raw in payload.get("bookings", []) or []:
+        booking = StockBooking.from_dict(raw)
+        if not booking.location_id:
+            booking.location_id = location_ids[0]
+        if booking.type == "transfer" and not booking.target_location_id and len(location_ids) > 1:
+            booking.target_location_id = location_ids[1]
+        bookings.append(booking.to_dict())
+    return {
+        "schemaVersion": 2,
+        "locations": locations,
+        "products": products,
+        "tags": normalise_tags(payload.get("tags", [])),
+        "bookings": bookings,
         "settings": {**default_settings(), **(payload.get("settings") or {})},
         "updatedAt": payload.get("updatedAt") or to_iso(),
     }
@@ -116,6 +167,8 @@ def migrate_payload(payload: dict[str, Any], from_version: int) -> dict[str, Any
     while version < SCHEMA_VERSION:
         if version == 0:
             data = _migrate_0_to_1(data)
+        elif version == 1:
+            data = _migrate_1_to_2(data)
         version += 1
         data["schemaVersion"] = version
     return coerce_payload(data)
@@ -129,22 +182,44 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         return base
     settings = payload.get("settings") or {}
     ai_settings = {**base["settings"]["ai"], **(settings.get("ai") or {})}
+    publish_settings = {**base["settings"]["publish"], **(settings.get("publish") or {})}
+    locations = _coerce_locations(payload.get("locations"))
+    location_ids = [str(item["id"]) for item in locations]
     products: list[dict[str, Any]] = []
     for raw in payload.get("products", []) or []:
         try:
-            products.append(Product.from_dict(raw).to_dict())
+            products.append(
+                Product.from_dict(raw, location_ids=location_ids, strict=False).to_dict()
+            )
         except (ValidationError, StoreError) as err:  # pragma: no cover - defensive
             _LOGGER.warning("Produkt übersprungen (%s): %s", raw.get("articleNumber"), err)
+    bookings: list[dict[str, Any]] = []
+    for raw in payload.get("bookings", []) or []:
+        booking = StockBooking.from_dict(raw)
+        if not booking.location_id:
+            booking.location_id = location_ids[0]
+        if booking.type == "transfer" and not booking.target_location_id and len(location_ids) > 1:
+            booking.target_location_id = location_ids[1]
+        bookings.append(booking.to_dict())
     return {
         "schemaVersion": SCHEMA_VERSION,
+        "locations": locations,
         "products": products,
         "tags": normalise_tags(payload.get("tags", [])),
-        "bookings": [
-            StockBooking.from_dict(item).to_dict() for item in payload.get("bookings", []) or []
-        ],
-        "settings": {**settings, "ai": ai_settings},
+        "bookings": bookings,
+        "settings": {**settings, "ai": ai_settings, "publish": publish_settings},
         "updatedAt": payload.get("updatedAt") or to_iso(),
     }
+
+
+def _coerce_locations(raw: Any) -> list[dict[str, str]]:
+    """Gespeicherte Lagerstätten prüfen; defekte Angaben fallen auf den Standard zurück."""
+
+    try:
+        return validate_locations(raw if raw else default_locations())
+    except ValidationError as err:
+        _LOGGER.warning("Lagerstätten ungültig (%s), Standard wird verwendet", err.message)
+        return default_locations()
 
 
 class StorageBackend(Protocol):
@@ -502,6 +577,104 @@ class CatalogStore:
                 item["tags"] = [tag for tag in item.get("tags", []) if str(tag).casefold() != key]
                 item["updatedAt"] = now
 
+    # ------------------------------------------------------------------ Lagerstätten
+    def locations(self) -> list[dict[str, str]]:
+        """Konfigurierte Lagerstätten in Anzeigereihenfolge (Kopie)."""
+
+        return [
+            {"id": str(item["id"]), "name": str(item["name"])} for item in self._data["locations"]
+        ]
+
+    def location_ids(self) -> list[str]:
+        return [item["id"] for item in self.locations()]
+
+    def location_names(self) -> list[str]:
+        return [item["name"] for item in self.locations()]
+
+    def location_index(self, location_id: str) -> int | None:
+        for index, item in enumerate(self._data["locations"]):
+            if item["id"] == location_id:
+                return index
+        return None
+
+    def require_location(self, location_id: str) -> str:
+        """Lagerstätte prüfen und ihre ID zurückgeben (deutsche Fehlermeldung)."""
+
+        key = str(location_id or "").strip()
+        if not key:
+            raise ValidationError("locationId ist ein Pflichtfeld.")
+        if self.location_index(key) is None:
+            names = ", ".join(self.location_names())
+            raise ValidationError(f"Unbekannte Lagerstätte: {key!r}. Vorhanden: {names}.")
+        return key
+
+    def default_location_id(self) -> str:
+        return str(self._data["locations"][0]["id"])
+
+    def location_usage(self) -> dict[str, tuple[int, int]]:
+        """Je Lagerstätte: (Produkte mit Bestand, Summe der Stücke)."""
+
+        return {
+            item["id"]: location_totals(self.product_dicts(), item["id"])
+            for item in self._data["locations"]
+        }
+
+    def locations_payload(self) -> list[dict[str, Any]]:
+        """Antwortformat für Panel und Einstellungen (inkl. Bestandskennzahlen)."""
+
+        usage = self.location_usage()
+        return [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "position": index,
+                "stock_total": usage[item["id"]][1],
+                "products_with_stock": usage[item["id"]][0],
+            }
+            for index, item in enumerate(self._data["locations"])
+        ]
+
+    def validate_location_change(
+        self, entries: Any, *, match_by: str = "id"
+    ) -> list[dict[str, str]]:
+        """Neue Lagerstätten prüfen, ohne etwas zu verändern.
+
+        Eine Löschung wird abgelehnt, solange dort Bestand gebucht ist – sonst
+        gingen Stückzahlen beim nächsten Speichern verloren.
+        """
+
+        locations = validate_locations(entries, existing_ids=self.location_ids(), match_by=match_by)
+        new_ids = {item["id"] for item in locations}
+        removed = [item for item in self.locations() if item["id"] not in new_ids]
+        for item in removed:
+            affected, pieces = location_totals(self.product_dicts(), item["id"])
+            if pieces > 0:
+                raise ConflictError(
+                    f"Die Lagerstätte „{item['name']}“ kann nicht gelöscht werden: "
+                    f"{affected} Produkte haben dort noch {pieces} Stück Bestand. "
+                    "Bitte den Bestand zuerst auf eine andere Lagerstätte umbuchen."
+                )
+        return locations
+
+    def set_locations(self, entries: Any, *, match_by: str = "id") -> list[dict[str, str]]:
+        """Lagerstätten übernehmen; IDs bleiben beim Umbenennen erhalten."""
+
+        locations = self.validate_location_change(entries, match_by=match_by)
+        new_ids = [entry["id"] for entry in locations]
+        removed_ids = {item["id"] for item in self.locations()} - set(new_ids)
+        for item in self.product_dicts():
+            stock = item.get("stock")
+            if not isinstance(stock, dict):
+                stock = normalise_stock_map(stock, new_ids)
+                item["stock"] = stock
+            for location_id in removed_ids:
+                # Nur zulässig, wenn dort kein Bestand gebucht ist (siehe Prüfung oben).
+                stock.pop(location_id, None)
+            for location_id in new_ids:
+                stock.setdefault(location_id, 0)
+        self._data["locations"] = locations
+        return self.locations()
+
     # ------------------------------------------------------------------ Buchungen
     def bookings(self, article_number: str | None = None) -> list[dict[str, Any]]:
         if article_number is None:
@@ -528,19 +701,45 @@ class CatalogStore:
             if unknown:
                 raise ValidationError(f"Unbekannte ai-Felder: {', '.join(sorted(unknown))}")
             self._data["settings"]["ai"].update(ai_changes)
+        publish_changes = changes.get("publish")
+        if publish_changes is not None:
+            if not isinstance(publish_changes, dict):
+                raise ValidationError("publish muss ein Objekt sein.")
+            allowed_publish = {"repository", "dev_branch", "prod_branch", "prod_workflow", "token"}
+            unknown_publish = set(publish_changes) - allowed_publish
+            if unknown_publish:
+                raise ValidationError(
+                    f"Unbekannte publish-Felder: {', '.join(sorted(unknown_publish))}"
+                )
+            for key, value in publish_changes.items():
+                if key == "token":
+                    self._data["settings"]["publish"]["token"] = str(value or "")
+                    continue
+                text = str(value or "").strip()
+                if not text:
+                    raise ValidationError(f"publish.{key} darf nicht leer sein.")
+                self._data["settings"]["publish"][key] = text
         return self._data["settings"]
 
     def public_settings(self) -> dict[str, Any]:
-        """Einstellungen ohne Geheimnisse (API-Key wird nur als Flag gemeldet)."""
+        """Einstellungen ohne Geheimnisse (API-Key und Token nur als Flag)."""
 
         ai_settings = self._data["settings"]["ai"]
+        publish_settings = self._data["settings"].get("publish", {})
         return {
             "ai": {
                 "endpoint": ai_settings.get("endpoint", ""),
                 "model": ai_settings.get("model", ""),
                 "prompt": ai_settings.get("prompt", ""),
                 "api_key_set": bool(ai_settings.get("api_key")),
-            }
+            },
+            "publish": {
+                "repository": publish_settings.get("repository", ""),
+                "dev_branch": publish_settings.get("dev_branch", ""),
+                "prod_branch": publish_settings.get("prod_branch", ""),
+                "prod_workflow": publish_settings.get("prod_workflow", ""),
+                "token_set": bool(publish_settings.get("token")),
+            },
         }
 
 

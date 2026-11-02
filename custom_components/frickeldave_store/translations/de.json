@@ -25,28 +25,40 @@
         "title": "Frickeldave Store – Einstellungen",
         "data": {
           "users": "Freigegebene HA-Benutzer (ID: Rollen)",
+          "stock_locations": "Lagerstätten (eine pro Zeile, Reihenfolge zählt)",
           "ai_endpoint": "KI-Endpunkt",
           "ai_model": "KI-Modell",
           "ai_api_key": "KI-API-Key",
           "ai_prompt": "Prompt für Beschreibungen",
           "export_path": "Exportverzeichnis (relativ zu config/)",
-          "data_path": "Speicherort der Daten"
+          "data_path": "Speicherort der Daten",
+          "github_repository": "Website-Repository (owner/name)",
+          "github_dev_branch": "Integrationsbranch (dev)",
+          "github_prod_workflow": "Produktions-Workflow (fd-deploy-prd.yml)",
+          "github_token": "GitHub-Token (nur Schreibzugriff)"
         },
         "data_description": {
           "users": "Eine Zeile pro Benutzer, zum Beispiel `ha_user_id: product,finance,app_admin`.",
+          "stock_locations": "Eine Zeile pro Lagerstätte, zum Beispiel „Lager“ und „Verkaufsschrank“. Zeile 1 wird im Website-Export zu `stock`, Zeile 2 zu `salesCabinet`. Umbenennen erhält den Bestand; Löschen ist gesperrt, solange dort Bestand gebucht ist.",
           "ai_endpoint": "Vollständige URL der Chat-Completions-API.",
           "ai_model": "Standard: deepseek-flash (akzeptiert Bilder).",
           "ai_api_key": "Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um den gespeicherten Key zu behalten.",
           "ai_prompt": "Initial: „Generiere mir eine schöne Beschreibung des Artikels für meinen Handmade-Shop.“",
           "export_path": "Der Export schreibt den Katalog nach public/data/handmade.json und Bilder nach src/assets/handmade/, relativ zum konfigurierten Verzeichnis.",
-          "data_path": "config: im Home-Assistant-Backup enthalten (Standard). share/media: vom Backup ausgeschlossen, separates Backup nötig; das Verzeichnis muss eingebunden sein."
+          "data_path": "config: im Home-Assistant-Backup enthalten (Standard). share/media: vom Backup ausgeschlossen, separates Backup nötig; das Verzeichnis muss eingebunden sein.",
+          "github_repository": "Repository der Website. Commits gehen auf den Integrationsbranch; main wird ausschließlich vom Workflow fd-deploy-prd aktualisiert.",
+          "github_dev_branch": "Branch für Veröffentlichungen. Ein Commit hier löst fd-ci und fd-deploy-dev aus.",
+          "github_prod_workflow": "Workflow, der dev nach main promotet und die Produktion deployt.",
+          "github_token": "Fine-grained Token mit Contents: write und Actions: write. Wird niemals zurückgegeben, geloggt oder exportiert. Leer lassen, um das gespeicherte Token zu behalten."
         }
       }
     },
     "error": {
       "invalid_users": "Ungültige Freigaben. Eine Zeile pro Benutzer im Format `ha_user_id: role,role` mit den Rollen product, finance oder app_admin.",
       "invalid_data_path": "Der Speicherort ist nicht verfügbar oder nicht beschreibbar. Für share/media muss das Verzeichnis als Volume eingebunden sein.",
-      "target_not_empty": "Im Zielordner liegen bereits Katalogdaten. Bitte leeren oder einen anderen Speicherort wählen."
+      "target_not_empty": "Im Zielordner liegen bereits Katalogdaten. Bitte leeren oder einen anderen Speicherort wählen.",
+      "invalid_locations": "Ungültige Lagerstätten. Mindestens eine, keine leeren und keine doppelten Namen (max. 40 Zeichen).",
+      "location_in_use": "Eine Lagerstätte enthält noch Bestand und kann nicht gelöscht werden. Bitte den Bestand zuerst umbuchen."
     }
   }
 }

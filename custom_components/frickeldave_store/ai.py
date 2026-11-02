@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import base64
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import aiohttp
 
-from .models import Product, StoreError
+from .models import Product, StoreError, normalise_text
 from .store import CatalogStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ _LOGGER = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 60
 MAX_IMAGES_PER_REQUEST = 2
 MAX_TOKENS = 800
+MAX_INSTRUCTIONS_LENGTH = 2000
+MAX_SUGGESTED_TAGS = 20
 
 JPEG_APP_MARKERS = frozenset(range(0xE1, 0xF0)) | {0xFE}  # APP1-APP15 + COM
 PNG_DROP_CHUNKS = frozenset({b"eXIf", b"iTXt", b"tEXt", b"zTXt", b"tIME"})
@@ -31,6 +34,45 @@ class AIError(StoreError):
     """Fehler des KI-Anbieters mit lesbarer Meldung."""
 
     code = "ai_error"
+
+
+@dataclass(slots=True)
+class Suggestion:
+    """Rohantwort des Anbieters: Beschreibungstext und vorgeschlagene Tag-Namen."""
+
+    text: str
+    tags: list[str] = field(default_factory=list)
+
+
+def filter_suggested_tags(
+    proposed: list[str], available: list[str], *, limit: int = MAX_SUGGESTED_TAGS
+) -> tuple[list[str], list[str]]:
+    """Nur vorhandene Tags zulassen.
+
+    Gibt ``(akzeptiert, verworfen)`` zurück. Akzeptierte Vorschläge tragen die
+    Schreibweise der vorhandenen Tags; neue Tags legt ausschließlich der Nutzer an.
+    """
+
+    by_key = {tag.casefold(): tag for tag in available}
+    accepted: list[str] = []
+    rejected: list[str] = []
+    seen: set[str] = set()
+    for raw in proposed:
+        name = " ".join(str(raw).split())
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        canonical = by_key.get(key)
+        if canonical is None:
+            if len(rejected) < limit:
+                rejected.append(name)
+            continue
+        if len(accepted) < limit:
+            accepted.append(canonical)
+    return accepted, rejected
 
 
 def strip_metadata(data: bytes, content_type: str = "image/jpeg") -> bytes:
@@ -103,7 +145,14 @@ def _strip_png(data: bytes) -> bytes:
 class AIProvider(Protocol):
     """Anbieter-Abstraktion für Beschreibungsvorschläge."""
 
-    async def async_suggest(self, product: Product, images: list[tuple[bytes, str]]) -> str: ...
+    async def async_suggest(
+        self,
+        product: Product,
+        images: list[tuple[bytes, str]],
+        *,
+        instructions: str = "",
+        available_tags: list[str] | None = None,
+    ) -> Suggestion: ...
 
     async def async_close(self) -> None: ...
 
@@ -120,13 +169,25 @@ class DeepSeekProvider:
     session: aiohttp.ClientSession | None = None
     _owns_session: bool = True
 
-    async def async_suggest(self, product: Product, images: list[tuple[bytes, str]]) -> str:
+    async def async_suggest(
+        self,
+        product: Product,
+        images: list[tuple[bytes, str]],
+        *,
+        instructions: str = "",
+        available_tags: list[str] | None = None,
+    ) -> Suggestion:
         if not self.api_key:
             raise AIError(
                 "Es ist kein API-Key hinterlegt. Bitte in den Einstellungen ergänzen.",
                 code="ai_not_configured",
             )
-        content: list[dict[str, Any]] = [{"type": "text", "text": self._product_prompt(product)}]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": self._product_prompt(product, instructions, available_tags or []),
+            }
+        ]
         for data, content_type in images[:MAX_IMAGES_PER_REQUEST]:
             cleaned = strip_metadata(data, content_type)
             encoded = base64.b64encode(cleaned).decode("ascii")
@@ -143,8 +204,11 @@ class DeepSeekProvider:
                     "role": "system",
                     "content": (
                         "Du schreibst deutschsprachige Produktbeschreibungen für einen "
-                        "Handmade-Shop. Antworte nur mit dem Beschreibungstext, ohne "
-                        "Vorrede und ohne Aufzählung von Preisen oder Beständen."
+                        "Handmade-Shop. Antworte genau in diesem Format, ohne Vorrede und "
+                        "ohne Aufzählung von Preisen oder Beständen:\n"
+                        "BESCHREIBUNG:\n<Beschreibungstext>\n"
+                        "TAGS: <kommagetrennte Tags ausschließlich aus der vorgegebenen "
+                        "Liste, oder leer>"
                     ),
                 },
                 {"role": "user", "content": content},
@@ -188,7 +252,7 @@ class DeepSeekProvider:
                         f"Der KI-Anbieter hat die Anfrage abgelehnt (HTTP {response.status}).",
                         code="ai_request_failed",
                     )
-                return _extract_suggestion(body)
+                return _extract_response(body)
         except (TimeoutError, aiohttp.ClientError) as err:
             raise AIError(
                 "Zeitüberschreitung oder Netzwerkfehler beim KI-Anbieter.",
@@ -202,7 +266,12 @@ class DeepSeekProvider:
         if self.session is not None:
             await self.session.close()
 
-    def _product_prompt(self, product: Product) -> str:
+    def _product_prompt(
+        self,
+        product: Product,
+        instructions: str = "",
+        available_tags: list[str] | None = None,
+    ) -> str:
         lines = [
             self.prompt,
             "",
@@ -215,10 +284,22 @@ class DeepSeekProvider:
             lines.append(f"Tags: {', '.join(product.tags)}")
         if product.customizable:
             lines.append("Personalisierbar: ja")
+        if available_tags:
+            lines.append(f"Verfügbare Tags: {', '.join(available_tags)}")
+            lines.append(
+                "Verwende für TAGS ausschließlich Namen aus „Verfügbare Tags“. "
+                "Erfinde keine neuen Tags; ist nichts Passendes dabei, lass TAGS leer."
+            )
+        else:
+            lines.append("TAGS: leer lassen (es sind keine Tags vorhanden).")
+        extra = normalise_text(instructions, "instructions", max_length=MAX_INSTRUCTIONS_LENGTH)
+        if extra:
+            # Freitext des Nutzers, bewusst als zusätzlicher Abschnitt angehängt.
+            lines.extend(["", "Zusätzliche Anweisungen des Nutzers:", extra])
         return "\n".join(lines)
 
 
-def _extract_suggestion(body: Any) -> str:
+def _message_content(body: Any) -> str:
     try:
         choices = body["choices"]
         message = choices[0]["message"]["content"]
@@ -234,13 +315,48 @@ def _extract_suggestion(body: Any) -> str:
             if isinstance(part, dict) and part.get("type") == "text"
         ]
         message = "\n".join(parts)
-    suggestion = str(message or "").strip()
+    return str(message or "").strip()
+
+
+_TAGS_RE = re.compile(r"(?im)^\s*TAGS?\s*:\s*(.*)$")
+_DESCRIPTION_RE = re.compile(r"(?is)BESCHREIBUNG\s*:\s*(.*)")
+
+
+def _extract_suggestion(body: Any) -> str:
+    """Nur den Beschreibungstext (Rückwärtskompatibilität für Aufrufer/Tests)."""
+
+    return _extract_response(body).text
+
+
+def _extract_response(body: Any) -> Suggestion:
+    """Antwort in Beschreibung und Tag-Vorschläge zerlegen.
+
+    Ohne Formatmarker gilt der gesamte Text als Beschreibung und es werden keine
+    Tags vorgeschlagen – die UI funktioniert damit unverändert weiter.
+    """
+
+    message = _message_content(body)
+    if not message:
+        raise AIError(
+            "Der KI-Anbieter hat eine leere Antwort geliefert.",
+            code="ai_invalid_response",
+        )
+    tags: list[str] = []
+    tag_match = _TAGS_RE.search(message)
+    text = message
+    if tag_match:
+        tags = [part.strip() for part in tag_match.group(1).split(",") if part.strip()]
+        text = message[: tag_match.start()]
+    description_match = _DESCRIPTION_RE.search(text)
+    if description_match:
+        text = description_match.group(1)
+    suggestion = text.strip().strip("*").strip()
     if not suggestion:
         raise AIError(
             "Der KI-Anbieter hat eine leere Antwort geliefert.",
             code="ai_invalid_response",
         )
-    return suggestion
+    return Suggestion(text=suggestion, tags=tags)
 
 
 class AIService:
@@ -269,10 +385,19 @@ class AIService:
             session=self._session,
         )
 
-    async def async_suggest_description(self, article_number: str) -> str:
-        """Vorschlag erzeugen; der gespeicherte Datenstand bleibt unverändert."""
+    async def async_suggest_description(
+        self, article_number: str, *, instructions: str = ""
+    ) -> dict[str, Any]:
+        """Vorschlag erzeugen; der gespeicherte Datenstand bleibt unverändert.
 
+        Tag-Vorschläge werden serverseitig gegen die vorhandene Tag-Liste gefiltert:
+        neue Tags legt ausschließlich der Nutzer an. Verworfene Vorschläge werden
+        mitgeliefert, damit die Oberfläche darauf hinweisen kann.
+        """
+
+        extra = normalise_text(instructions, "instructions", max_length=MAX_INSTRUCTIONS_LENGTH)
         product = self._store.get_product(article_number)
+        available_tags = self._store.tag_names()
         images: list[tuple[bytes, str]] = []
         for image in product.images[:MAX_IMAGES_PER_REQUEST]:
             try:
@@ -281,7 +406,17 @@ class AIService:
                 continue
             images.append((data, _content_type_for(image.name)))
         provider = self._provider()
-        return await provider.async_suggest(product, images)
+        suggestion = await provider.async_suggest(
+            product, images, instructions=extra, available_tags=available_tags
+        )
+        accepted, rejected = filter_suggested_tags(suggestion.tags, available_tags)
+        return {
+            "suggestion": suggestion.text,
+            "tags": accepted,
+            "rejected_tags": rejected,
+            "available_tags": list(available_tags),
+            "instructions_used": bool(extra),
+        }
 
 
 def _content_type_for(name: str) -> str:
