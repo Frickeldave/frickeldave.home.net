@@ -36,6 +36,35 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Der Lauf ist idempotent, Fehler einzelner Bilder brechen ihn nicht ab, und
   vor dem ersten Überschreiben entsteht ein Snapshot
   (`backups/*-pre-image-optimize.json`).
+- **Upload-Rückmeldung im Bilder-Tab (#289).** Nach jedem Upload zeigt das
+  Panel die Verkleinerung als Liste (`optimize_message`, deutsch formatiert wie
+  „Bild von 12,0 MB auf 278 KB verkleinert (4032×3024 → 1600×1200).“). Bei
+  `resized: false` erscheint eine ruhige Bestätigung, dass das Bild bereits
+  passte; der angezeigte Dateiname stammt immer aus `images[].name`, auch wenn
+  der Upload die Endung wechselt (`.webp`).
+- **Bildgrößen und Warnungen im Bilder-Tab (#289).** Jede Bildkarte zeigt Maße
+  und Dateigröße („1600 × 1200 · 278 KB“). Zu große Bilder erhalten ein
+  Warnzeichen mit `title`/`aria-label`; über der Liste nennt ein Warnbanner
+  Anzahl und beide Schwellwerte (max. 1600 px lange Kante und 400 KB).
+- **Sammel-Optimierung aus dem Panel (#289).** Der Button „Bilder optimieren“
+  ruft den Optimize-Endpunkt auf, zeigt einen Busy-Zustand, danach das Ergebnis
+  je Bild samt Teilfehlern und die Ersparnis aus `summary` („3 Bilder optimiert,
+  4,2 MB gespart (78 %).“). Die Liste wird mit den neuen `images` neu
+  gerendert; ein zweiter Lauf meldet „Nichts zu tun – alle Bilder passen
+  bereits.“
+- **Warnzeichen in Produktliste und Kacheln (#289).** Produkte mit mindestens
+  einem zu großen Bild tragen ein Warndreieck mit `title` und `aria-label`
+  („Mindestens ein Bild ist zu groß. Produkt öffnen und Bilder optimieren.“),
+  in der Kachel am Bild, in der Liste in der Statusspalte. Ein Klick öffnet den
+  Produktdialog direkt im Bilder-Tab.
+- **Tab „Allgemeine Einstellungen“ (#289).** Das Konfigurationspanel bekommt
+  einen zusätzlichen Tab mit Backup-Schalter (abgeleitet aus
+  `storage.data_path`), Speicherort-Auswahl aus `storage.choices[]` sowie
+  schreibgeschützten Pfaden (`effective_path`, `paths[]`). Gespeichert wird über
+  `PATCH /settings`; bei `reload_required` weist das Panel deutlich auf das
+  Neuladen der Integration hin, bei `409`/`400` erscheint die deutsche
+  Servermeldung und die Auswahl springt auf den gespeicherten Speicherort
+  zurück.
 
 ### Changed
 
@@ -49,8 +78,8 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - **Allgemeine Einstellungen (#289).** `GET/PATCH /settings` lieferte mit
   `storage.backup_included`, `storage.exclude_from_backup`, `storage.choices`
   (deutsche Labels und Beschreibungen) sowie `storage.data_path` bereits alles,
-  was der Tab „Allgemeine Einstellungen“ braucht – hier nur bestätigt, kein
-  neuer Mechanismus.
+  was der Tab „Allgemeine Einstellungen“ braucht – am Backend war kein neuer
+  Mechanismus nötig, die Oberfläche nutzt diese Felder jetzt.
 
 ## [0.1.13] - 2026-11-02
 

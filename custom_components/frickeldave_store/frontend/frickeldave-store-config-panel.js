@@ -21,6 +21,7 @@ const REQUEST_TIMEOUT_MS = 30000;
 const TOAST_TIMEOUT_MS = 6000;
 
 const TABS = Object.freeze([
+  { id: "general", label: "Allgemeine Einstellungen", panelId: "fd-config-panel-general" },
   { id: "users", label: "Benutzerverwaltung", panelId: "fd-config-panel-users" },
   { id: "locations", label: "Lagerstätten", panelId: "fd-config-panel-locations" },
   { id: "publish", label: "Veröffentlichen", panelId: "fd-config-panel-publish" },
@@ -125,6 +126,37 @@ const normalizePublish = (data) => {
   };
 };
 
+const normalizeStorage = (data) => {
+  const payload = data && typeof data === "object" ? data : {};
+  const dataPath = asText(payload.data_path);
+  const choices = Array.isArray(payload.choices)
+    ? payload.choices
+        .filter((entry) => entry && typeof entry === "object" && asText(entry.id))
+        .map((entry) => ({
+          id: asText(entry.id),
+          label: asText(entry.label) || asText(entry.id),
+          description: asText(entry.description),
+          backupIncluded: Boolean(entry.backup_included),
+        }))
+    : [];
+  const paths = Array.isArray(payload.paths)
+    ? payload.paths
+        .filter((entry) => entry && typeof entry === "object" && asText(entry.path))
+        .map((entry) => ({ label: asText(entry.label), path: asText(entry.path) }))
+    : [];
+  const backupIncluded =
+    typeof payload.backup_included === "boolean" ? payload.backup_included : dataPath === "config";
+  return {
+    dataPath,
+    effectivePath: asText(payload.effective_path),
+    backupIncluded,
+    excludeFromBackup:
+      typeof payload.exclude_from_backup === "boolean" ? payload.exclude_from_backup : !backupIncluded,
+    paths,
+    choices,
+  };
+};
+
 const normalizeSettingsPayload = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : payload;
@@ -138,6 +170,7 @@ const normalizeSettingsPayload = (data) => {
     apiKeySet: Boolean(ai?.api_key_set),
     locations: normalizeLocations(payload.locations),
     publish: normalizePublish(payload.publish),
+    storage: normalizeStorage(payload.storage),
   };
 };
 
@@ -164,6 +197,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     _ai: { state: true },
     _locations: { state: true },
     _publish: { state: true },
+    _storage: { state: true },
     _toast: { state: true },
 
     _forwardAvailable: { state: true },
@@ -218,6 +252,22 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       notice: "",
       form: { repository: "", dev_branch: "", prod_branch: "", prod_workflow: "", token: "" },
       tokenSet: false,
+    };
+
+    this._storage = {
+      loading: false,
+      saving: false,
+      loaded: false,
+      error: "",
+      notice: "",
+      reloadRequired: false,
+      dataPath: "",
+      draftPath: "",
+      effectivePath: "",
+      backupIncluded: false,
+      excludeFromBackup: true,
+      paths: [],
+      choices: [],
     };
 
     this._toast = null;
@@ -968,6 +1018,19 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       form: normalized.publish.form,
       tokenSet: normalized.publish.tokenSet,
     };
+    const storage = normalized.storage;
+    this._storage = {
+      ...this._storage,
+      loading: false,
+      loaded: Boolean(storage.dataPath || storage.choices.length > 0),
+      dataPath: storage.dataPath,
+      draftPath: storage.dataPath,
+      effectivePath: storage.effectivePath,
+      backupIncluded: storage.backupIncluded,
+      excludeFromBackup: storage.excludeFromBackup,
+      paths: storage.paths,
+      choices: storage.choices,
+    };
   }
 
   async _loadSettings() {
@@ -976,6 +1039,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
     this._ai = { ...this._ai, loading: true, error: "", notice: "" };
     this._locations = { ...this._locations, loading: true, error: "", notice: "" };
+    this._storage = { ...this._storage, loading: true, error: "", notice: "" };
     try {
       const data = await this._api(`${API_ROOT}/settings`);
       this._applySettingsPayload(data);
@@ -983,11 +1047,13 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       if (isAbortError(error)) {
         this._ai = { ...this._ai, loading: false };
         this._locations = { ...this._locations, loading: false };
+        this._storage = { ...this._storage, loading: false };
         return;
       }
       const message = this._errorText(error);
       this._ai = { ...this._ai, loading: false, error: message };
       this._locations = { ...this._locations, loading: false, error: message };
+      this._storage = { ...this._storage, loading: false, error: message };
     }
   }
 
@@ -1222,6 +1288,114 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     }
   }
 
+  _storageDraftChoice() {
+    const state = this._storage;
+    return state.choices.find((entry) => entry.id === state.draftPath) || null;
+  }
+
+  _storageDraftBackupIncluded() {
+    const choice = this._storageDraftChoice();
+    return choice ? choice.backupIncluded : this._storage.draftPath === "config";
+  }
+
+  _setStoragePath(path) {
+    if (this._storage.saving || !this._storage.choices.some((entry) => entry.id === path)) {
+      return;
+    }
+    this._storage = {
+      ...this._storage,
+      draftPath: path,
+      error: "",
+      notice: "",
+      reloadRequired: false,
+    };
+  }
+
+  _setStorageBackup(enabled) {
+    const state = this._storage;
+    if (state.saving || state.loading || !state.loaded) {
+      return;
+    }
+    if (enabled === this._storageDraftBackupIncluded()) {
+      return;
+    }
+    const target = enabled
+      ? state.choices.find((entry) => entry.backupIncluded)
+      : state.choices.find((entry) => !entry.backupIncluded);
+    if (!target) {
+      this._storage = {
+        ...state,
+        error: enabled
+          ? "Es steht kein Speicherort im Backup zur Verfügung."
+          : "Es steht kein Speicherort außerhalb des Backups zur Verfügung.",
+        notice: "",
+        reloadRequired: false,
+      };
+      return;
+    }
+    this._setStoragePath(target.id);
+  }
+
+  async _saveStorage(event) {
+    event?.preventDefault();
+    const state = this._storage;
+    if (!this._can("app_admin") || state.saving || state.loading) {
+      return;
+    }
+    if (!state.loaded) {
+      this._storage = {
+        ...state,
+        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
+        notice: "",
+      };
+      return;
+    }
+    if (!state.draftPath || state.draftPath === state.dataPath) {
+      this._storage = {
+        ...state,
+        error: "",
+        notice: "Der Speicherort ist unverändert.",
+        reloadRequired: false,
+      };
+      return;
+    }
+
+    this._storage = { ...state, saving: true, error: "", notice: "", reloadRequired: false };
+    try {
+      const data = await this._api(`${API_ROOT}/settings`, {
+        method: "PATCH",
+        body: { storage: { data_path: state.draftPath } },
+      });
+      const reloadRequired = Boolean(data?.reload_required);
+      if (data && typeof data === "object" && data.storage) {
+        this._applySettingsPayload(data);
+      }
+      this._storage = {
+        ...this._storage,
+        saving: false,
+        loaded: true,
+        reloadRequired,
+        notice: reloadRequired
+          ? "Speicherort gespeichert. Lade die Integration neu, damit der neue Ordner verwendet wird."
+          : "Speicherort gespeichert.",
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        this._storage = { ...this._storage, saving: false };
+        return;
+      }
+      this._storage = {
+        ...this._storage,
+        saving: false,
+        // Auswahl zurückrollen: gespeicherten Speicherort wieder anzeigen.
+        draftPath: this._storage.dataPath,
+        error: this._errorText(error),
+        notice: "",
+        reloadRequired: false,
+      };
+    }
+  }
+
   /* --------------------------------------------------------------------- */
   /* Render: Zugriff und Rahmen                                             */
   /* --------------------------------------------------------------------- */
@@ -1339,13 +1513,15 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             })}
           </div>
 
-          ${this._tab === "users"
-            ? this._renderUsersTab()
-            : this._tab === "locations"
-              ? this._renderLocationsTab()
-              : this._tab === "publish"
-                ? this._renderPublishTab()
-                : this._renderAiTab()}
+          ${this._tab === "general"
+            ? this._renderGeneralTab()
+            : this._tab === "users"
+              ? this._renderUsersTab()
+              : this._tab === "locations"
+                ? this._renderLocationsTab()
+                : this._tab === "publish"
+                  ? this._renderPublishTab()
+                  : this._renderAiTab()}
           ${this._me?.version
             ? html`<footer class="fd-config-footer" aria-label="Geladene Panel-Version">
                 v${this._me.version}
@@ -1353,6 +1529,158 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             : ""}
         </div>
       </div>
+    `;
+  }
+
+  /* --------------------------------------------------------------------- */
+  /* Render: Allgemeine Einstellungen                                      */
+  /* --------------------------------------------------------------------- */
+
+  _renderGeneralTab() {
+    const state = this._storage;
+    const busy = state.loading || state.saving || !state.loaded;
+    const draftChoice = this._storageDraftChoice();
+    const backupIncluded = this._storageDraftBackupIncluded();
+    const changed = Boolean(state.draftPath) && state.draftPath !== state.dataPath;
+
+    return html`
+      <section
+        id="fd-config-panel-general"
+        role="tabpanel"
+        aria-labelledby="fd-config-tab-general"
+        class="fd-card fd-config-section"
+      >
+        <div class="fd-config-toolbar">
+          <div>
+            <h2>Allgemeine Einstellungen</h2>
+            <p class="fd-muted fd-small">
+              Speicherort des Produktkatalogs und Aufnahme in das Home-Assistant-Backup.
+            </p>
+          </div>
+          <button
+            type="button"
+            class="fd-button"
+            @click=${() => this._loadSettings()}
+            ?disabled=${state.loading || state.saving}
+          >
+            Neu laden
+          </button>
+        </div>
+
+        <div class="fd-live" role="status" aria-live="polite">
+          ${state.loading ? "Einstellungen werden geladen …" : ""}
+        </div>
+        ${state.error ? html`<div class="fd-banner fd-banner--error" role="alert">${state.error}</div>` : ""}
+        ${state.notice && !state.reloadRequired
+          ? html`<div class="fd-banner fd-banner--success" role="status">${state.notice}</div>`
+          : ""}
+        ${state.reloadRequired
+          ? html`<div class="fd-banner fd-banner--warning" role="alert">
+              <p>
+                ${state.notice ||
+                "Speicherort gespeichert. Lade die Integration neu, damit der neue Ordner verwendet wird."}
+              </p>
+              <p class="fd-small">
+                Einstellungen → Geräte &amp; Dienste → Frickeldave Store → Neu laden.
+              </p>
+            </div>`
+          : ""}
+
+        ${!state.loaded
+          ? html`<p class="fd-muted">Die Einstellungen sind noch nicht geladen.</p>`
+          : html`
+              <form class="fd-storage-form" @submit=${(event) => this._saveStorage(event)} novalidate>
+                <fieldset class="fd-fieldset" ?disabled=${busy}>
+                  <legend>Backup</legend>
+                  <label class="fd-switch">
+                    <input
+                      type="checkbox"
+                      .checked=${backupIncluded}
+                      ?disabled=${busy}
+                      @change=${(event) => this._setStorageBackup(event.target.checked)}
+                    />
+                    <span>Produktkatalog im Home-Assistant-Backup enthalten</span>
+                  </label>
+                  <p class="fd-hint">
+                    ${backupIncluded
+                      ? "Der Speicherort „config“ liegt im Home-Assistant-Backup. Der Katalog wird dort mitgesichert."
+                      : "Der Speicherort liegt unter „share“ oder „media“. Diese Ordner sind nicht Teil des Home-Assistant-Backups. Für ein Backup den Speicherort „config“ wählen."}
+                  </p>
+                </fieldset>
+
+                <div class="fd-field">
+                  <label class="fd-label" for="fd-storage-path">Speicherort</label>
+                  <select
+                    id="fd-storage-path"
+                    class="fd-input fd-select"
+                    .value=${state.draftPath}
+                    ?disabled=${busy}
+                    @change=${(event) => this._setStoragePath(event.target.value)}
+                  >
+                    ${state.choices.length === 0
+                      ? html`<option value=${state.draftPath}>
+                          ${state.draftPath || "Keine Auswahl verfügbar"}
+                        </option>`
+                      : state.choices.map(
+                          (choice) => html`
+                            <option value=${choice.id} ?selected=${choice.id === state.draftPath}>
+                              ${choice.label}${choice.backupIncluded ? " (im Backup)" : ""}
+                            </option>
+                          `,
+                        )}
+                  </select>
+                  <p class="fd-hint">
+                    ${draftChoice?.description ||
+                    "Der Ordner, in dem Metadaten, Bilder und Snapshots liegen."}
+                  </p>
+                </div>
+
+                <dl class="fd-storage-meta" aria-label="Pfade des Speicherorts">
+                  <div>
+                    <dt>Aktiver Ordner</dt>
+                    <dd><code>${state.effectivePath || "—"}</code></dd>
+                  </div>
+                  ${state.paths.map(
+                    (entry) => html`
+                      <div>
+                        <dt>${entry.label}</dt>
+                        <dd><code>${entry.path}</code></dd>
+                      </div>
+                    `,
+                  )}
+                </dl>
+                <p class="fd-hint">
+                  Diese Pfade sind schreibgeschützt und ergeben sich aus dem Speicherort.
+                </p>
+
+                <div class="fd-inline-actions">
+                  <button
+                    type="submit"
+                    class="fd-button fd-button--primary"
+                    ?disabled=${busy || !changed}
+                    aria-busy=${state.saving ? "true" : "false"}
+                  >
+                    ${state.saving ? "Speichern …" : "Einstellungen speichern"}
+                  </button>
+                  ${changed
+                    ? html`<button
+                        type="button"
+                        class="fd-button"
+                        @click=${() => this._setStoragePath(state.dataPath)}
+                        ?disabled=${busy}
+                      >
+                        Änderung verwerfen
+                      </button>`
+                    : ""}
+                  ${state.loaded
+                    ? html`<span class="fd-status ${state.error ? "fd-status--warn" : "fd-status--ok"}">
+                        ${state.error ? "Nicht gespeichert" : "Konfiguration geladen"}
+                      </span>`
+                    : ""}
+                </div>
+              </form>
+            `}
+      </section>
     `;
   }
 
@@ -2559,6 +2887,72 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: var(--fd-space-4);
+    }
+
+    .fd-storage-form {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-4);
+    }
+
+    .fd-storage-form .fd-fieldset {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .fd-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      cursor: pointer;
+    }
+
+    .fd-switch input {
+      width: 20px;
+      height: 20px;
+      accent-color: var(--fd-accent);
+      cursor: pointer;
+    }
+
+    .fd-switch:has(input:disabled) {
+      color: var(--fd-text-muted);
+      cursor: not-allowed;
+    }
+
+    .fd-storage-meta {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      margin: 0;
+      padding: var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-storage-meta div {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+    }
+
+    .fd-storage-meta dt {
+      flex: 0 0 120px;
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-storage-meta dd {
+      min-width: 0;
+      margin: 0;
+    }
+
+    .fd-storage-meta code {
+      overflow-wrap: anywhere;
+      font-family: var(--ha-font-family-code, ui-monospace, SFMono-Regular, monospace);
+      font-size: var(--fd-font-small);
     }
 
     .fd-fieldset {

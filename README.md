@@ -111,6 +111,11 @@ Seitenleisten-Panels. Die JavaScript-Dateien liegen unter
 `custom_components/frickeldave_store/frontend/` und werden vom Frontend-Team gepflegt;
 fehlt eine Datei, bleiben Integration und API vollständig funktionsfähig.
 
+Der Bilder-Tab im Produktdialog zeigt je Bild Maße und Dateigröße, warnt vor zu
+großen Bildern und fasst sie über „Bilder optimieren“ zusammen. Produkte mit
+mindestens einem zu großen Bild tragen in Liste und Kachel ein Warndreieck, das
+den Dialog direkt im Bilder-Tab öffnet.
+
 ## Daten, Speicherort und Backup
 
 Der Datenordner ist über `data_path` wählbar: `config` (Standard),
@@ -133,6 +138,10 @@ für einzelne Unterordner ist in HA nicht möglich. Wer den Katalog nicht im
 HA-Backup haben will, wählt `share` oder `media` und sichert den Ordner selbst
 (Docker: Volume für `/share` bzw. `/media` einbinden). Der Exportpfad ist davon
 unabhängig und kann ebenfalls außerhalb von `config` liegen.
+
+Im Konfigurationspanel (Tab **Allgemeine Einstellungen**) zeigt ein Schalter den
+aus `data_path` abgeleiteten Backup-Status und erlaubt den Wechsel des
+Speicherorts; nach einem Wechsel verlangt die Integration ein Neuladen.
 
 Beim Wechsel werden Store-Datei, Bilder und Snapshots kopiert; der alte Ordner
 bleibt als Sicherheitskopie erhalten. Ist der Zielordner bereits belegt, bricht

@@ -55,6 +55,13 @@ const SORT_FIELDS = Object.freeze(SORT_COLUMNS.map((column) => column.field));
 
 const EDITOR_TABS = Object.freeze(["general", "images", "description", "stock"]);
 
+// Schwellwerte, die der Server für `oversized` verwendet (lange Kante und Dateigröße).
+const IMAGE_MAX_LONG_EDGE = 1600;
+const IMAGE_MAX_BYTES = 400 * 1024;
+
+const OVERSIZED_HINT =
+  "Mindestens ein Bild ist zu groß. Produkt öffnen und Bilder optimieren.";
+
 // Beim „Weiter“-Klick wird das Feld geprüft, das auf dem Zielfeld sichtbar ist.
 const EDITOR_FIELD_TABS = Object.freeze({
   name: "general",
@@ -126,6 +133,39 @@ const formatDateTime = (value) => {
   return Number.isNaN(date.getTime()) ? "—" : dateFormatter.format(date);
 };
 
+/** Dateigröße wie der Server: „12,0 MB“, „278 KB“, „900 Bytes“. */
+const formatBytes = (value) => {
+  const bytes = Math.max(0, Math.round(Number(value) || 0));
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${numberFormatter.format(Math.round(bytes / 1024))} KB`;
+  }
+  return `${numberFormatter.format(bytes)} ${bytes === 1 ? "Byte" : "Bytes"}`;
+};
+
+const formatDimensions = (width, height) => {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return "";
+  }
+  return `${Math.round(w)} × ${Math.round(h)}`;
+};
+
+const formatImageMeta = (image) => {
+  const parts = [formatDimensions(image?.width, image?.height), image?.bytes ? formatBytes(image.bytes) : ""];
+  return parts.filter(Boolean).join(" · ");
+};
+
+const percentFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+
+const formatPercent = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? percentFormatter.format(number) : "0";
+};
+
 const categoryLabel = (key) => CATEGORY_LABELS[key] || key || "—";
 
 const productPath = (articleNumber) =>
@@ -149,15 +189,37 @@ const normalizeTagNames = (data) => {
 
 const normalizeImage = (image) => {
   if (typeof image === "string") {
-    return { name: image, url: image, is_main: false };
+    return {
+      name: image,
+      url: image,
+      is_main: false,
+      bytes: 0,
+      width: 0,
+      height: 0,
+      content_type: "",
+      oversized: false,
+    };
   }
   if (!image || typeof image !== "object") {
     return null;
   }
+  const bytes = Math.max(0, Math.round(Number(image.bytes) || 0));
+  const width = Math.max(0, Math.round(Number(image.width) || 0));
+  const height = Math.max(0, Math.round(Number(image.height) || 0));
+  // Der Server setzt `oversized`; für ältere Antworten wird es aus den Maßen abgeleitet.
+  const oversized =
+    Boolean(image.oversized) ||
+    Math.max(width, height) > IMAGE_MAX_LONG_EDGE ||
+    bytes > IMAGE_MAX_BYTES;
   return {
     name: typeof image.name === "string" ? image.name : "",
     url: typeof image.url === "string" ? image.url : "",
     is_main: Boolean(image.is_main),
+    bytes,
+    width,
+    height,
+    content_type: typeof image.content_type === "string" ? image.content_type : "",
+    oversized,
   };
 };
 
@@ -1021,9 +1083,17 @@ export class FrickeldaveStorePanel extends LitElement {
     this._loadProducts();
   }
 
+  _productImages(product) {
+    return Array.isArray(product?.images) ? product.images.map(normalizeImage).filter(Boolean) : [];
+  }
+
   _mainImage(product) {
-    const images = Array.isArray(product?.images) ? product.images.map(normalizeImage).filter(Boolean) : [];
+    const images = this._productImages(product);
     return images.find((image) => image.is_main) || images[0] || null;
+  }
+
+  _productOversizedCount(product) {
+    return this._productImages(product).filter((image) => image.oversized).length;
   }
 
   _imageUrl(product, image) {
@@ -1222,6 +1292,10 @@ export class FrickeldaveStorePanel extends LitElement {
       imagesError: "",
       imagesNotice: "",
       imagesPendingDelete: null,
+      imagesUploadResults: [],
+      imagesOptimizeBusy: false,
+      imagesOptimizeError: "",
+      imagesOptimizeResult: null,
       bookings: [],
       bookingsLoading: false,
       bookingsLoaded: false,
@@ -1280,6 +1354,10 @@ export class FrickeldaveStorePanel extends LitElement {
       imagesError: "",
       imagesNotice: "",
       imagesPendingDelete: null,
+      imagesUploadResults: [],
+      imagesOptimizeBusy: false,
+      imagesOptimizeError: "",
+      imagesOptimizeResult: null,
       bookings: [],
       bookingsLoading: false,
       bookingsLoaded: false,
@@ -1778,11 +1856,131 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _imageBusy() {
     const editor = this._editor;
-    return Boolean(editor && (editor.imagesBusy || editor.imagesLoading));
+    return Boolean(
+      editor && (editor.imagesBusy || editor.imagesLoading || editor.imagesOptimizeBusy),
+    );
+  }
+
+  _oversizedCount(images) {
+    return (Array.isArray(images) ? images : []).filter((image) => image?.oversized).length;
+  }
+
+  _oversizedTitle(image) {
+    const details = [formatDimensions(image?.width, image?.height), image?.bytes ? formatBytes(image.bytes) : ""]
+      .filter(Boolean)
+      .join(", ");
+    return `Bild ist zu groß${details ? `: ${details}` : ""}. Empfohlen: max. 1600 px und 400 KB.`;
+  }
+
+  _focusImageResult(id) {
+    this.updateComplete
+      .then(() => this.renderRoot?.querySelector(`#${id}`)?.focus?.())
+      .catch(() => {});
+  }
+
+  _uploadResult(file, data, previousNames) {
+    const images = Array.isArray(data?.images) ? data.images.map(normalizeImage).filter(Boolean) : [];
+    const added = images.filter((image) => image.name && !previousNames.has(image.name));
+    const stored = data?.stored && typeof data.stored === "object" ? data.stored : null;
+    const sizeText = formatImageMeta(stored || {});
+    const resized = Boolean(data?.resized);
+    const serverMessage = typeof data?.optimize_message === "string" ? data.optimize_message.trim() : "";
+    // GIF und animiertes WebP bleiben absichtlich unverändert; das steht in der Servermeldung.
+    const passedThrough = !resized && serverMessage && !serverMessage.startsWith("Bild unverändert");
+    return {
+      name: added[added.length - 1]?.name || file?.name || "",
+      resized,
+      message: resized
+        ? serverMessage || `Bild wurde verkleinert${sizeText ? ` (${sizeText})` : ""}.`
+        : passedThrough
+          ? serverMessage
+          : `Bild war bereits passend${sizeText ? ` (${sizeText})` : ""} – keine Verkleinerung nötig.`,
+    };
+  }
+
+  _applyOptimizePayload(data) {
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const summary = data?.summary && typeof data.summary === "object" ? data.summary : {};
+    const items = results
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => ({
+        name: typeof entry.name === "string" ? entry.name : "",
+        message:
+          (typeof entry.error === "string" && entry.error.trim()) ||
+          (typeof entry.message === "string" && entry.message.trim()) ||
+          (entry.resized ? "Bild wurde verkleinert." : "Bild war bereits passend."),
+        error: typeof entry.error === "string" ? entry.error.trim() : "",
+      }));
+    const changed = results.filter((entry) => entry?.resized).length;
+    const bytesBefore = Math.max(0, Number(summary.bytes_before) || 0);
+    const bytesAfter = Math.max(0, Number(summary.bytes_after) || 0);
+    const savedBytes = Math.max(0, bytesBefore - bytesAfter);
+    const summaryText =
+      changed > 0
+        ? `${formatNumber(changed)} ${changed === 1 ? "Bild" : "Bilder"} optimiert, ` +
+          `${formatBytes(savedBytes)} gespart (${formatPercent(summary.saved_percent)} %).`
+        : "Nichts zu tun – alle Bilder passen bereits.";
+    const patch = {
+      imagesOptimizeBusy: false,
+      imagesOptimizeError: "",
+      imagesOptimizeResult: { items, summaryText, changed },
+    };
+    if (Array.isArray(data?.images)) {
+      patch.images = data.images.map(normalizeImage).filter(Boolean);
+      patch.imagesLoading = false;
+    }
+    this._patchEditor(patch);
+  }
+
+  async _optimizeImages() {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || this._imageBusy() || !editor.articleNumber) {
+      return;
+    }
+    this._patchEditor({
+      imagesOptimizeBusy: true,
+      imagesOptimizeError: "",
+      imagesOptimizeResult: null,
+      imagesError: "",
+      imagesNotice: "",
+    });
+    try {
+      const data = await this._api(`${productPath(editor.articleNumber)}/images/optimize`, {
+        method: "POST",
+      });
+      if (!this._editor) {
+        return;
+      }
+      this._applyOptimizePayload(data);
+      this._focusImageResult("fd-optimize-result");
+      this._loadProducts();
+    } catch (error) {
+      if (isAbortError(error)) {
+        this._patchEditor({ imagesOptimizeBusy: false });
+        return;
+      }
+      this._patchEditor({
+        imagesOptimizeBusy: false,
+        imagesOptimizeError: this._errorText(error),
+      });
+    }
   }
 
   _canManageImages() {
     return Boolean(this._editor && this._editor.mode === "edit" && this._editor.articleNumber);
+  }
+
+  /** Öffnet den Produktdialog direkt im Bilder-Tab (Ziel des Warnzeichens). */
+  _openImagesFor(product) {
+    if (!this._can("product") || !product) {
+      return;
+    }
+    this._openEdit(product);
+    if (!this._editor) {
+      return;
+    }
+    this._patchEditor({ tab: "images" });
+    this._loadEditorTabData("images");
   }
 
   async _loadImages(articleNumber) {
@@ -1838,26 +2036,42 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     const articleNumber = editor.articleNumber;
+    const previousNames = new Set(editor.images.map((image) => image.name));
+    const results = [];
     this._patchEditor({
       imagesBusy: true,
       imagesError: "",
       imagesNotice: "",
       imagesPendingDelete: null,
+      imagesUploadResults: [],
+      imagesOptimizeResult: null,
+      imagesOptimizeError: "",
     });
 
     try {
       for (const file of files) {
         const formData = new FormData();
         formData.append("file", file, file.name);
-        await this._api(`${productPath(articleNumber)}/images`, { method: "POST", formData });
+        const data = await this._api(`${productPath(articleNumber)}/images`, { method: "POST", formData });
+        results.push(this._uploadResult(file, data, previousNames));
+        for (const image of Array.isArray(data?.images) ? data.images : []) {
+          if (image?.name) {
+            previousNames.add(image.name);
+          }
+        }
       }
       await this._loadImages(articleNumber);
       if (this._editor) {
         this._patchEditor({
           imagesBusy: false,
+          imagesUploadResults: results,
           imagesNotice:
             files.length === 1 ? "Bild wurde hochgeladen." : `${files.length} Bilder wurden hochgeladen.`,
         });
+        if (this._editor.images.length >= MAX_IMAGES) {
+          // Das Eingabefeld wird jetzt deaktiviert; der Fokus wandert zum Ergebnis.
+          this._focusImageResult("fd-upload-result");
+        }
       }
       this._loadProducts();
     } catch (error) {
@@ -1869,6 +2083,7 @@ export class FrickeldaveStorePanel extends LitElement {
       if (this._editor) {
         this._patchEditor({
           imagesBusy: false,
+          imagesUploadResults: results,
           imagesError: `${this._errorText(error)} Bereits übertragene Bilder bleiben erhalten.`,
         });
       }
@@ -3241,7 +3456,9 @@ export class FrickeldaveStorePanel extends LitElement {
           <div class="fd-stock-chips">${this._renderStockSummary(product)}</div>
         </td>
         <td data-label="Status">
-          <div class="fd-badges">${this._renderProductBadges(product)}</div>
+          <div class="fd-badges">
+            ${this._renderImageWarning(product, "row")} ${this._renderProductBadges(product)}
+          </div>
         </td>
         <td data-label="Aktionen">
           <div class="fd-row-actions">${this._renderProductActions(product)}</div>
@@ -3264,6 +3481,34 @@ export class FrickeldaveStorePanel extends LitElement {
         </span>
       `,
     );
+  }
+
+  /**
+   * Warndreieck für Produkte mit mindestens einem zu großen Bild. In der Kachel
+   * liegt es als Badge am Bild, in der Liste in der Statusspalte; beide Varianten
+   * öffnen den Produktdialog im Bilder-Tab.
+   */
+  _renderImageWarning(product, variant = "card") {
+    if (this._productOversizedCount(product) === 0) {
+      return "";
+    }
+    return html`
+      <button
+        type="button"
+        class="fd-image-warning fd-image-warning--${variant}"
+        title=${OVERSIZED_HINT}
+        aria-label=${OVERSIZED_HINT}
+        @click=${(event) => {
+          event.stopPropagation();
+          this._openImagesFor(product);
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
+        </svg>
+        ${variant === "row" ? html`<span class="fd-image-warning-text">Bilder zu groß</span>` : ""}
+      </button>
+    `;
   }
 
   _renderProductBadges(product) {
@@ -3324,6 +3569,7 @@ export class FrickeldaveStorePanel extends LitElement {
             : html`<div class="fd-product-placeholder" aria-hidden="true">
                 ${String(productLabel).slice(0, 1).toUpperCase()}
               </div>`}
+          ${this._renderImageWarning(product, "card")}
         </div>
         <div class="fd-product-body">
           <div class="fd-product-title-row">
@@ -3929,17 +4175,94 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
       `;
     }
-    const busy = editor.imagesBusy || editor.imagesLoading;
+    const busy = this._imageBusy();
     const images = Array.isArray(editor.images) ? editor.images : [];
     const productLabel = editor.name || editor.articleNumber || "Produkt";
+    const oversizedCount = this._oversizedCount(images);
+    const uploadResults = Array.isArray(editor.imagesUploadResults) ? editor.imagesUploadResults : [];
+    const optimizeResult = editor.imagesOptimizeResult;
 
     return html`
       ${editor.imagesError ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.imagesError}</div>` : ""}
-      ${editor.imagesNotice ? html`<div class="fd-banner fd-banner--success" role="status">${editor.imagesNotice}</div>` : ""}
+      ${editor.imagesNotice || uploadResults.length > 0
+        ? html`<div
+            id="fd-upload-result"
+            class="fd-banner fd-banner--success"
+            role="status"
+            aria-live="polite"
+            tabindex="-1"
+          >
+            <div class="fd-result-body">
+              ${editor.imagesNotice ? html`<p>${editor.imagesNotice}</p>` : ""}
+              ${uploadResults.length > 0
+                ? html`<ul class="fd-result-list" role="list" aria-label="Ergebnis der Uploads">
+                    ${uploadResults.map(
+                      (result) => html`
+                        <li>
+                          <span class="fd-result-name">${result.name}</span>
+                          <span>${result.message}</span>
+                        </li>
+                      `,
+                    )}
+                  </ul>`
+                : ""}
+            </div>
+          </div>`
+        : ""}
 
-      <p class="fd-muted fd-small">
-        ${images.length} von ${MAX_IMAGES} Bildern · Artikelnummer ${editor.articleNumber}
-      </p>
+      ${oversizedCount > 0
+        ? html`<div class="fd-banner fd-banner--warning" role="note">
+            <p>
+              ${oversizedCount === 1 ? "1 Bild ist zu groß." : `${oversizedCount} Bilder sind zu groß.`}
+              Empfohlen sind höchstens 1600 px lange Kante und 400 KB je Bild.
+            </p>
+          </div>`
+        : ""}
+
+      <div class="fd-image-toolbar">
+        <p class="fd-muted fd-small">
+          ${images.length} von ${MAX_IMAGES} Bildern · Artikelnummer ${editor.articleNumber}
+        </p>
+        <button
+          type="button"
+          class="fd-button"
+          @click=${() => this._optimizeImages()}
+          ?disabled=${busy || oversizedCount === 0}
+          aria-busy=${editor.imagesOptimizeBusy ? "true" : "false"}
+          title=${oversizedCount === 0
+            ? "Alle Bilder passen bereits."
+            : `${oversizedCount === 1 ? "1 Bild" : `${oversizedCount} Bilder`} verkleinern`}
+        >
+          Bilder optimieren
+        </button>
+      </div>
+
+      ${editor.imagesOptimizeError
+        ? html`<div class="fd-banner fd-banner--error" role="alert">${editor.imagesOptimizeError}</div>`
+        : ""}
+      ${optimizeResult
+        ? html`<section
+            id="fd-optimize-result"
+            class="fd-optimize-result"
+            tabindex="-1"
+            aria-live="polite"
+            aria-label="Ergebnis der Bildoptimierung"
+          >
+            <p class="fd-optimize-summary">${optimizeResult.summaryText}</p>
+            ${optimizeResult.items.length > 0
+              ? html`<ul class="fd-result-list" role="list">
+                  ${optimizeResult.items.map(
+                    (item) => html`
+                      <li class=${item.error ? "fd-result-error" : ""}>
+                        <span class="fd-result-name">${item.name}</span>
+                        <span>${item.message}</span>
+                      </li>
+                    `,
+                  )}
+                </ul>`
+              : ""}
+          </section>`
+        : ""}
 
       <div class="fd-upload">
         <label class="fd-label" for="fd-image-upload">Bilder hochladen (maximal ${MAX_IMAGES})</label>
@@ -3981,6 +4304,7 @@ export class FrickeldaveStorePanel extends LitElement {
         ${images.map((image, index) => {
           const state = this._imageState(this._imageUrl({ articleNumber: editor.articleNumber }, image));
           const src = state.src;
+          const meta = formatImageMeta(image);
           return html`
             <li class="fd-image-card">
               <div class="fd-image-preview">
@@ -4001,6 +4325,21 @@ export class FrickeldaveStorePanel extends LitElement {
                 ${image.is_main ? html`<span class="fd-badge fd-badge--main">Hauptbild</span>` : ""}
               </div>
               <p class="fd-image-name" title=${image.name}>${image.name}</p>
+              <p class="fd-image-meta">
+                <span>${meta || "Größe unbekannt"}</span>
+                ${image.oversized
+                  ? html`<span
+                      class="fd-image-flag"
+                      role="img"
+                      title=${this._oversizedTitle(image)}
+                      aria-label=${this._oversizedTitle(image)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
+                      </svg>
+                    </span>`
+                  : ""}
+              </p>
               <div class="fd-image-actions">
                 <button
                   type="button"
@@ -6114,6 +6453,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
 
     .fd-product-media {
+      position: relative;
       aspect-ratio: 4 / 3;
       overflow: hidden;
       background: var(--fd-surface-alt);
@@ -6565,6 +6905,138 @@ export class FrickeldaveStorePanel extends LitElement {
       display: flex;
       flex-wrap: wrap;
       gap: 4px;
+    }
+
+    .fd-image-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-image-toolbar p {
+      margin: 0;
+    }
+
+    .fd-image-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      margin: 0;
+      color: var(--fd-text-muted);
+      font-size: 11px;
+    }
+
+    .fd-image-flag {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      color: var(--fd-warning);
+    }
+
+    .fd-image-flag svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    .fd-result-body {
+      display: flex;
+      flex: 1 1 240px;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .fd-result-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin: 0;
+      padding-inline-start: var(--fd-space-4);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-result-name {
+      margin-inline-end: 6px;
+      color: var(--fd-text-muted);
+      font-family: var(--ha-font-family-code, ui-monospace, SFMono-Regular, monospace);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .fd-result-error {
+      color: var(--fd-error);
+    }
+
+    .fd-optimize-result {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+      padding: var(--fd-space-3);
+      border: 1px solid var(--fd-divider);
+      border-radius: var(--fd-radius);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-optimize-summary {
+      margin: 0;
+      font-weight: 500;
+    }
+
+    .fd-image-warning {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      min-width: 44px;
+      min-height: 44px;
+      padding: 2px 8px;
+      border: 1px solid var(--fd-warning-border);
+      border-radius: var(--fd-radius-pill);
+      background: var(--fd-warning-fill);
+      color: var(--fd-text);
+      font: inherit;
+      cursor: pointer;
+      transition:
+        background-color var(--fd-duration-fast),
+        border-color var(--fd-duration-fast);
+    }
+
+    .fd-image-warning svg {
+      flex: none;
+      width: 18px;
+      height: 18px;
+      fill: var(--fd-warning);
+    }
+
+    .fd-image-warning:hover {
+      border-color: var(--fd-warning);
+      background: var(--fd-surface-alt);
+    }
+
+    .fd-image-warning-text {
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .fd-image-warning--card {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      min-width: 44px;
+      padding: 0;
+      border-color: var(--fd-warning-border);
+      background: var(--fd-surface);
+      box-shadow: var(--fd-shadow);
+    }
+
+    .fd-image-warning--card svg {
+      width: 22px;
+      height: 22px;
     }
 
     /* Bestand ------------------------------------------------------------- */

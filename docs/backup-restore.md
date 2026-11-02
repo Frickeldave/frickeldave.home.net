@@ -21,9 +21,12 @@ abgelehnt (kein Pfad-Traversal). Vor dem Speichern legt die Integration das
 Zielverzeichnis an und prüft die Schreibbarkeit; ein fehlender Mount führt zu
 einem klaren Fehler (`400 validation_error`) statt zu einem stillen Fallback.
 
-Im Konfigurationspanel (Tab **Allgemeine**) schaltet die Option **„Von Backup
-ausschließen“** zwischen `config` (aus) und `share` (an) um; `media` ist als
-alternatives Ziel wählbar. Die Oberfläche zeigt dabei die betroffenen Pfade an.
+Im Konfigurationspanel (Tab **Allgemeine Einstellungen**) zeigt der Schalter
+**„Produktkatalog im Home-Assistant-Backup enthalten“** den aus `data_path`
+abgeleiteten Zustand: `config` = enthalten, `share`/`media` = nicht enthalten.
+Der Schalter wählt beim Einschalten `config`, beim Ausschalten `share`; `media`
+ist als alternatives Ziel wählbar. Die Oberfläche zeigt dabei die betroffenen
+Pfade an.
 
 ## Was gesichert wird
 
