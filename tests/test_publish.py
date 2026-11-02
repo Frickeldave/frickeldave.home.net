@@ -12,6 +12,7 @@ from image_helpers import jpeg_bytes
 
 from custom_components.frickeldave_store import FrickeldaveStoreRuntime
 from custom_components.frickeldave_store.const import DOMAIN, STORAGE_KEY
+from custom_components.frickeldave_store.models import Image, Product
 from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.publish import (
@@ -20,13 +21,17 @@ from custom_components.frickeldave_store.publish import (
     PublishArtifactsUnavailable,
     PublishEmptyCatalog,
     PublishNotConfigured,
+    PublishRemovalsBlocked,
     PublishService,
     PublishSettings,
     PublishTokenMissing,
     RemoteTree,
     blob_sha,
+    build_artifacts,
+    diff_artifacts,
+    publish_removal_guard,
 )
-from custom_components.frickeldave_store.store import CatalogStore
+from custom_components.frickeldave_store.store import CatalogStore, ImageStorage
 from custom_components.frickeldave_store.views import PublishView
 
 
@@ -231,7 +236,7 @@ async def test_publish_prod_commits_to_dev_then_dispatches_deploy_prd(tmp_path: 
 
 async def test_publish_reports_removed_images(tmp_path: Path) -> None:
     store, _ = await _store_with_product(tmp_path)
-    stale = "src/assets/handmade/LA/OTHER/OTHER-01.jpg"
+    stale = "src/assets/handmade/LA/LAOLT1/LAOLT1-01.jpg"
     fake = FakeGitHub(
         PublishSettings(
             "Frickeldave/frickeldave.github.io", "dev", "main", "fd-deploy-prd.yml", "ghp-test"
@@ -715,3 +720,286 @@ async def test_malformed_publish_settings_are_reported_not_a_500(tmp_path: Path)
         await service.async_publish("dev")
 
     assert err.value.code == "publish_not_configured"
+
+
+# ---------------------------------------------------------------------------
+# Verwaltete Pfade, Löschschutz und stabile Bildnamen (#289)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "managed"),
+    [
+        ("public/data/handmade.json", True),
+        ("src/assets/handmade/LA/LAKBCD/LAKBCD-01.jpg", True),
+        ("src/assets/handmade/3D/3DHP42/3DHP42-01.jpg", True),
+        ("src/assets/handmade/EP/EP3PHO/EP3PHO-01.jpg", True),
+        ("src/assets/handmade/SB/SBAPRV/SBAPRV-03.jpg", True),
+        ("src/assets/handmade/WO/WO4MEQ/WO4MEQ-02.jpg", True),
+        ("src/assets/handmade/LA/LA7SQL/LA7SQL-01.jpeg", True),
+        ("src/assets/handmade/LA/LAX/LAX-01.jpg", True),
+        # 3D-Modellquellen gehören der Website, nicht dem Store.
+        ("src/assets/handmade/3dmodels/models/Verteilerdose.scad", False),
+        ("src/assets/handmade/3dmodels/includes/roundedcube.scad", False),
+        ("src/assets/handmade/.gitkeep", False),
+        ("src/assets/handmade/README.md", False),
+        # Ordner ohne Artikelmuster oder mit fremder Artikelnummer.
+        ("src/assets/handmade/LA/LAKBCD/sub/LAKBCD-01.jpg", False),
+        ("src/assets/handmade/LA/OTHER/OTHER-01.jpg", False),
+        ("src/assets/handmade/XX/XXABCD/XXABCD-01.jpg", False),
+        ("src/assets/handmade/LA/LAKBCD/LAKBCD-1.jpg", False),
+        ("src/assets/handmade/LA/LAKBCD/LAKBCD-01.txt", False),
+        ("public/data/other.json", False),
+    ],
+)
+def test_is_managed_path_only_covers_catalog_and_product_images(path: str, managed: bool) -> None:
+    from custom_components.frickeldave_store.publish import _is_managed_path
+
+    assert _is_managed_path(path) is managed
+
+
+def test_publish_removal_guard_thresholds() -> None:
+    # Kleine, offensichtlich gezielte Löschungen bleiben erlaubt.
+    assert publish_removal_guard(0, 100) is False
+    assert publish_removal_guard(2, 5) is False
+    # Absolute Grenze: mehr als zehn entfernte Bilder.
+    assert publish_removal_guard(10, 500) is False
+    assert publish_removal_guard(11, 500) is True
+    # Anteil: mehr als ein Drittel des bestehenden Bestands.
+    assert publish_removal_guard(5, 12) is True
+    assert publish_removal_guard(3, 100) is False
+    assert publish_removal_guard(3, 3) is True
+
+
+def _image_product(article: str, category: str, names: list[str]) -> Product:
+    return Product(
+        article_number=article,
+        name=article,
+        category=category,
+        price=10.0,
+        images=[Image(name=name, is_main=index == 0) for index, name in enumerate(names)],
+    )
+
+
+def _image_storage(tmp_path: Path, files: dict[str, dict[str, bytes]]) -> ImageStorage:
+    storage = ImageStorage(tmp_path / "images")
+    for article, entries in files.items():
+        directory = storage.product_dir(article)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, data in entries.items():
+            (directory / name).write_bytes(data)
+    return storage
+
+
+def test_incident_d13cb2f_leaves_3d_model_sources_untouched(tmp_path: Path) -> None:
+    """Regression: der Publish d13cb2f löschte ``3dmodels/**`` (#289)."""
+
+    data = {
+        "LAKBCD-01.jpg": b"bild-01",
+        "LAKBCD-03.jpg": b"bild-03",
+        "LAKBCD-05.jpg": b"bild-05",
+        "LAKBCD-08.jpg": b"bild-08",
+        "3DHP42-01.jpg": b"gemeinsames-foto",
+        "LA6BPS-01.jpg": b"gemeinsames-foto",
+    }
+    images = _image_storage(
+        tmp_path,
+        {
+            "LAKBCD": {
+                name: data[name]
+                for name in ("LAKBCD-01.jpg", "LAKBCD-03.jpg", "LAKBCD-05.jpg", "LAKBCD-08.jpg")
+            },
+            "3DHP42": {"3DHP42-01.jpg": data["3DHP42-01.jpg"]},
+            "LA6BPS": {"LA6BPS-01.jpg": data["LA6BPS-01.jpg"]},
+        },
+    )
+    products = [
+        _image_product("3DHP42", "3D", ["3DHP42-01.jpg"]),
+        _image_product("LA6BPS", "LA", ["LA6BPS-01.jpg"]),
+        _image_product(
+            "LAKBCD", "LA", ["LAKBCD-01.jpg", "LAKBCD-03.jpg", "LAKBCD-05.jpg", "LAKBCD-08.jpg"]
+        ),
+    ]
+    artifacts = build_artifacts(products, [], images)
+
+    # Zustand von dev vor dem Publish d13cb2f: Katalog, Modellquellen, Bilder.
+    remote = {
+        _catalog_path(): "alter-katalog",
+        "src/assets/handmade/3dmodels/includes/roundedcube.scad": "scad-blob",
+        "src/assets/handmade/3dmodels/models/Verteilerdose.scad": "scad-blob-2",
+    }
+    for path, content in artifacts.items():
+        if path != _catalog_path():
+            remote[path] = blob_sha(content)
+
+    changes = diff_artifacts(artifacts, remote)
+
+    assert [change.path for change in changes if change.status == "removed"] == []
+    assert all("3dmodels" not in change.path for change in changes)
+    # Die Bilder behalten ihre Namen: keine Umbenennung wie LAKBCD-08 → LAKBCD-04.
+    assert [change.path for change in changes if change.status == "added"] == []
+    assert [change.path for change in changes if change.status == "changed"] == [_catalog_path()]
+
+
+def test_identical_image_bytes_stay_with_their_own_product(tmp_path: Path) -> None:
+    """Gleiche Bytes bei zwei Produkten sind kein Zuordnungsfehler (#289)."""
+
+    shared = b"dasselbe-foto"
+    images = _image_storage(
+        tmp_path,
+        {"3DHP42": {"3DHP42-01.jpg": shared}, "LA6BPS": {"LA6BPS-01.jpg": shared}},
+    )
+    artifacts = build_artifacts(
+        [
+            _image_product("3DHP42", "3D", ["3DHP42-01.jpg"]),
+            _image_product("LA6BPS", "LA", ["LA6BPS-01.jpg"]),
+        ],
+        [],
+        images,
+    )
+
+    # Jedes Bild bleibt im Ordner seines Produkts; die Ablage ist je Artikel getrennt.
+    assert artifacts["src/assets/handmade/3D/3DHP42/3DHP42-01.jpg"] == shared
+    assert artifacts["src/assets/handmade/LA/LA6BPS/LA6BPS-01.jpg"] == shared
+
+
+async def test_image_names_stay_stable_across_publications(tmp_path: Path) -> None:
+    store, article = await _store_with_product(tmp_path)
+    product_service = ProductService(store)
+    for _ in range(2):
+        await product_service.async_add_image(
+            article,
+            filename="foto.jpg",
+            content_type="image/jpeg",
+            data=jpeg_bytes((40, 30)),
+        )
+    await store.async_save()
+
+    fake = FakeGitHub(_publish_settings())
+    service = PublishService(store, client_factory=lambda settings: fake)
+    await service.async_publish("dev")
+    prefix = f"src/assets/handmade/LA/{article}/"
+    assert {path.removeprefix(prefix) for path in fake.remote} >= {
+        f"{article}-01.jpg",
+        f"{article}-02.jpg",
+        f"{article}-03.jpg",
+    }
+
+    await product_service.async_delete_image(article, f"{article}-02.jpg")
+    result = await service.async_publish("dev")
+
+    changes = fake.commits[-1]["changes"]
+    assert [change.path for change in changes if change.status == "removed"] == [
+        f"{prefix}{article}-02.jpg"
+    ]
+    assert [change.path for change in changes if change.status == "added"] == []
+    assert result["removal_guard"]["triggered"] is False
+
+
+async def test_removal_guard_blocks_bulk_deletion_and_needs_confirmation(tmp_path: Path) -> None:
+    store, _ = await _store_with_product(tmp_path)
+    remote = {_catalog_path(): "alter-katalog"}
+    for index in range(1, 21):
+        article_number = f"LAOL{index:02d}"
+        remote[f"src/assets/handmade/LA/{article_number}/{article_number}-01.jpg"] = f"alt-{index}"
+    fake = FakeGitHub(_publish_settings(), remote=remote)
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    preview = await service.async_publish("dev", dry_run=True)
+    assert preview["removal_guard"]["triggered"] is True
+    assert "löschen" in preview["warning"]
+    assert preview["counts"]["removed"] == 20
+
+    with pytest.raises(PublishRemovalsBlocked) as blocked:
+        await service.async_publish("dev")
+    assert blocked.value.code == "publish_removals_blocked"
+    assert "20 von 20" in blocked.value.message
+    assert fake.commits == []
+
+    confirmed = await service.async_publish("dev", confirm_removals=True)
+    assert confirmed["removal_guard"] == {
+        "triggered": True,
+        "removed": 20,
+        "existing": 20,
+        "maxFiles": 10,
+        "share": 3,
+        "confirmed": True,
+    }
+    assert confirmed["changed"] is True
+    assert len(fake.commits) == 1
+
+
+async def test_removal_guard_ignores_small_targeted_deletions(tmp_path: Path) -> None:
+    store, article = await _store_with_product(tmp_path)
+    remote = {
+        _catalog_path(): "alter-katalog",
+        "src/assets/handmade/LA/LAOL01/LAOL01-01.jpg": "alt-1",
+        "src/assets/handmade/LA/LAOL02/LAOL02-01.jpg": "alt-2",
+    }
+    fake = FakeGitHub(_publish_settings(), remote=remote)
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    result = await service.async_publish("dev")
+
+    assert result["removal_guard"]["triggered"] is False
+    assert result["changed"] is True
+    assert result["counts"]["removed"] == 2
+    assert result["warning"] is None
+
+
+def _publish_runtime(tmp_path: Path, fake: FakeGitHub, store: CatalogStore) -> Any:
+    class FakeConfig:
+        def path(self, *parts: str) -> str:
+            return str(tmp_path.joinpath(*parts))
+
+    hass = SimpleNamespace(data={}, config=FakeConfig())
+    permissions = PermissionManager()
+    permissions.load({"admin": ["app_admin"], "worker": ["product"]})
+    runtime = FrickeldaveStoreRuntime(
+        entry=None,  # type: ignore[arg-type]
+        store=store,
+        products=ProductService(store),
+        permissions=permissions,
+        ai=None,  # type: ignore[arg-type]
+        export_path=Path("export"),
+        publish=PublishService(store, client_factory=lambda settings: fake),
+    )
+    hass.data[DOMAIN] = runtime
+    return hass
+
+
+async def test_publish_view_requires_boolean_confirm_removals(tmp_path: Path) -> None:
+    store, _ = await _store_with_product(tmp_path)
+    fake = FakeGitHub(_publish_settings())
+    hass = _publish_runtime(tmp_path, fake, store)
+
+    invalid = await PublishView().post(
+        _request(hass, "admin", {"target": "dev", "dry_run": True, "confirm_removals": "ja"})
+    )
+    assert invalid.status == 400
+    assert json.loads(invalid.body.decode("utf-8"))["error"]["code"] == "validation_error"
+
+    accepted = await PublishView().post(
+        _request(hass, "admin", {"target": "dev", "dry_run": True, "confirm_removals": True})
+    )
+    assert accepted.status == 200
+
+
+async def test_publish_view_answers_removal_guard_with_409_and_german_message(
+    tmp_path: Path,
+) -> None:
+    store, _ = await _store_with_product(tmp_path)
+    remote = {_catalog_path(): "alter-katalog"}
+    for index in range(1, 21):
+        article_number = f"LAOL{index:02d}"
+        remote[f"src/assets/handmade/LA/{article_number}/{article_number}-01.jpg"] = f"alt-{index}"
+    fake = FakeGitHub(_publish_settings(), remote=remote)
+    hass = _publish_runtime(tmp_path, fake, store)
+
+    response = await PublishView().post(_request(hass, "admin", {"target": "dev"}))
+
+    assert response.status == 409
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "publish_removals_blocked"
+    assert "löschen" in body["error"]["message"]
+    assert fake.commits == []

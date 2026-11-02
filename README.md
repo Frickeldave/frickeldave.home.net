@@ -322,6 +322,28 @@ bestätigen lassen. Fehlt eine Bilddatei oder ist sie nicht lesbar, antwortet de
 Endpunkt mit `409 publish_artifacts_unavailable` und nennt Artikelnummer und
 Datei, statt still Bilder aus dem Katalog zu entfernen.
 
+### Löschschutz
+
+Eine Veröffentlichung entfernt nur, was diese Integration selbst verantwortet:
+`public/data/handmade.json` und Produktbilder im Muster
+`src/assets/handmade/<Kategorie>/<Artikelnummer>/<Artikelnummer>-NN.<Endung>`
+(Kategorien `3D`, `EP`, `LA`, `SB`, `WO`). Alles andere unter
+`src/assets/handmade` – etwa die 3D-Modellquellen unter `3dmodels/**` oder eine
+`.gitkeep` – gehört der Website und wird nie als entfernt gemeldet.
+
+Zusätzlich gilt ein Löschschutz: würde ein Lauf mehr als 10 Bilder oder mehr als
+ein Drittel des bestehenden Bildbestands entfernen (und mindestens 3), bricht er
+mit `409 publish_removals_blocked` und deutscher Meldung ab. Im Dry-Run erscheint
+dieselbe Meldung als Warnung. Übergehen lässt sich der Schutz nur mit
+`"confirm_removals": true` (boolesch, Standard `false`, `app_admin`); die
+Bestätigung gilt für genau einen Lauf. Die Antwort enthält dazu
+`removal_guard` (`triggered`, `removed`, `existing`, `maxFiles`, `share`,
+`confirmed`).
+
+Bilddateinamen bleiben stabil: das Hauptbild heißt `<Artikelnummer>-01`, alle
+übrigen Bilder behalten ihre eigene Nummer aus dem Store, solange sie frei ist.
+Ein Löschen oder Hinzufügen im Store benennt daher nicht die übrigen Bilder um.
+
 Fehlt das Token, antwortet der Endpunkt mit `400 publish_token_missing` und einer
 deutschen Meldung. Ein abgelehntes Token ergibt `502 github_unauthorized`, ein
 unbekanntes Repository `404 github_not_found`, ein währenddessen bewegter Branch

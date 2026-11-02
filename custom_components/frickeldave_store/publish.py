@@ -22,6 +22,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,12 +33,12 @@ import aiohttp
 
 from .export import (
     CATALOG_RELATIVE_PATH,
+    IMAGE_SUFFIX_PATTERN,
     IMAGES_RELATIVE_PATH,
     catalog_bytes,
-    desired_image_name,
-    ordered_images,
+    published_image_names,
 )
-from .models import Product, StoreError, normalise_text
+from .models import CATEGORIES, Product, StoreError, normalise_text
 from .store import CatalogStore, ImageStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,13 @@ NO_BODY_STATUSES: tuple[int, ...] = (204, 205, 304)
 
 DEFAULT_COMMIT_MESSAGE = "chore(catalog): Katalog aus Home Assistant veröffentlicht (#289)"
 
+#: Löschschutz: mehr entfernte Bilder als diese Zahl gelten als Unfall.
+REMOVAL_GUARD_MAX_FILES = 10
+#: Löschschutz: mehr als ein Drittel des bestehenden Bildbestands gilt als Unfall.
+REMOVAL_GUARD_SHARE = 3
+#: Kleinere, offensichtlich gezielte Löschungen werden nie blockiert.
+REMOVAL_GUARD_MIN_FILES = 3
+
 STATUS_ADDED = "added"
 STATUS_CHANGED = "changed"
 STATUS_REMOVED = "removed"
@@ -66,6 +74,17 @@ FILE_STATUSES: tuple[str, ...] = (
 
 KIND_CATALOG = "catalog"
 KIND_IMAGE = "image"
+
+#: Verwaltete Produktbilder: ``<kategorie>/<artikelnummer>/<artikelnummer>-NN.<endung>``.
+#: Die Artikelnummer muss mit ihrer Kategorie beginnen, jede Tiefe darunter ist
+#: fremd (z. B. ``3dmodels/…``) und wird nie als verwaltet betrachtet.
+_CATEGORY_PATTERN = "|".join(re.escape(category) for category in CATEGORIES)
+_MANAGED_IMAGE_RE = re.compile(
+    rf"^{re.escape(IMAGES_RELATIVE_PATH.as_posix())}"
+    rf"/(?P<category>{_CATEGORY_PATTERN})"
+    rf"/(?P<article>(?P=category)[A-Z0-9]{{1,5}})"
+    rf"/(?P=article)-\d{{2}}\.{IMAGE_SUFFIX_PATTERN}$"
+)
 
 
 class PublishError(StoreError):
@@ -110,11 +129,44 @@ class PublishArtifactsUnavailable(PublishError):
     code = "publish_artifacts_unavailable"
 
 
+class PublishRemovalsBlocked(PublishError):
+    """Der Lauf würde ungewöhnlich viele Bilder löschen."""
+
+    code = "publish_removals_blocked"
+
+
 EMPTY_CATALOG_MESSAGE = (
     "Der lokale Store enthält keine Produkte. Eine Veröffentlichung würde den "
     "kompletten Website-Katalog löschen. Bitte zuerst Produkte importieren oder "
     "anlegen. Ein bewusstes Leeren ist nur mit allow_empty möglich."
 )
+
+
+def publish_removal_guard(removed: int, existing: int) -> bool:
+    """Löschschutz: erkennt einen Lauf, der den Bildbestand massenhaft entfernt.
+
+    ``removed`` sind die entfernten Bilder, ``existing`` der bestehende
+    Bildbestand des Zielbranches. Blockiert wird, wenn mehr als
+    :data:`REMOVAL_GUARD_MAX_FILES` Bilder verschwinden oder mehr als ein Drittel
+    des Bestands. Die absolute Grenze fängt einen falsch aufgebauten Store ab,
+    die anteilige Grenze zusätzlich kleine Kataloge, bei denen zehn Dateien
+    bereits fast alles wären. Gezielte Einzellöschungen bleiben möglich.
+    """
+
+    if removed < REMOVAL_GUARD_MIN_FILES:
+        return False
+    if removed > REMOVAL_GUARD_MAX_FILES:
+        return True
+    return existing > 0 and removed * REMOVAL_GUARD_SHARE > existing
+
+
+def removal_guard_message(removed: int, existing: int) -> str:
+    return (
+        f"Die Veröffentlichung würde {removed} von {existing} vorhandenen Bildern "
+        "löschen. Das sieht nach einem Fehler aus (unvollständiger Store oder falsche "
+        "Zuordnung). Bitte zuerst den Dry-Run prüfen. Wenn die Löschung gewollt ist, "
+        "den Vorgang ausdrücklich mit confirm_removals bestätigen."
+    )
 
 
 def empty_catalog_warning(*, allow_empty: bool, dry_run: bool) -> str:
@@ -225,9 +277,24 @@ def publish_settings_from_store(store: CatalogStore) -> PublishSettings:
 
 
 def _is_managed_path(path: str) -> bool:
-    return path == CATALOG_RELATIVE_PATH.as_posix() or path.startswith(
-        f"{IMAGES_RELATIVE_PATH.as_posix()}/"
-    )
+    """Gehört der Pfad zu den Dateien, die diese Integration verantwortet?
+
+    Nur der Katalog und Produktbilder im Muster
+    ``src/assets/handmade/<Kategorie>/<Artikelnummer>/<Artikelnummer>-NN.<Endung>``.
+    Alles andere unterhalb von ``src/assets/handmade`` gehört der Website selbst –
+    etwa die 3D-Modellquellen unter ``3dmodels/`` oder ``.gitkeep`` – und darf
+    niemals als entfernt gelten, weil eine Veröffentlichung sie sonst löscht.
+    """
+
+    return path == CATALOG_RELATIVE_PATH.as_posix() or _MANAGED_IMAGE_RE.match(path) is not None
+
+
+def _managed_image_paths(paths: Iterable[str]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if path != CATALOG_RELATIVE_PATH.as_posix() and _is_managed_path(path)
+    ]
 
 
 def build_artifacts(
@@ -250,8 +317,7 @@ def build_artifacts(
     for product in sorted(product_list, key=lambda item: item.article_number):
         if product.archived:
             continue
-        for index, image in enumerate(ordered_images(product), start=1):
-            target_name = desired_image_name(product, index, image.name)
+        for image, target_name in published_image_names(product):
             source = images.path_for(product.article_number, image.name)
             try:
                 data = source.read_bytes()
@@ -656,6 +722,7 @@ class PublishService:
         message: str = "",
         user_id: str = "",
         allow_empty: bool = False,
+        confirm_removals: bool = False,
     ) -> dict[str, Any]:
         if target not in PUBLISH_TARGETS:
             raise PublishError("target muss 'dev' oder 'prod' sein.", code="validation_error")
@@ -682,11 +749,9 @@ class PublishService:
                 user_id or "-",
             )
             raise PublishEmptyCatalog(EMPTY_CATALOG_MESSAGE)
-        warning = (
-            empty_catalog_warning(allow_empty=allow_empty, dry_run=dry_run)
-            if empty_catalog
-            else None
-        )
+        warnings: list[str] = []
+        if empty_catalog:
+            warnings.append(empty_catalog_warning(allow_empty=allow_empty, dry_run=dry_run))
         if empty_catalog and not dry_run:
             _LOGGER.warning(
                 "Veröffentlichen nach %s mit leerem Katalog (allow_empty, Benutzer %s)",
@@ -709,6 +774,27 @@ class PublishService:
             changes = diff_artifacts(artifacts, tree.blobs)
             counts = _status_counts(changes)
 
+            # Löschschutz: Absolut- und Anteilsgrenze gelten gemeinsam. Im Dry-Run
+            # bleibt es bei einer Warnung, damit der Plan vollständig sichtbar ist.
+            removed_images = sum(
+                1
+                for change in changes
+                if change.kind == KIND_IMAGE and change.status == STATUS_REMOVED
+            )
+            existing_images = len(_managed_image_paths(tree.blobs))
+            guard = publish_removal_guard(removed_images, existing_images)
+            if guard:
+                guard_message = removal_guard_message(removed_images, existing_images)
+                if not dry_run and not confirm_removals:
+                    _LOGGER.warning(
+                        "Veröffentlichen nach %s abgelehnt: Löschschutz (%s Bilder, Benutzer %s)",
+                        target,
+                        removed_images,
+                        user_id or "-",
+                    )
+                    raise PublishRemovalsBlocked(guard_message)
+                warnings.append(guard_message)
+
             local_catalog = artifacts[CATALOG_RELATIVE_PATH.as_posix()]
             remote_catalog: bytes | None = None
             catalog_change = next((item for item in changes if item.kind == KIND_CATALOG), None)
@@ -716,6 +802,15 @@ class PublishService:
                 remote_catalog = await client.async_read_file(CATALOG_RELATIVE_PATH.as_posix())
             product_counts = diff_products(local_catalog, remote_catalog)
             image_counts = diff_images(changes, len(artifacts) - 1)
+            warning = " ".join(warnings) or None
+            removal_guard = {
+                "triggered": guard,
+                "removed": removed_images,
+                "existing": existing_images,
+                "maxFiles": REMOVAL_GUARD_MAX_FILES,
+                "share": REMOVAL_GUARD_SHARE,
+                "confirmed": bool(guard and not dry_run and confirm_removals),
+            }
 
             result = self._result(
                 target=target,
@@ -726,6 +821,7 @@ class PublishService:
                 product_counts=product_counts,
                 image_counts=image_counts,
                 warning=warning,
+                removal_guard=removal_guard,
             )
 
             if dry_run:
@@ -793,6 +889,7 @@ class PublishService:
         product_counts: dict[str, int],
         image_counts: dict[str, int],
         warning: str | None = None,
+        removal_guard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         files = changes[:MAX_CHANGE_ENTRIES]
         deployment = {
@@ -820,6 +917,7 @@ class PublishService:
             "files": [change.to_dict() for change in files],
             "files_truncated": len(changes) > MAX_CHANGE_ENTRIES,
             "deployment": deployment,
+            "removal_guard": removal_guard,
             "warning": warning,
             "summary": _summary_with_warning(
                 self._summary(
@@ -897,9 +995,13 @@ __all__ = [
     "PublishEmptyCatalog",
     "PublishError",
     "PublishNotConfigured",
+    "PublishRemovalsBlocked",
     "PublishService",
     "PublishSettings",
     "PublishTokenMissing",
+    "REMOVAL_GUARD_MAX_FILES",
+    "REMOVAL_GUARD_MIN_FILES",
+    "REMOVAL_GUARD_SHARE",
     "RemoteTree",
     "blob_sha",
     "build_artifacts",
@@ -907,5 +1009,7 @@ __all__ = [
     "diff_images",
     "diff_products",
     "empty_catalog_warning",
+    "publish_removal_guard",
     "publish_settings_from_store",
+    "removal_guard_message",
 ]

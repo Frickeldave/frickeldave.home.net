@@ -9,6 +9,7 @@ from custom_components.frickeldave_store.export import (
     build_catalog,
     export_catalog_sync,
     main,
+    published_image_names,
 )
 from custom_components.frickeldave_store.models import Image, Product
 from custom_components.frickeldave_store.store import ImageStorage
@@ -131,3 +132,64 @@ def test_cli_exports_and_writes_manifest(tmp_path: Path) -> None:
     assert (target_dir / "public/data/handmade.json").is_file()
     manifest = json.loads((target_dir / "frickeldave_store_export.json").read_text())
     assert manifest["products"] == 1
+
+
+def test_published_names_keep_store_numbers_and_put_main_first() -> None:
+    """Namen bleiben stabil: keine Durchnummerierung nach Position (#289)."""
+
+    product = _product(
+        images=[
+            Image(name="LAH3K3-08.jpg", is_main=False),
+            Image(name="LAH3K3-01.jpg", is_main=True),
+            Image(name="LAH3K3-03.jpg", is_main=False),
+            Image(name="LAH3K3-05.jpg", is_main=False),
+        ]
+    )
+
+    assert [name for _, name in published_image_names(product)] == [
+        "LAH3K3-01.jpg",
+        "LAH3K3-03.jpg",
+        "LAH3K3-05.jpg",
+        "LAH3K3-08.jpg",
+    ]
+
+
+def test_published_names_yield_to_main_image_and_keep_the_suffix() -> None:
+    product = _product(
+        images=[
+            Image(name="LAH3K3-01.jpeg", is_main=False),
+            Image(name="LAH3K3-05.jpeg", is_main=True),
+        ]
+    )
+
+    # Das Hauptbild ist immer -01, ihr eigenes -05 ist damit belegt.
+    assert [name for _, name in published_image_names(product)] == [
+        "LAH3K3-01.jpeg",
+        "LAH3K3-02.jpeg",
+    ]
+
+
+def test_export_keeps_names_of_remaining_images_after_a_deletion(tmp_path: Path) -> None:
+    images = ImageStorage(tmp_path / "images")
+    directory = images.product_dir("LAH3K3")
+    directory.mkdir(parents=True)
+    for name in ("LAH3K3-01.jpg", "LAH3K3-03.jpg", "LAH3K3-08.jpg"):
+        (directory / name).write_bytes(name.encode("utf-8"))
+    product = _product(
+        images=[
+            Image(name="LAH3K3-01.jpg", is_main=True),
+            Image(name="LAH3K3-03.jpg", is_main=False),
+            Image(name="LAH3K3-08.jpg", is_main=False),
+        ]
+    )
+    target_dir = tmp_path / "website"
+
+    export_catalog_sync([product], images, target_dir)
+    product.images = [image for image in product.images if image.name != "LAH3K3-03.jpg"]
+    export_catalog_sync([product], images, target_dir)
+
+    image_dir = target_dir / "src/assets/handmade/LA/LAH3K3"
+    assert sorted(item.name for item in image_dir.iterdir()) == [
+        "LAH3K3-01.jpg",
+        "LAH3K3-08.jpg",
+    ]

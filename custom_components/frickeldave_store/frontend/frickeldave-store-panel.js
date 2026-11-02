@@ -268,6 +268,17 @@ const normalizeCounts = (value) => ({
   total: asCount(value?.total),
 });
 
+const normalizeRemovalGuard = (value) => {
+  const payload = value && typeof value === "object" ? value : {};
+  return {
+    triggered: Boolean(payload.triggered),
+    removed: asCount(payload.removed),
+    existing: asCount(payload.existing),
+    maxFiles: asCount(payload.maxFiles),
+    share: asCount(payload.share),
+  };
+};
+
 const normalizePublishResult = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const deployment = payload.deployment && typeof payload.deployment === "object" ? payload.deployment : {};
@@ -294,6 +305,7 @@ const normalizePublishResult = (data) => {
     images: normalizeCounts(payload.images),
     files,
     filesTruncated: Boolean(payload.files_truncated),
+    removalGuard: normalizeRemovalGuard(payload.removal_guard),
     deployment: {
       triggered: Boolean(deployment.triggered),
       wouldTrigger: Boolean(deployment.would_trigger),
@@ -4540,6 +4552,7 @@ export class FrickeldaveStorePanel extends LitElement {
       message: "",
       emptyCatalog: false,
       allowEmpty: false,
+      confirmRemovals: false,
     };
     this._requestPublish(true);
   }
@@ -4564,6 +4577,17 @@ export class FrickeldaveStorePanel extends LitElement {
       return;
     }
     this._publishDialog = { ...this._publishDialog, allowEmpty: Boolean(value) };
+  }
+
+  _setPublishConfirmRemovals(value) {
+    if (!this._publishDialog) {
+      return;
+    }
+    this._publishDialog = {
+      ...this._publishDialog,
+      confirmRemovals: Boolean(value),
+      error: this._publishDialog.removalsBlocked ? "" : this._publishDialog.error,
+    };
   }
 
   _publishErrorText(error) {
@@ -4617,12 +4641,13 @@ export class FrickeldaveStorePanel extends LitElement {
       return;
     }
     const allowEmpty = !dryRun && Boolean(dialog.allowEmpty);
+    const confirmRemovals = !dryRun && Boolean(dialog.confirmRemovals);
     if (!dryRun) {
       // Beim bestätigten Leeren bleibt die Ablehnung sichtbar, bis die Antwort da ist.
       this._publishDialog = {
         ...dialog,
         busy: true,
-        error: dialog.emptyCatalog ? dialog.error : "",
+        error: dialog.emptyCatalog || dialog.removalsBlocked ? dialog.error : "",
       };
     }
     const message = dialog.message.trim();
@@ -4633,6 +4658,7 @@ export class FrickeldaveStorePanel extends LitElement {
           target: dialog.target,
           dry_run: Boolean(dryRun),
           ...(allowEmpty ? { allow_empty: true } : {}),
+          ...(confirmRemovals ? { confirm_removals: true } : {}),
           ...(message ? { message } : {}),
         },
         timeoutMs: IMPORT_TIMEOUT_MS,
@@ -4650,6 +4676,7 @@ export class FrickeldaveStorePanel extends LitElement {
           result,
           emptyCatalog: false,
           allowEmpty: false,
+          confirmRemovals: false,
         };
       } else {
         this._publishDialog = {
@@ -4660,6 +4687,7 @@ export class FrickeldaveStorePanel extends LitElement {
           result,
           emptyCatalog: false,
           allowEmpty: false,
+          confirmRemovals: false,
         };
         this._showToast(this._publishToastMessage(result));
       }
@@ -4672,20 +4700,33 @@ export class FrickeldaveStorePanel extends LitElement {
       }
       const code = error instanceof ApiError ? error.code : "";
       const emptyCatalog = !dryRun && code === "publish_empty_catalog";
+      const removalsBlocked = !dryRun && code === "publish_removals_blocked";
       this._publishDialog = {
         ...this._publishDialog,
         phase: dryRun ? "error" : "dry-run",
         busy: false,
         error: this._publishErrorText(error),
         emptyCatalog,
+        removalsBlocked,
         // Zustimmung gilt nie fort: nach einem Fehler und nach jedem Abbruch
         // muss der Notausgang erneut bewusst gesetzt werden.
         allowEmpty: false,
+        confirmRemovals: false,
       };
       if (emptyCatalog) {
         this.updateComplete
           .then(() => {
             const checkbox = this.renderRoot?.querySelector("#fd-publish-allow-empty");
+            if (checkbox && typeof checkbox.focus === "function") {
+              checkbox.focus();
+            }
+          })
+          .catch(() => {});
+      }
+      if (removalsBlocked) {
+        this.updateComplete
+          .then(() => {
+            const checkbox = this.renderRoot?.querySelector("#fd-publish-confirm-removals");
             if (checkbox && typeof checkbox.focus === "function") {
               checkbox.focus();
             }
@@ -4724,7 +4765,9 @@ export class FrickeldaveStorePanel extends LitElement {
     const done = dialog.phase === "done";
     const dryRun = dialog.phase === "dry-run";
     const emptyCatalog = Boolean(dialog.emptyCatalog) && !done;
-    const warning = emptyCatalog ? "" : result?.warning || "";
+    const removalsBlocked =
+      !done && (Boolean(dialog.removalsBlocked) || Boolean(result?.removalGuard?.triggered));
+    const warning = emptyCatalog || dialog.removalsBlocked ? "" : result?.warning || "";
     const deploymentBranch = result?.deployment?.branch || result?.branch || "";
 
     return html`
@@ -4814,6 +4857,33 @@ export class FrickeldaveStorePanel extends LitElement {
             ? html`<div class="fd-banner fd-banner--warning" role="note">
                 <p>${warning}</p>
               </div>`
+            : ""}
+
+          ${removalsBlocked
+            ? html`
+                <section class="fd-publish-confirm" aria-labelledby="fd-publish-removals-title">
+                  <h3 id="fd-publish-removals-title">Löschung bestätigen</h3>
+                  <label class="fd-switch">
+                    <input
+                      id="fd-publish-confirm-removals"
+                      type="checkbox"
+                      .checked=${Boolean(dialog.confirmRemovals)}
+                      ?disabled=${dialog.busy}
+                      aria-describedby="fd-publish-removals-hint"
+                      @change=${(event) => this._setPublishConfirmRemovals(event.target.checked)}
+                    />
+                    <span>
+                      Ich verstehe, dass mehrere Bilder von der Website entfernt werden
+                    </span>
+                  </label>
+                  <p class="fd-hint" id="fd-publish-removals-hint">
+                    Der Löschschutz greift bei mehr als
+                    ${formatNumber(result?.removalGuard?.maxFiles ?? 10)} entfernten Bildern oder
+                    mehr als einem Drittel des bestehenden Bildbestands. „Jetzt veröffentlichen“
+                    ist erst nach dem Anhaken möglich; die Bestätigung gilt nur für diesen Lauf.
+                  </p>
+                </section>
+              `
             : ""}
 
           ${dialog.phase === "checking"
@@ -4973,7 +5043,7 @@ export class FrickeldaveStorePanel extends LitElement {
                     type="button"
                     class="fd-button fd-button--primary"
                     @click=${() => this._requestPublish(false)}
-                    ?disabled=${!dryRun || dialog.busy}
+                    ?disabled=${!dryRun || dialog.busy || (removalsBlocked && !dialog.confirmRemovals)}
                     aria-busy=${dialog.busy ? "true" : "false"}
                   >
                     ${dialog.busy ? "Veröffentlichen …" : "Jetzt veröffentlichen"}

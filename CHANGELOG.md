@@ -6,6 +6,40 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-02
+
+### Fixed
+
+- **Veröffentlichung löschte 3D-Modellquellen (#289).** `_is_managed_path`
+  betrachtete jede Datei unterhalb von `src/assets/handmade` als verwaltetes
+  Produktbild. Der Katalog kennt `3dmodels/includes/*.scad` und
+  `3dmodels/models/*.scad` nicht, deshalb committete die Veröffentlichung sie
+  als entfernt (Vorfall `d13cb2f` im Website-Repository). Verwaltet sind jetzt
+  ausschließlich `public/data/handmade.json` und Bilder im Muster
+  `src/assets/handmade/<Kategorie>/<Artikelnummer>/<Artikelnummer>-NN.<Endung>`
+  mit einer der fünf Kategorien. Fremde Pfade – `3dmodels/**`, `.gitkeep`,
+  Unterordner ohne Artikelmuster – werden nie als entfernt gemeldet und damit
+  nie gelöscht.
+- **Stabile Bilddateinamen beim Veröffentlichen (#289).** Das Hauptbild heißt
+  weiterhin `<Artikelnummer>-01`; alle übrigen Bilder behalten ihre eigene
+  Nummer aus dem Store, solange sie frei ist. Bisher wurde rein nach Position
+  durchnummeriert, sodass das Löschen eines Bildes alle folgenden Namen
+  verschob (z. B. `LAKBCD-08.jpg` → `LAKBCD-04.jpg` bei gleichzeitigem Löschen
+  von `LAKBCD-05.jpg`). Namen bleiben nun über Veröffentlichungen hinweg gleich,
+  solange dasselbe Bild im Produkt bleibt.
+
+### Added
+
+- **Löschschutz `publish_removal_guard` (#289).** Eine Veröffentlichung bricht
+  mit `409 publish_removals_blocked` und deutscher Meldung ab, wenn sie mehr als
+  10 Bilder oder mehr als ein Drittel des bestehenden Bildbestands entfernen
+  würde (mindestens 3 Löschungen, damit gezielte Einzelfälle nie blockieren).
+  Im Dry-Run erscheint dieselbe Meldung als Warnung. Übergehen lässt sich der
+  Schutz nur mit `"confirm_removals": true` (`POST /publish`, `app_admin`); die
+  Bestätigung gilt je Lauf und wird nicht gespeichert. Die Antwort enthält
+  zusätzlich `removal_guard` (`triggered`, `removed`, `existing`, `maxFiles`,
+  `share`, `confirmed`). Das Panel zeigt dafür ein eigenes Bestätigungsfeld.
+
 ## [0.1.14] - 2026-11-02
 
 ### Added

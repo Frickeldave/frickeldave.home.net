@@ -79,6 +79,7 @@ STATUS_BY_CODE: dict[str, int] = {
     "publish_failed": 502,
     "publish_empty_catalog": 409,
     "publish_artifacts_unavailable": 409,
+    "publish_removals_blocked": 409,
     "github_unauthorized": 502,
     "github_not_found": 404,
     "github_conflict": 409,
@@ -818,7 +819,13 @@ class PublishView(HomeAssistantView):
         try:
             runtime, user = _authorize(request, ROLE_APP_ADMIN)
             payload = await _optional_json_body(request)
-            unknown = set(payload) - {"target", "dry_run", "message", "allow_empty"}
+            unknown = set(payload) - {
+                "target",
+                "dry_run",
+                "message",
+                "allow_empty",
+                "confirm_removals",
+            }
             if unknown:
                 raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
             target = payload.get("target")
@@ -830,6 +837,10 @@ class PublishView(HomeAssistantView):
             allow_empty = payload.get("allow_empty", False)
             if not isinstance(allow_empty, bool):
                 raise ValidationError("allow_empty muss ein Wahrheitswert sein.")
+            # Löschschutz übergehen: eigene, ausdrückliche Bestätigung je Lauf.
+            confirm_removals = payload.get("confirm_removals", False)
+            if not isinstance(confirm_removals, bool):
+                raise ValidationError("confirm_removals muss ein Wahrheitswert sein.")
             message = payload.get("message", "")
             if not isinstance(message, str):
                 raise ValidationError("message muss eine Zeichenkette sein.")
@@ -840,6 +851,7 @@ class PublishView(HomeAssistantView):
                 message=message,
                 user_id=str(user.id),
                 allow_empty=allow_empty,
+                confirm_removals=confirm_removals,
             )
             return web.json_response(result)
         except StoreError as err:
