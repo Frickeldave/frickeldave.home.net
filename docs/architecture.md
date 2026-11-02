@@ -26,8 +26,12 @@ HTTP (aiohttp HomeAssistantView)   WebSocket (websocket_api)
   `media`), Schreibbarkeitsprüfung und Backup-Kennzeichnung für die API.
 - **`permissions.py`** – Rollen, Default Deny, Prüfung je Anfrage.
 - **`ai.py`** – Anbieter-Abstraktion, DeepSeek-Client, Metadaten-Bereinigung.
-- **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen).
+- **`importer.py`** – idempotenter Katalogimport (Live-Katalog plus Bilder, nur anlegen),
+  inklusive des validierten Batch-Pfads für Erweiterungen (`async_import_products`).
 - **`export.py`** – idempotenter Katalogexport im Website-Schema.
+- **`extension.py`** – öffentlicher Erweiterungsvertrag (Contract 1): Registrierung,
+  Feature-Status, Fassade auf den Store. Details in
+  [`extension-api.md`](extension-api.md).
 - **`panel.py`** – statische Dateien und zwei `panel_custom`-Panels: Seitenleiste
   (`frickeldave-store`) und Konfigurationspanel am Integrationseintrag
   (`frickeldave-store-config`).
@@ -49,6 +53,9 @@ Zusätzlich stehen dort `version` (Integrationsversion aus `const.VERSION`),
 `storage_schema_version` (Katalogschema aus `models.SCHEMA_VERSION`) und
 `panel_module_url` (die tatsächlich registrierte, cache-gebustete Modul-URL) – damit kann
 das Panel den geladenen Build anzeigen. `GET`/`PATCH /settings` führen ebenfalls `version`.
+Beide Antworten enthalten zusätzlich `features` (Verfügbarkeit je Fähigkeit, Anbieter,
+`contract_version`); `/settings` liefert für `app_admin` außerdem `feature_details` mit
+Titel, benötigter Rolle und `provides_panel_routes`.
 
 ## Konfigurationspanel
 
@@ -89,6 +96,46 @@ schreibt `users` über `hass.config_entries.async_update_entry` und ruft anschli
 und der Options-Flow bleibt als Rückfallebene funktionsfähig. Die Sicherheitsregel
 „letzter `app_admin` bleibt“ verhindert das Aussperren der Verwaltung (`409 conflict`).
 
+## Erweiterungspunkt (Contract 1)
+
+`frickeldave_store` bleibt allein funktionsfähig, lässt sich aber um eine zweite Custom
+Integration (`frickeldave_store_sync`) erweitern. Der Vertrag liegt vollständig in
+`custom_components/frickeldave_store/extension.py`; alles andere bleibt privat.
+
+```
+Erweiterung (frickeldave_store_sync)
+        |  importiert nur
+        v
+extension.py  ──registriert Handler──>  hass.data["frickeldave_store_extensions"]
+        |                                        |
+        |  Fassade (StoreFacade)                 |  Status
+        v                                        v
+CatalogStore / ImageStorage / export / importer   GET /me, /settings, POST /features/{feature}
+```
+
+- **Import-Richtung:** Erweiterung → Basis. Die Basis importiert die Erweiterung nie und
+  kennt ihren Domainnamen nicht; sie speichert nur, was registriert wurde.
+- **Registrierung:** `async_register_extension()` in `async_setup_entry` der Erweiterung,
+  Abmeldung über `async_unregister_extension()` bzw. `entry.async_on_unload`. Die
+  Registrierung ist idempotent und validiert `contract_version` gegen
+  `CONTRACT_VERSION` (aktuell `1`).
+- **Fassade:** Produkte inkl. Bildmetadaten, Lagerstätten, Artikelnummern,
+  Rechteprüfung, Snapshot, Export im Website-Schema und ein validierter Import-Batch.
+  Keine internen Objekte, keine Privatattribute, keine Dateipfade.
+- **Routing:** `POST /api/frickeldave_store/features/{feature}` authentifiziert und
+  prüft `required_role`, dann ruft die Basis den Handler der Erweiterung auf. Ohne
+  registrierte Erweiterung bedient die Basis `publish` und `import` selbst – `0.1.16`
+  ist die additive Brücke, `publish.py` und `importer.py` bleiben unverändert nutzbar.
+- **Gating:** `features` in `/me` und `/settings` (plus `feature_details` für
+  `app_admin`) sagen dem Panel, welche Fähigkeit verfügbar ist, wer sie anbietet und
+  warum sie gegebenenfalls nicht bereit ist. Das Event
+  `frickeldave_store_features_changed` aktualisiert ein offenes Panel.
+- **Versionierung:** `CONTRACT_VERSION` steigt nur bei inkompatiblen Änderungen;
+  additive Felder erhöhen sie nicht. Ein abweichender Vertrag endet mit
+  `ExtensionError("contract_mismatch")`.
+
+Referenz: [`extension-api.md`](extension-api.md).
+
 ## Zentrale Entscheidungen
 
 | Entscheidung | Begründung |
@@ -108,6 +155,7 @@ und der Options-Flow bleibt als Rückfallebene funktionsfähig. Die Sicherheitsr
 | Import nur anlegen, nie überschreiben | Bestandsdaten und Panel-Pflege haben Vorrang; keine Datenverluste durch Wiederholung |
 | Import-Quellen nur `https` + Host-Allowlist | verhindert SSRF über `source_url`/`image_base_url`; eigene Quellen nur für `app_admin` |
 | Bildimport über dasselbe `ImageStorage`-Layout | Panel, Export und Import teilen sich einen Bildbestand |
+| Erweiterungspunkt als versionierter Vertrag (`extension.py`) statt `hass.data`-Kopplung | klare, prüfbare Grenze; die Basis bleibt allein lauffähig, die Erweiterung sieht nur die Fassade |
 
 ## Speicherort und Backup-Ausschluss
 

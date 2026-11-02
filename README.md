@@ -407,6 +407,14 @@ Fehlerformat: `{"error": {"code": "...", "message": "..."}}`.
 | POST | `/publish` (nur `app_admin`; `dry_run` möglich) |
 | POST | `/export` (nur `app_admin`) |
 | POST | `/import/catalog` (`product`; mit eigener Quelle nur `app_admin`) |
+| POST | `/features/{feature}` (Erweiterungs-Fähigkeit; ohne Erweiterung `publish`/`import`) |
+
+`GET /me` und `GET /settings` liefern zusätzlich `features` (Verfügbarkeit je Fähigkeit
+mit `available`, `reason`, `provider`, `contract_version`); `/settings` enthält für
+`app_admin` außerdem `feature_details` mit Titel, benötigter Rolle und
+`provides_panel_routes`. Die zweite Custom Integration `frickeldave_store_sync` nutzt
+`POST /features/publish` und `/features/import`. Der öffentliche Erweiterungsvertrag
+(Contract 1) ist in [`docs/extension-api.md`](docs/extension-api.md) beschrieben.
 
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`/`in_cabinet` (erste/zweite Lagerstätte), `location` +

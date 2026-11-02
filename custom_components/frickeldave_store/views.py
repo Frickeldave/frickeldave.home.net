@@ -29,6 +29,17 @@ from .const import (
     VERSION,
 )
 from .export import async_export_catalog
+from .extension import (
+    FEATURE_IMPORT,
+    FEATURE_PUBLISH,
+    ExtensionError,
+    FeatureRequest,
+    FeatureResponse,
+    StoreFacade,
+    feature_details,
+    feature_status,
+    resolve_feature,
+)
 from .importer import async_import_catalog
 from .models import (
     SCHEMA_VERSION,
@@ -116,6 +127,12 @@ def _internal_error_response(err: Exception, *, action: str) -> web.Response:
         },
         status=500,
     )
+
+
+def _features_payload(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """Feature-Status für ``/me`` und ``/settings`` (Contract 1, additiv)."""
+
+    return {name: status.as_dict() for name, status in feature_status(hass).items()}
 
 
 def _hass(request: web.Request) -> HomeAssistant:
@@ -289,6 +306,7 @@ class MeView(HomeAssistantView):
             payload["version"] = VERSION
             payload["storage_schema_version"] = SCHEMA_VERSION
             payload["panel_module_url"] = PANEL_MODULE_URL
+            payload["features"] = _features_payload(_hass(request))
             return web.json_response(payload)
         except StoreError as err:
             return _error_response(err)
@@ -666,6 +684,9 @@ def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> 
     payload["export_path"] = str(runtime.export_path)
     payload["storage"] = storage_payload(hass, data_path_from_entry(runtime.entry))
     payload["locations"] = runtime.store.locations_payload()
+    payload["features"] = _features_payload(hass)
+    # Ausführliche Beschreibung nur für die Anwendungsverwaltung (Default Deny).
+    payload["feature_details"] = feature_details(hass)
     return payload
 
 
@@ -808,6 +829,107 @@ class LocationsView(HomeAssistantView):
             return _error_response(err)
 
 
+def _validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Payload für Veröffentlichen prüfen (identisch für Alt- und Feature-Route)."""
+
+    unknown = set(payload) - {
+        "target",
+        "dry_run",
+        "message",
+        "allow_empty",
+        "confirm_removals",
+    }
+    if unknown:
+        raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+    target = payload.get("target")
+    if target not in PUBLISH_TARGETS:
+        raise ValidationError("target muss 'dev' oder 'prod' sein.")
+    dry_run = payload.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise ValidationError("dry_run muss ein Wahrheitswert sein.")
+    allow_empty = payload.get("allow_empty", False)
+    if not isinstance(allow_empty, bool):
+        raise ValidationError("allow_empty muss ein Wahrheitswert sein.")
+    # Löschschutz übergehen: eigene, ausdrückliche Bestätigung je Lauf.
+    confirm_removals = payload.get("confirm_removals", False)
+    if not isinstance(confirm_removals, bool):
+        raise ValidationError("confirm_removals muss ein Wahrheitswert sein.")
+    message = payload.get("message", "")
+    if not isinstance(message, str):
+        raise ValidationError("message muss eine Zeichenkette sein.")
+    return {
+        "target": str(target),
+        "dry_run": dry_run,
+        "message": message,
+        "allow_empty": allow_empty,
+        "confirm_removals": confirm_removals,
+    }
+
+
+async def _async_publish(
+    runtime: FrickeldaveStoreRuntime, payload: dict[str, Any], user_id: str
+) -> dict[str, Any]:
+    options = _validate_publish_payload(payload)
+    service = runtime.publish or PublishService(runtime.store)
+    return await service.async_publish(
+        options["target"],
+        dry_run=options["dry_run"],
+        message=options["message"],
+        user_id=user_id,
+        allow_empty=options["allow_empty"],
+        confirm_removals=options["confirm_removals"],
+    )
+
+
+def _import_requires_admin(payload: dict[str, Any]) -> bool:
+    """Eigene Quellen können interne Adressen ansprechen: nur App-Admins."""
+
+    return "source_url" in payload or "image_base_url" in payload
+
+
+def _validate_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Payload für den Katalogimport prüfen (identisch für Alt- und Feature-Route)."""
+
+    unknown = set(payload) - {
+        "source_url",
+        "image_base_url",
+        "import_images",
+        "dry_run",
+        "overwrite",
+    }
+    if unknown:
+        raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+    source_url = _optional_url(payload, "source_url")
+    image_base_url = _optional_url(payload, "image_base_url")
+    import_images = payload.get("import_images", True)
+    if not isinstance(import_images, bool):
+        raise ValidationError("import_images muss ein Wahrheitswert sein.")
+    dry_run = payload.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise ValidationError("dry_run muss ein Wahrheitswert sein.")
+    overwrite = payload.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        raise ValidationError("overwrite muss ein Wahrheitswert sein.")
+    return {
+        "source_url": source_url or DEFAULT_CATALOG_URL,
+        "image_base_url": image_base_url or DEFAULT_IMAGE_BASE_URL,
+        "import_images": import_images,
+        "dry_run": dry_run,
+        # Überschreiben bleibt bei der Rolle ``product``: es ist ein
+        # Sammel-Update auf Daten, die diese Rolle einzeln ändern darf. Der
+        # Store legt vor dem ersten Schreiben einen Snapshot an.
+        "overwrite": overwrite,
+    }
+
+
+async def _async_import(
+    runtime: FrickeldaveStoreRuntime, payload: dict[str, Any]
+) -> dict[str, Any]:
+    options = _validate_import_payload(payload)
+    result = await async_import_catalog(runtime.store, **options)
+    return result.to_dict()
+
+
 class PublishView(HomeAssistantView):
     """Katalog nach dev oder prod veröffentlichen (Dry-Run ohne Schreibwirkung)."""
 
@@ -819,41 +941,7 @@ class PublishView(HomeAssistantView):
         try:
             runtime, user = _authorize(request, ROLE_APP_ADMIN)
             payload = await _optional_json_body(request)
-            unknown = set(payload) - {
-                "target",
-                "dry_run",
-                "message",
-                "allow_empty",
-                "confirm_removals",
-            }
-            if unknown:
-                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
-            target = payload.get("target")
-            if target not in PUBLISH_TARGETS:
-                raise ValidationError("target muss 'dev' oder 'prod' sein.")
-            dry_run = payload.get("dry_run", False)
-            if not isinstance(dry_run, bool):
-                raise ValidationError("dry_run muss ein Wahrheitswert sein.")
-            allow_empty = payload.get("allow_empty", False)
-            if not isinstance(allow_empty, bool):
-                raise ValidationError("allow_empty muss ein Wahrheitswert sein.")
-            # Löschschutz übergehen: eigene, ausdrückliche Bestätigung je Lauf.
-            confirm_removals = payload.get("confirm_removals", False)
-            if not isinstance(confirm_removals, bool):
-                raise ValidationError("confirm_removals muss ein Wahrheitswert sein.")
-            message = payload.get("message", "")
-            if not isinstance(message, str):
-                raise ValidationError("message muss eine Zeichenkette sein.")
-            service = runtime.publish or PublishService(runtime.store)
-            result = await service.async_publish(
-                str(target),
-                dry_run=dry_run,
-                message=message,
-                user_id=str(user.id),
-                allow_empty=allow_empty,
-                confirm_removals=confirm_removals,
-            )
-            return web.json_response(result)
+            return web.json_response(await _async_publish(runtime, payload, str(user.id)))
         except StoreError as err:
             return _error_response(err)
         except Exception as err:
@@ -892,45 +980,90 @@ class CatalogImportView(HomeAssistantView):
     async def post(self, request: web.Request) -> web.Response:
         try:
             payload = await _optional_json_body(request)
-            unknown = set(payload) - {
-                "source_url",
-                "image_base_url",
-                "import_images",
-                "dry_run",
-                "overwrite",
-            }
-            if unknown:
-                raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
-            # Eigene Quellen können interne Adressen ansprechen: nur App-Admins.
-            custom = "source_url" in payload or "image_base_url" in payload
-            runtime, _ = _authorize(request, ROLE_APP_ADMIN if custom else ROLE_PRODUCT)
-            source_url = _optional_url(payload, "source_url")
-            image_base_url = _optional_url(payload, "image_base_url")
-            import_images = payload.get("import_images", True)
-            if not isinstance(import_images, bool):
-                raise ValidationError("import_images muss ein Wahrheitswert sein.")
-            dry_run = payload.get("dry_run", False)
-            if not isinstance(dry_run, bool):
-                raise ValidationError("dry_run muss ein Wahrheitswert sein.")
-            overwrite = payload.get("overwrite", False)
-            if not isinstance(overwrite, bool):
-                raise ValidationError("overwrite muss ein Wahrheitswert sein.")
-            # Überschreiben bleibt bei der Rolle ``product``: es ist ein
-            # Sammel-Update auf Daten, die diese Rolle einzeln ändern darf. Der
-            # Store legt vor dem ersten Schreiben einen Snapshot an.
-            result = await async_import_catalog(
-                runtime.store,
-                source_url=source_url or DEFAULT_CATALOG_URL,
-                image_base_url=image_base_url or DEFAULT_IMAGE_BASE_URL,
-                import_images=import_images,
-                dry_run=dry_run,
-                overwrite=overwrite,
+            runtime, _ = _authorize(
+                request,
+                ROLE_APP_ADMIN if _import_requires_admin(payload) else ROLE_PRODUCT,
             )
-            return web.json_response(result.to_dict())
+            return web.json_response(await _async_import(runtime, payload))
         except StoreError as err:
             return _error_response(err)
         except Exception as err:
             return _internal_error_response(err, action="Importieren des Katalogs")
+
+
+class FeaturesView(HomeAssistantView):
+    """Generischer Einstiegspunkt für Fähigkeiten einer Erweiterung (Contract 1).
+
+    Ohne registrierte Erweiterung bedient die Basis ``publish`` und ``import``
+    selbst (Fallback); die fachliche Validierung bleibt bei der Erweiterung,
+    sobald sie die Fähigkeit übernommen hat.
+    """
+
+    name = "api:frickeldave_store:features"
+    url = f"{API_PREFIX}/features/{{feature}}"
+    requires_auth = True
+
+    async def post(self, request: web.Request, feature: str) -> web.Response:
+        try:
+            hass = _hass(request)
+            runtime = _runtime(request)
+            payload = await _optional_json_body(request)
+            resolved = resolve_feature(hass, feature)
+            if resolved is not None:
+                user = _user(request)
+                if not resolved.ready:
+                    raise ExtensionError(
+                        "feature_unavailable",
+                        resolved.reason or "Diese Fähigkeit ist derzeit nicht verfügbar.",
+                    )
+                if resolved.handler is None:
+                    raise ExtensionError(
+                        "feature_unavailable",
+                        "Diese Fähigkeit nimmt keine Anfragen entgegen.",
+                    )
+                if resolved.required_role is not None:
+                    runtime.permissions.require(str(user.id), resolved.required_role)
+                facade = StoreFacade(
+                    hass,
+                    runtime,
+                    user_id=str(user.id),
+                    user_name=_user_name(user),
+                )
+                response = await resolved.handler(
+                    FeatureRequest(
+                        feature=feature,
+                        payload=payload,
+                        user_id=str(user.id),
+                        user_name=_user_name(user),
+                        facade=facade,
+                    )
+                )
+                if not isinstance(response, FeatureResponse):
+                    raise ExtensionError(
+                        "handler_failed",
+                        "Die Erweiterung hat eine ungültige Antwort geliefert.",
+                    )
+                return web.json_response(dict(response.payload), status=response.status)
+
+            if feature == FEATURE_PUBLISH:
+                _, user = _authorize(request, ROLE_APP_ADMIN)
+                return web.json_response(await _async_publish(runtime, payload, str(user.id)))
+            if feature == FEATURE_IMPORT:
+                role = ROLE_APP_ADMIN if _import_requires_admin(payload) else ROLE_PRODUCT
+                runtime.permissions.require(str(_user(request).id), role)
+                return web.json_response(await _async_import(runtime, payload))
+            raise ExtensionError(
+                "feature_unknown",
+                f"Unbekannte Fähigkeit: {feature!r}. Diese Basis kennt "
+                "'publish' und 'import'; alles andere muss eine Erweiterung "
+                "registrieren.",
+            )
+        except ExtensionError as err:
+            return web.json_response({"error": err.as_dict()}, status=err.status)
+        except StoreError as err:
+            return _error_response(err)
+        except Exception as err:
+            return _internal_error_response(err, action=f"Ausführen der Fähigkeit '{feature}'")
 
 
 VIEWS: tuple[type[HomeAssistantView], ...] = (
@@ -958,6 +1091,7 @@ VIEWS: tuple[type[HomeAssistantView], ...] = (
     PublishView,
     ExportView,
     CatalogImportView,
+    FeaturesView,
 )
 
 

@@ -4,7 +4,35 @@ Alle nennenswerten Änderungen an diesem Projekt werden hier festgehalten.
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionierung nach [SemVer](https://semver.org/lang/de/).
 
-## [Unreleased]
+## [0.1.16] - 2026-11-02
+
+### Added
+
+- **Erweiterungsvertrag `custom_components.frickeldave_store.extension` (#289).**
+  Contract 1: `ExtensionRegistration`, `FeatureSpec`, `FeatureStatus`,
+  `StoreFacade`, `async_register_extension`, `async_unregister_extension` und
+  `async_get_feature_status`. Eine zweite Custom Integration
+  (`frickeldave_store_sync`) kann Fähigkeiten beisteuern, ohne interne
+  Store-Objekte zu kennen. Die Fassade bietet Produkte inkl. Bildmetadaten,
+  Lagerstätten, Artikelnummern, Rechteprüfung, Snapshot, Export im
+  Website-Schema und einen validierten Import-Batch.
+- **Feature-Status in `GET /me` und `/settings`.** Neues Feld `features` mit
+  `available`, `reason`, `provider` und `contract_version` je Fähigkeit
+  (eingebaut: `publish`, `import`). Bestehende Felder bleiben unverändert.
+- **`POST /api/frickeldave_store/features/{feature}`.** Generischer,
+  authentifizierter Einstiegspunkt für Erweiterungs-Fähigkeiten. Ohne
+  registrierte Erweiterung bedient die Basis `publish` und `import` mit dem
+  bisherigen Verhalten (Fallback), damit 0.1.16 vollständig rückwärtskompatibel
+  bleibt.
+- **Event `frickeldave_store_features_changed`** nach Registrierung und
+  Abmeldung einer Erweiterung; ein offenes Panel kann seinen Feature-Status neu
+  laden. Registrierung nach dem Panel-Setup ist unkritisch.
+- **`docs/extension-api.md`** beschreibt Zweck, Stabilitätszusage,
+  Beispielregistrierung, Fassade, Fehlercodes und die Manifest-Abhängigkeit.
+
+### Changed
+
+- `const.VERSION` folgt wieder Manifest und `pyproject.toml` (0.1.16).
 
 ## [0.1.15] - 2026-11-02
 

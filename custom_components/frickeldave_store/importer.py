@@ -20,7 +20,9 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlparse
 
@@ -40,6 +42,7 @@ from .models import (
     StoreError,
     ValidationError,
     default_location_ids,
+    next_image_name,
     normalise_bool,
     normalise_price,
     normalise_stock,
@@ -113,6 +116,9 @@ class ImportResult:
     #: Nur für die Zusammenfassung: archivierte Produkte, die bewusst
     #: unangetastet bleiben (in ``skipped``/``unchanged`` enthalten).
     archived_skipped: int = 0
+    #: Artikelnummern der in diesem Lauf angelegten bzw. überschriebenen Produkte.
+    created_numbers: list[str] = field(default_factory=list)
+    updated_numbers: list[str] = field(default_factory=list)
 
     def add_error(self, article_number: str, message: str) -> None:
         self.errors.append({"articleNumber": article_number, "message": message})
@@ -132,6 +138,35 @@ class ImportResult:
             "unchanged": self.unchanged,
             "summary": self.summary,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ImageUpload:
+    """Bilddaten, die eine Erweiterung als Teil eines Import-Batches übergibt."""
+
+    name: str
+    data: bytes
+    is_main: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ImportItem:
+    """Ein Produkt eines Import-Batches (Erweiterungsvertrag).
+
+    ``payload`` nutzt die Felder des Website-Katalogs; ``article_number``
+    überschreibt ``articleNumber`` im Payload. ``images`` werden nach dem
+    Schreiben des Produkts in der Bildablage abgelegt.
+    """
+
+    article_number: str | None
+    payload: Mapping[str, Any]
+    images: tuple[ImageUpload, ...] = ()
+
+    def as_catalog(self) -> dict[str, Any]:
+        data = dict(self.payload)
+        if self.article_number:
+            data["articleNumber"] = self.article_number
+        return data
 
 
 @dataclass(slots=True)
@@ -299,6 +334,111 @@ async def async_import_catalog(
     return result
 
 
+async def async_import_products(
+    store: CatalogStore,
+    products: Sequence[Mapping[str, Any] | ImportItem],
+    *,
+    overwrite: bool = False,
+    stamp: str | None = None,
+) -> ImportResult:
+    """Fertige Katalogprodukte ohne Netzzugriff anwenden (Erweiterungsvertrag).
+
+    Anders als :func:`async_import_catalog` lädt dieser Pfad nichts nach: Die
+    Erweiterung übergibt geprüfte Produkte (und optional Bilddaten). Es gelten
+    dieselben Regeln – archivierte Produkte bleiben unangetastet, ``overwrite``
+    übernimmt ausschließlich :data:`OVERWRITE_FIELDS`, und der Store legt vor dem
+    ersten Schreiben einen Snapshot an.
+    """
+
+    raws: list[Any] = []
+    uploads: dict[str, list[ImageUpload]] = {}
+    for item in products:
+        if isinstance(item, ImportItem):
+            catalog_item = item.as_catalog()
+            raws.append(catalog_item)
+            if item.images:
+                number = str(catalog_item.get("articleNumber", "")).strip().upper()
+                uploads.setdefault(number, []).extend(item.images)
+        else:
+            raws.append(item)
+    if uploads:
+        _validate_uploads(store, uploads)
+    result = ImportResult(products_total=len(raws))
+    plan = _plan_import(raws, result, store, stamp, overwrite=overwrite)
+    await _async_apply_plan(store, plan, result)
+    if uploads:
+        await _async_write_uploads(store, uploads, result)
+    result.summary = build_summary(result)
+    return result
+
+
+def _validate_batch_image_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned or Path(cleaned).name != cleaned or cleaned in {".", ".."}:
+        raise ValidationError("Ungültiger Bildname im Import-Batch.")
+    return cleaned
+
+
+def _validate_uploads(store: CatalogStore, uploads: dict[str, list[ImageUpload]]) -> None:
+    """Bilddaten vor dem ersten Schreibzugriff prüfen (keine Teilpersistenz)."""
+
+    for number, images in uploads.items():
+        raw = store.get_raw_product(number)
+        existing = [str(item.get("name", "")) for item in (raw or {}).get("images", []) or []]
+        known = set(existing)
+        added = 0
+        for upload in images:
+            if not isinstance(upload.data, (bytes, bytearray)):
+                raise ValidationError("Bilddaten müssen Bytes sein.")
+            if upload.name.strip():
+                _validate_batch_image_name(upload.name)
+                if upload.name.strip() not in known:
+                    known.add(upload.name.strip())
+                    added += 1
+            else:
+                added += 1
+        if len(existing) + added > MAX_IMAGES:
+            raise ValidationError(f"Maximal {MAX_IMAGES} Bilder je Produkt.")
+
+
+async def _async_write_uploads(
+    store: CatalogStore, uploads: dict[str, list[ImageUpload]], result: ImportResult
+) -> None:
+    """Bilddaten eines Batches schreiben und den Produkten zuordnen."""
+
+    written = 0
+    async with store.lock:
+        for number, images in uploads.items():
+            raw = store.get_raw_product(number)
+            if raw is None or raw.get("archived"):
+                continue
+            product = Product.from_dict(raw, location_ids=store.location_ids())
+            for upload in images:
+                name = (
+                    _validate_batch_image_name(upload.name)
+                    if upload.name.strip()
+                    else next_image_name(number, [image.name for image in product.images])
+                )
+                await store.images.async_write(number, name, bytes(upload.data))
+                written += 1
+                existing = next((image for image in product.images if image.name == name), None)
+                if existing is not None:
+                    if upload.is_main:
+                        for image in product.images:
+                            image.is_main = image is existing
+                    continue
+                if upload.is_main or not product.images:
+                    for image in product.images:
+                        image.is_main = False
+                product.images.append(
+                    Image(name=name, is_main=upload.is_main or not product.images)
+                )
+            store.put_product(product)
+        if written:
+            await store.async_save()
+    result.images_imported += written
+
+
 def _plan_import(
     raw_products: list[Any],
     result: ImportResult,
@@ -420,6 +560,7 @@ async def _async_apply_plan(store: CatalogStore, plan: ImportPlan, result: Impor
             for tag in product.tags:
                 store.add_tag(tag)
             result.created += 1
+            result.created_numbers.append(product.article_number)
             result.images_imported += len(product.images)
 
         for product in plan.update:
@@ -431,6 +572,7 @@ async def _async_apply_plan(store: CatalogStore, plan: ImportPlan, result: Impor
                 for tag in product.tags:
                     store.add_tag(tag)
                 result.created += 1
+                result.created_numbers.append(product.article_number)
                 result.images_imported += len(fetched)
                 continue
             if winner.get("archived"):
@@ -443,6 +585,7 @@ async def _async_apply_plan(store: CatalogStore, plan: ImportPlan, result: Impor
             for tag in product.tags:
                 store.add_tag(tag)
             result.overwritten += 1
+            result.updated_numbers.append(product.article_number)
             result.images_imported += len(fetched)
 
         result.skipped += plan.unchanged + plan.archived_skipped
