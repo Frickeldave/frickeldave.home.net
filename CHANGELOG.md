@@ -41,6 +41,49 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Artikelnummern geprüft, auch gegen archivierte. Sie wird bewusst **nicht**
   reserviert: maßgeblich bleibt `POST /products`, dessen Antwort die tatsächlich
   vergebene Nummer enthält.
+- **Sortierbare Spaltenköpfe in der Produktliste (#289).** In der Listenansicht
+  sind `Produkt`, `Kategorie`, `Preis`, `Bestand` und `Status` jetzt echte Buttons
+  in den Spaltenköpfen. Der erste Klick sortiert die neue Spalte aufsteigend, ein
+  weiterer Klick dreht die Richtung. Die aktive Spalte trägt
+  `aria-sort="ascending|descending"`, die übrigen `aria-sort="none"`; jeder Kopf
+  hat ein `aria-label` mit Spaltenname und aktueller Richtung und ist per Tastatur
+  erreichbar. `Aktionen` bleibt unsortierbar. Sortierfeld und -richtung bleiben im
+  Zustand `_sort`/`_order`; ein Wechsel setzt den Seitenoffset zurück. Die
+  Sortierauswahl in der Filterleiste bietet jetzt dieselben fünf Felder und bleibt
+  mit den Spaltenköpfen synchron.
+- **Produktdialog mit eigenem Beschreibungs-Tab (#289).** Die Tabs lauten jetzt
+  `Grunddaten → Bilder → Beschreibung → Bestand`. Beschreibungsfeld, eigene
+  KI-Hinweise, der Button „Beschreibung vorschlagen“ samt Vorschlagsansicht und
+  Tag-Übernahme liegen im Tab `Beschreibung`; `Grunddaten` enthält weiterhin Name,
+  Kategorie, Preis, Größe, Tags, Sichtbarkeit und Personalisierbarkeit.
+- **Schrittweises Anlegen mit „Weiter“ (#289).** Beim Anlegen heißt der
+  Footer-Button auf `Grunddaten`, `Bilder` und `Beschreibung` „Weiter“ und wechselt
+  zum nächsten Tab; auf `Bestand` heißt er „Speichern“ und schließt den Dialog.
+  „Weiter“ auf `Grunddaten` legt das Produkt per `POST /products` an und wechselt in
+  den Bearbeiten-Modus (Überschrift „Produkt bearbeiten“). Auf den Folgetabs
+  speichert „Weiter“ die Änderungen und wechselt weiter. Validierungsfehler halten
+  den Tabwechsel auf und wechseln zu dem Tab, in dem das fehlerhafte Feld liegt.
+  Nach dem Anlegen weist ein Hinweis im Footer darauf hin, dass das Produkt bereits
+  gespeichert ist und „Schließen“ nur den Dialog beendet. Im Bearbeiten-Modus bleibt
+  es bei einem einzigen „Speichern“ auf allen Tabs.
+- **Artikelnummer als Badge im Dialogkopf (#289).** Die Nummer steht links neben
+  der Überschrift in einem Badge aus HA-Design-Tokens (kein Rohfarbwert). Im
+  Anlege-Modus wird sie beim Öffnen und bei jeder Kategorieänderung über
+  `GET /products/article-number` geholt; während des Ladens zeigt das Badge „…“,
+  bei einem Fehler „—“ mit der Ursache im `title`. Nach dem Anlegen zeigt das Badge
+  immer die `articleNumber` aus der Server-Antwort. Der bisherige Untertitel
+  „Artikelnummer …“ entfällt.
+- **Katalogimport-Dialog mit automatischer Vorschau (#289).** Beim Öffnen läuft
+  automatisch ein Dry-Run (`{"dry_run": true}`) und zeigt `would_create`,
+  `would_overwrite`, `unchanged`, `failed`, `images_imported` und die `summary`.
+  Die neue Checkbox „Bestehende Produkte überschreiben“ ist standardmäßig aus;
+  solange sie aus ist, bleiben vorhandene Produkte unverändert. Bei aktiver
+  Checkbox erscheint ein Warnbanner mit den überschriebenen und den erhaltenen
+  Feldern, und die Vorschau wird mit `{"dry_run": true, "overwrite": true}` neu
+  geladen. Der Bestätigungs-Button führt den echten Import aus und zeigt danach
+  `created`, `overwritten`, `skipped`, `failed`, `images_imported` und die
+  Fehlerliste je Artikelnummer. Fehler der API erscheinen als deutsche Meldung im
+  offenen Dialog; während Vorschau und Import sind Mehrfachklicks gesperrt.
 
 ### Changed
 

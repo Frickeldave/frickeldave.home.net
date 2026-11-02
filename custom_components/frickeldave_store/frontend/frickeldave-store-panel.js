@@ -42,6 +42,28 @@ const VISIBILITY_OPTIONS = Object.freeze([
   { value: "invisible", label: "Unsichtbar" },
 ]);
 
+// Sortierbare Spalten der Listenansicht. Reihenfolge = Spaltenreihenfolge.
+const SORT_COLUMNS = Object.freeze([
+  { field: "name", label: "Produkt" },
+  { field: "category", label: "Kategorie" },
+  { field: "price", label: "Preis" },
+  { field: "stock", label: "Bestand" },
+  { field: "status", label: "Status" },
+]);
+
+const SORT_FIELDS = Object.freeze(SORT_COLUMNS.map((column) => column.field));
+
+const EDITOR_TABS = Object.freeze(["general", "images", "description", "stock"]);
+
+// Beim „Weiter“-Klick wird das Feld geprüft, das auf dem Zielfeld sichtbar ist.
+const EDITOR_FIELD_TABS = Object.freeze({
+  name: "general",
+  category: "general",
+  price: "general",
+  size: "general",
+  description: "description",
+});
+
 const BOOKING_TYPE_LABELS = Object.freeze({
   in: "Zugang",
   out: "Abgang",
@@ -312,6 +334,8 @@ export class FrickeldaveStorePanel extends LitElement {
     this._productsRequestId = 0;
     this._imagesRequestId = 0;
     this._bookingsRequestId = 0;
+    this._articlePreviewRequestId = 0;
+    this._importPreviewRequestId = 0;
     this._imageCache = new Map();
     this._imagePending = new Set();
 
@@ -921,8 +945,34 @@ export class FrickeldaveStorePanel extends LitElement {
     storeFiltersOpen(this._filtersOpen);
   }
 
+  _sortLabel() {
+    return SORT_COLUMNS.find((column) => column.field === this._sort)?.label || "Name";
+  }
+
   _setSortField(value) {
-    this._sort = value === "price" ? "price" : "name";
+    if (!SORT_FIELDS.includes(value)) {
+      return;
+    }
+    if (this._sort === value) {
+      return;
+    }
+    this._sort = value;
+    this._order = "asc";
+    this._offset = 0;
+    this._loadProducts();
+  }
+
+  /** Klick auf einen Spaltenkopf: neue Spalte aufsteigend, aktive Spalte dreht um. */
+  _setSort(field) {
+    if (!SORT_FIELDS.includes(field)) {
+      return;
+    }
+    if (this._sort === field) {
+      this._order = this._order === "asc" ? "desc" : "asc";
+    } else {
+      this._sort = field;
+      this._order = "asc";
+    }
     this._offset = 0;
     this._loadProducts();
   }
@@ -1178,8 +1228,11 @@ export class FrickeldaveStorePanel extends LitElement {
       suggestion: null,
       suggestionInstructions: "",
       shake: false,
+      createFlow: true,
+      articlePreview: { loading: false, value: "", error: "" },
     };
     this._editorSnapshot = this._editorFormState(this._editor);
+    this._loadArticlePreview(this._editor.category);
   }
 
   _initialStock(product) {
@@ -1233,8 +1286,77 @@ export class FrickeldaveStorePanel extends LitElement {
       suggestion: null,
       suggestionInstructions: "",
       shake: false,
+      createFlow: false,
+      articlePreview: { loading: false, value: product.articleNumber || "", error: "" },
     };
     this._editorSnapshot = this._editorFormState(this._editor);
+  }
+
+  /**
+   * Holt die voraussichtliche Artikelnummer für eine Kategorie. Die Nummer ist
+   * bewusst nicht reserviert; verbindlich ist erst die Antwort von POST /products.
+   */
+  async _loadArticlePreview(category) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "create") {
+      return;
+    }
+    const requestId = ++this._articlePreviewRequestId;
+
+    if (!CATEGORY_LABELS[category]) {
+      this._patchEditor({
+        articlePreview: { loading: false, value: "", error: "Bitte eine Kategorie auswählen." },
+      });
+      return;
+    }
+
+    this._patchEditor({ articlePreview: { loading: true, value: "", error: "" } });
+
+    try {
+      const data = await this._api(
+        `${API_ROOT}/products/article-number?category=${encodeURIComponent(category)}`,
+      );
+      if (requestId !== this._articlePreviewRequestId) {
+        return;
+      }
+      if (!this._editor || this._editor.mode !== "create") {
+        return;
+      }
+      const value = typeof data?.articleNumber === "string" ? data.articleNumber.trim() : "";
+      this._patchEditor({
+        articlePreview: {
+          loading: false,
+          value,
+          error: value ? "" : "Es wurde keine Artikelnummer geliefert.",
+        },
+      });
+    } catch (error) {
+      if (isAbortError(error) || requestId !== this._articlePreviewRequestId) {
+        return;
+      }
+      if (!this._editor || this._editor.mode !== "create") {
+        return;
+      }
+      this._patchEditor({
+        articlePreview: { loading: false, value: "", error: this._errorText(error) },
+      });
+    }
+  }
+
+  _setEditorCategory(value) {
+    if (!this._editor) {
+      return;
+    }
+    this._setEditorField("category", value);
+    this._loadArticlePreview(value);
+  }
+
+  _nextEditorTab(tab) {
+    const index = EDITOR_TABS.indexOf(tab);
+    if (index < 0 || index >= EDITOR_TABS.length - 1) {
+      return EDITOR_TABS[EDITOR_TABS.length - 1];
+    }
+    return EDITOR_TABS[index + 1];
   }
 
   _editorFormState(editor) {
@@ -1281,6 +1403,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     clearTimeout(this._editorShakeTimer);
     this._editorSnapshot = "";
+    this._articlePreviewRequestId += 1;
     this._imagesRequestId += 1;
     this._bookingsRequestId += 1;
     this._editor = null;
@@ -1402,10 +1525,17 @@ export class FrickeldaveStorePanel extends LitElement {
 
     const fieldErrors = this._validateEditor(editor);
     if (Object.keys(fieldErrors).length > 0) {
-      this._patchEditor({
+      const firstField = Object.keys(fieldErrors)[0];
+      const targetTab = EDITOR_FIELD_TABS[firstField];
+      const patch = {
         fieldErrors,
         error: "Bitte die markierten Felder prüfen.",
-      });
+      };
+      // Der Fehler kann auf einem gerade verborgenen Tab liegen: dorthin wechseln.
+      if (targetTab && targetTab !== editor.tab) {
+        patch.tab = targetTab;
+      }
+      this._patchEditor(patch);
       this._focusFirstInvalid(fieldErrors);
       return;
     }
@@ -1420,11 +1550,14 @@ export class FrickeldaveStorePanel extends LitElement {
       visible: editor.visible,
       stock: { ...editor.stock },
     };
+    const isCreate = editor.mode === "create";
+    // Im Anlege-Ablauf führt „Weiter“ zum nächsten Tab, „Speichern“ (letzter Tab) schließt.
+    const staysOpen = editor.createFlow && editor.tab !== "stock";
 
     this._patchEditor({ saving: true, error: "", fieldErrors: {} });
 
     try {
-      if (editor.mode === "create") {
+      if (isCreate) {
         const created = await this._api(`${API_ROOT}/products`, {
           method: "POST",
           body: { ...payload, category: editor.category },
@@ -1432,27 +1565,32 @@ export class FrickeldaveStorePanel extends LitElement {
         const articleNumber = typeof created?.articleNumber === "string" ? created.articleNumber : "";
         this._loadProducts();
         this._loadTags();
-        if (articleNumber && this._editor) {
-          // Nach dem Anlegen gibt es erst eine Artikelnummer: direkt in den
-          // Bilder-Tab wechseln, damit Bilder ohne Umweg ergänzt werden können.
-          this._patchEditor({
-            mode: "edit",
-            articleNumber,
-            tab: "images",
-            saving: false,
-            images: [],
-            imagesLoading: true,
-            imagesError: "",
-            imagesNotice: "",
-          });
-          this._editorSnapshot = this._editorFormState(this._editor);
-          this._showToast("Produkt wurde erstellt. Du kannst jetzt Bilder hinzufügen.");
-          this._loadImages(articleNumber);
+
+        if (!articleNumber) {
+          this._editor = null;
+          this._showToast("Produkt wurde erstellt.");
+          this._restoreFocus();
           return;
         }
-        this._editor = null;
-        this._showToast("Produkt wurde erstellt.");
-        this._restoreFocus();
+
+        // Ab jetzt existiert das Produkt: Badge zeigt die verbindliche Nummer aus
+        // der Server-Antwort, die Vorschau ist erledigt.
+        this._articlePreviewRequestId += 1;
+
+        if (editor.tab === "stock") {
+          this._editor = null;
+          this._showToast(`Produkt wurde erstellt (${articleNumber}).`);
+          this._restoreFocus();
+          return;
+        }
+
+        this._advanceEditorTab(editor.tab, {
+          mode: "edit",
+          createFlow: true,
+          articleNumber,
+          articlePreview: { loading: false, value: articleNumber, error: "" },
+        });
+        this._showToast(`Produkt wurde erstellt (${articleNumber}).`);
         return;
       }
 
@@ -1460,18 +1598,46 @@ export class FrickeldaveStorePanel extends LitElement {
         method: "PATCH",
         body: payload,
       });
+      this._loadProducts();
+      this._loadTags();
+
+      if (staysOpen) {
+        this._advanceEditorTab(editor.tab, {});
+        return;
+      }
 
       this._editor = null;
       this._showToast("Produkt wurde gespeichert.");
       this._restoreFocus();
-      this._loadProducts();
-      this._loadTags();
     } catch (error) {
       if (isAbortError(error)) {
         this._patchEditor({ saving: false });
         return;
       }
       this._patchEditor({ saving: false, error: this._errorText(error) });
+    }
+  }
+
+  _advanceEditorTab(fromTab, patch = {}) {
+    if (!this._editor) {
+      return;
+    }
+    const next = this._nextEditorTab(fromTab);
+    this._patchEditor({ ...patch, tab: next, saving: false });
+    this._editorSnapshot = this._editorFormState(this._editor);
+    this._loadEditorTabData(next);
+  }
+
+  _loadEditorTabData(tab) {
+    const editor = this._editor;
+    if (!editor || editor.mode !== "edit" || !editor.articleNumber) {
+      return;
+    }
+    if (tab === "images" && editor.images.length === 0 && !editor.imagesLoading) {
+      this._loadImages(editor.articleNumber);
+    }
+    if (tab === "stock" && !editor.bookingsLoaded) {
+      this._loadBookings(editor.articleNumber);
     }
   }
 
@@ -1904,20 +2070,15 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _setEditorTab(tab) {
     const editor = this._editor;
-    if (!editor || !["general", "images", "stock"].includes(tab) || editor.tab === tab) {
+    if (!editor || !EDITOR_TABS.includes(tab) || editor.tab === tab) {
       return;
     }
     this._patchEditor({ tab });
-    if (tab === "stock" && editor.mode === "edit" && !editor.bookingsLoaded) {
-      this._loadBookings(editor.articleNumber);
-    }
-    if (tab === "images" && editor.mode === "edit" && editor.images.length === 0 && !editor.imagesLoading) {
-      this._loadImages(editor.articleNumber);
-    }
+    this._loadEditorTabData(tab);
   }
 
   _onEditorTabKeydown(event) {
-    const tabs = ["general", "images", "stock"];
+    const tabs = EDITOR_TABS;
     const currentIndex = tabs.indexOf(this._editor?.tab || "general");
     let nextIndex = currentIndex;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
@@ -1999,15 +2160,83 @@ export class FrickeldaveStorePanel extends LitElement {
       busy: false,
       error: "",
       result: null,
+      overwrite: false,
+      preview: null,
+      previewLoading: true,
+      previewError: "",
     };
+    this._loadImportPreview();
   }
 
   _closeImport() {
     if (this._importDialog?.busy) {
       return;
     }
+    this._importPreviewRequestId += 1;
     this._importDialog = null;
     this._restoreFocus();
+  }
+
+  _toggleImportOverwrite(value) {
+    const dialog = this._importDialog;
+    if (!dialog || dialog.busy) {
+      return;
+    }
+    this._importDialog = { ...dialog, overwrite: Boolean(value), error: "" };
+    // Die Vorschau hängt vom Überschreiben ab: mit denselben Optionen neu laden.
+    this._loadImportPreview();
+  }
+
+  _resetImportPreview() {
+    const dialog = this._importDialog;
+    if (!dialog || dialog.busy) {
+      return;
+    }
+    this._importDialog = { ...dialog, phase: "confirm", result: null, error: "" };
+    this._loadImportPreview();
+  }
+
+  async _loadImportPreview() {
+    const dialog = this._importDialog;
+    if (!dialog || dialog.busy) {
+      return;
+    }
+    const requestId = ++this._importPreviewRequestId;
+    const overwrite = Boolean(dialog.overwrite);
+    this._importDialog = { ...dialog, previewLoading: true, previewError: "", error: "" };
+
+    try {
+      const data = await this._api(`${API_ROOT}/import/catalog`, {
+        method: "POST",
+        body: { dry_run: true, overwrite, import_images: true },
+        timeoutMs: IMPORT_TIMEOUT_MS,
+      });
+      if (requestId !== this._importPreviewRequestId || !this._importDialog) {
+        return;
+      }
+      this._importDialog = {
+        ...this._importDialog,
+        preview: this._normalizeImportResult(data),
+        previewLoading: false,
+        previewError: "",
+      };
+    } catch (error) {
+      if (isAbortError(error) || requestId !== this._importPreviewRequestId) {
+        return;
+      }
+      if (!this._importDialog) {
+        return;
+      }
+      this._importDialog = {
+        ...this._importDialog,
+        previewLoading: false,
+        preview: null,
+        previewError: this._importErrorText(error),
+      };
+      if (error instanceof ApiError && (error.status === 403 || error.status === 401)) {
+        this._revalidateAccess();
+      }
+    }
   }
 
   _focusImport(selector) {
@@ -2054,28 +2283,38 @@ export class FrickeldaveStorePanel extends LitElement {
           }))
       : [];
     return {
+      dryRun: Boolean(data?.dry_run),
       created: count(data?.created),
       skipped: count(data?.skipped),
       failed: count(data?.failed),
       imagesImported: count(data?.images_imported),
       productsTotal: count(data?.products_total),
+      wouldCreate: count(data?.would_create),
+      wouldOverwrite: count(data?.would_overwrite),
+      overwritten: count(data?.overwritten),
+      unchanged: count(data?.unchanged),
+      summary: typeof data?.summary === "string" ? data.summary.trim() : "",
       errors,
     };
   }
 
   async _startImport() {
     const dialog = this._importDialog;
-    if (!dialog || dialog.busy || !this._can("product")) {
+    if (!dialog || dialog.busy || dialog.previewLoading || !this._can("product")) {
       return;
     }
 
-    this._importDialog = { phase: "running", busy: true, error: "", result: null };
+    this._importDialog = { ...dialog, phase: "running", busy: true, error: "", result: null };
     this._focusImport("#fd-import-status");
 
     try {
       const data = await this._api(`${API_ROOT}/import/catalog`, {
         method: "POST",
-        body: { import_images: true },
+        body: {
+          dry_run: false,
+          overwrite: Boolean(dialog.overwrite),
+          import_images: true,
+        },
         timeoutMs: IMPORT_TIMEOUT_MS,
       });
       const result = this._normalizeImportResult(data);
@@ -2086,13 +2325,20 @@ export class FrickeldaveStorePanel extends LitElement {
       this._resetFilters();
       this._loadTags();
 
-      this._importDialog = { phase: "result", busy: false, error: "", result };
+      this._importDialog = {
+        ...this._importDialog,
+        phase: "result",
+        busy: false,
+        error: "",
+        result,
+      };
       this._focusImport("#fd-import-result");
     } catch (error) {
       if (!this._importDialog) {
         return;
       }
       this._importDialog = {
+        ...this._importDialog,
         phase: "error",
         busy: false,
         error: this._importErrorText(error),
@@ -2823,18 +3069,22 @@ export class FrickeldaveStorePanel extends LitElement {
                   .value=${this._sort}
                   @change=${(event) => this._setSortField(event.target.value)}
                 >
-                  <option value="name">Name</option>
-                  <option value="price">Preis</option>
+                  ${SORT_COLUMNS.map(
+                    (column) => html`<option value=${column.field}>${column.label}</option>`,
+                  )}
                 </select>
                 <button
                   type="button"
                   class="fd-button"
                   @click=${() => this._toggleSortOrder()}
-                  aria-label=${`Sortierrichtung: ${this._order === "asc" ? "aufsteigend" : "absteigend"}. Richtung wechseln.`}
+                  aria-label=${`Sortierrichtung für ${this._sortLabel()}: ${
+                    this._order === "asc" ? "aufsteigend" : "absteigend"
+                  }. Richtung wechseln.`}
                 >
                   ${this._order === "asc" ? "↑ Aufsteigend" : "↓ Absteigend"}
                 </button>
               </div>
+              <p class="fd-hint">In der Listenansicht sortieren auch die Spaltenköpfe.</p>
             </div>
           </div>
         </div>
@@ -2922,11 +3172,7 @@ export class FrickeldaveStorePanel extends LitElement {
           <caption class="fd-sr-only">Produkte in der Listenansicht</caption>
           <thead>
             <tr>
-              <th scope="col">Produkt</th>
-              <th scope="col">Kategorie</th>
-              <th scope="col">Preis</th>
-              <th scope="col">Bestand</th>
-              <th scope="col">Status</th>
+              ${SORT_COLUMNS.map((column) => this._renderSortHeader(column))}
               <th scope="col">Aktionen</th>
             </tr>
           </thead>
@@ -2935,6 +3181,28 @@ export class FrickeldaveStorePanel extends LitElement {
           </tbody>
         </table>
       </div>
+    `;
+  }
+
+  _renderSortHeader(column) {
+    const active = this._sort === column.field;
+    const ascending = this._order === "asc";
+    const directionLabel = active ? (ascending ? "aufsteigend" : "absteigend") : "unsortiert";
+    const arrow = active ? (ascending ? "↑" : "↓") : "↕";
+
+    return html`
+      <th scope="col" aria-sort=${active ? (ascending ? "ascending" : "descending") : "none"}>
+        <button
+          type="button"
+          class="fd-sort-header"
+          @click=${() => this._setSort(column.field)}
+          aria-label=${`Nach ${column.label} sortieren. Aktuell ${directionLabel}.`}
+          title=${`Nach ${column.label} sortieren (aktuell ${directionLabel})`}
+        >
+          <span>${column.label}</span>
+          <span class="fd-sort-arrow" aria-hidden="true">${arrow}</span>
+        </button>
+      </th>
     `;
   }
 
@@ -3128,6 +3396,39 @@ export class FrickeldaveStorePanel extends LitElement {
   /* Render: Editor-Dialog                                                  */
   /* --------------------------------------------------------------------- */
 
+  _articleBadge(editor) {
+    if (editor.mode === "edit") {
+      const value = editor.articleNumber || "—";
+      return {
+        text: value,
+        title: value === "—" ? "Keine Artikelnummer vorhanden." : `Artikelnummer ${value}`,
+        label: value === "—" ? "Keine Artikelnummer vorhanden." : `Artikelnummer ${value}`,
+      };
+    }
+
+    const preview = editor.articlePreview || {};
+    if (preview.loading) {
+      return {
+        text: "…",
+        title: "Artikelnummer wird ermittelt …",
+        label: "Artikelnummer wird ermittelt",
+      };
+    }
+    if (preview.value) {
+      return {
+        text: preview.value,
+        title: `Voraussichtliche Artikelnummer ${preview.value}. Verbindlich ist die Nummer nach dem Anlegen.`,
+        label: `Voraussichtliche Artikelnummer ${preview.value}`,
+      };
+    }
+    const reason = preview.error || "Die Artikelnummer wird beim Anlegen vergeben.";
+    return {
+      text: "—",
+      title: reason,
+      label: `Artikelnummer nicht verfügbar: ${reason}`,
+    };
+  }
+
   _renderEditorDialog() {
     const editor = this._editor;
     if (!editor) {
@@ -3136,6 +3437,16 @@ export class FrickeldaveStorePanel extends LitElement {
     const errors = editor.fieldErrors || {};
     const isCreate = editor.mode === "create";
     const tab = editor.tab || "general";
+    const articleBadge = this._articleBadge(editor);
+    const continueFlow = editor.createFlow && tab !== "stock";
+    const submitLabel = editor.saving
+      ? continueFlow
+        ? "Wird gespeichert …"
+        : "Speichern …"
+      : continueFlow
+        ? "Weiter"
+        : "Speichern";
+    const cancelLabel = editor.createFlow && editor.mode === "edit" ? "Schließen" : "Abbrechen";
 
     return html`
       <dialog
@@ -3160,11 +3471,16 @@ export class FrickeldaveStorePanel extends LitElement {
           >
             ✕
           </button>
+          <span
+            class="fd-article-badge"
+            title=${articleBadge.title}
+            aria-label=${articleBadge.label}
+            aria-live=${isCreate ? "polite" : "off"}
+          >
+            ${articleBadge.text}
+          </span>
           <div class="fd-dialog-title">
             <h2 id="fd-editor-title">${isCreate ? "Produkt erstellen" : "Produkt bearbeiten"}</h2>
-            ${isCreate
-              ? html`<p class="fd-muted fd-small">Die Artikelnummer wird automatisch vergeben.</p>`
-              : html`<p class="fd-muted fd-small">Artikelnummer ${editor.articleNumber}</p>`}
           </div>
         </div>
 
@@ -3172,6 +3488,7 @@ export class FrickeldaveStorePanel extends LitElement {
           ${[
             { id: "general", label: "Grunddaten" },
             { id: "images", label: "Bilder" },
+            { id: "description", label: "Beschreibung" },
             { id: "stock", label: "Bestand" },
           ].map(
             (entry) => html`
@@ -3240,7 +3557,7 @@ export class FrickeldaveStorePanel extends LitElement {
                       data-field="category"
                       class="fd-input"
                       .value=${editor.category}
-                      @change=${(event) => this._setEditorField("category", event.target.value)}
+                      @change=${(event) => this._setEditorCategory(event.target.value)}
                     >
                       ${CATEGORY_KEYS.map(
                         (key) => html`<option value=${key}>${CATEGORY_LABELS[key]}</option>`,
@@ -3299,54 +3616,6 @@ export class FrickeldaveStorePanel extends LitElement {
                 @input=${(event) => this._setEditorField("size", event.target.value)}
               />
               ${errors.size ? html`<p class="fd-error-text">${errors.size}</p>` : ""}
-            </div>
-
-            <div class="fd-field fd-field--full">
-              <label class="fd-label" for="fd-editor-description">Beschreibung</label>
-              <textarea
-                id="fd-editor-description"
-                data-field="description"
-                class="fd-input fd-textarea"
-                rows="4"
-                .value=${editor.description}
-                @input=${(event) => this._setEditorField("description", event.target.value)}
-              ></textarea>
-              ${errors.description ? html`<p class="fd-error-text">${errors.description}</p>` : ""}
-
-              ${editor.mode === "edit"
-                ? html`
-                    <div class="fd-field">
-                      <label class="fd-label" for="fd-editor-instructions">Eigene Hinweise für die KI (optional)</label>
-                      <textarea
-                        id="fd-editor-instructions"
-                        class="fd-input fd-textarea"
-                        rows="2"
-                        maxlength="2000"
-                        placeholder="Zum Beispiel: Betone die Handarbeit und die Pflegehinweise."
-                        .value=${editor.suggestionInstructions || ""}
-                        @input=${(event) => this._setEditorField("suggestionInstructions", event.target.value)}
-                      ></textarea>
-                      <p class="fd-hint">Fließt nur in den nächsten Vorschlag ein, nicht in die Beschreibung.</p>
-                    </div>
-                    <div class="fd-inline-actions">
-                      <button
-                        type="button"
-                        class="fd-button"
-                        @click=${() => this._suggestDescription()}
-                        ?disabled=${editor.saving || Boolean(editor.suggestion?.loading)}
-                      >
-                        ${editor.suggestion?.loading ? "Vorschlag wird erstellt …" : "Beschreibung vorschlagen"}
-                      </button>
-                      <span class="fd-hint">
-                        Der Vorschlag wird erst nach „Übernehmen“ und Speichern wirksam.
-                      </span>
-                    </div>
-                  `
-                : html`<span class="fd-hint">
-                    Ein KI-Vorschlag ist verfügbar, sobald das Produkt erstellt ist.
-                  </span>`}
-
-              ${this._renderSuggestion(editor)}
             </div>
 
             <div class="fd-field fd-field--full">
@@ -3446,6 +3715,15 @@ export class FrickeldaveStorePanel extends LitElement {
           </div>
 
           <div
+            id="fd-editor-panel-description"
+            role="tabpanel"
+            aria-labelledby="fd-editor-tab-description"
+            ?hidden=${tab !== "description"}
+          >
+            ${this._renderEditorDescription(editor)}
+          </div>
+
+          <div
             id="fd-editor-panel-stock"
             role="tabpanel"
             aria-labelledby="fd-editor-tab-stock"
@@ -3456,25 +3734,102 @@ export class FrickeldaveStorePanel extends LitElement {
           </div>
 
           <footer class="fd-dialog-foot">
-            <button
-              type="button"
-              class="fd-button fd-button--plain"
-              @click=${() => this._discardEditor()}
-              ?disabled=${editor.saving}
-            >
-              Abbrechen
-            </button>
-            <button
-              type="submit"
-              class="fd-button fd-button--primary"
-              ?disabled=${editor.saving}
-              aria-busy=${editor.saving ? "true" : "false"}
-            >
-              ${editor.saving ? "Speichern …" : "Speichern"}
-            </button>
+            ${editor.mode === "edit" && editor.createFlow
+              ? html`<p class="fd-foot-hint" role="note">
+                  Das Produkt ist bereits gespeichert. „${cancelLabel}“ beendet nur den Dialog.
+                </p>`
+              : editor.mode === "create" && continueFlow
+                ? html`<p class="fd-foot-hint" role="note">
+                    Mit „Weiter“ wird das Produkt angelegt und gespeichert.
+                  </p>`
+                : ""}
+            <div class="fd-dialog-foot-actions">
+              <button
+                type="button"
+                class="fd-button fd-button--plain"
+                @click=${() => this._discardEditor()}
+                ?disabled=${editor.saving}
+              >
+                ${cancelLabel}
+              </button>
+              <button
+                type="submit"
+                class="fd-button fd-button--primary"
+                ?disabled=${editor.saving}
+                aria-busy=${editor.saving ? "true" : "false"}
+              >
+                ${submitLabel}
+              </button>
+            </div>
           </footer>
         </form>
       </dialog>
+    `;
+  }
+
+  _renderEditorDescription(editor) {
+    const errors = editor.fieldErrors || {};
+    const suggestion = this._renderSuggestion(editor);
+
+    return html`
+      <div class="fd-form-grid">
+        <div class="fd-field fd-field--full">
+          <label class="fd-label" for="fd-editor-description">Beschreibung</label>
+          <textarea
+            id="fd-editor-description"
+            data-field="description"
+            class="fd-input fd-textarea"
+            rows="6"
+            .value=${editor.description}
+            aria-invalid=${errors.description ? "true" : "false"}
+            aria-describedby=${errors.description
+              ? "fd-editor-description-error"
+              : "fd-editor-description-hint"}
+            @input=${(event) => this._setEditorField("description", event.target.value)}
+          ></textarea>
+          ${errors.description
+            ? html`<p class="fd-error-text" id="fd-editor-description-error">${errors.description}</p>`
+            : html`<p class="fd-hint" id="fd-editor-description-hint">
+                Erscheint auf der Produktseite. Höchstens 20000 Zeichen.
+              </p>`}
+        </div>
+
+        ${editor.mode === "edit"
+          ? html`
+              <div class="fd-field fd-field--full">
+                <label class="fd-label" for="fd-editor-instructions">Eigene Hinweise für die KI (optional)</label>
+                <textarea
+                  id="fd-editor-instructions"
+                  class="fd-input fd-textarea"
+                  rows="2"
+                  maxlength="2000"
+                  placeholder="Zum Beispiel: Betone die Handarbeit und die Pflegehinweise."
+                  .value=${editor.suggestionInstructions || ""}
+                  @input=${(event) => this._setEditorField("suggestionInstructions", event.target.value)}
+                ></textarea>
+                <p class="fd-hint">Fließt nur in den nächsten Vorschlag ein, nicht in die Beschreibung.</p>
+              </div>
+              <div class="fd-inline-actions fd-field--full">
+                <button
+                  type="button"
+                  class="fd-button"
+                  @click=${() => this._suggestDescription()}
+                  ?disabled=${editor.saving || Boolean(editor.suggestion?.loading)}
+                  aria-busy=${editor.suggestion?.loading ? "true" : "false"}
+                >
+                  ${editor.suggestion?.loading ? "Vorschlag wird erstellt …" : "Beschreibung vorschlagen"}
+                </button>
+                <span class="fd-hint">
+                  Der Vorschlag wird erst nach „Übernehmen“ und Speichern wirksam.
+                </span>
+              </div>
+            `
+          : html`<p class="fd-hint fd-field--full">
+              Ein KI-Vorschlag ist verfügbar, sobald das Produkt erstellt ist.
+            </p>`}
+
+        ${suggestion ? html`<div class="fd-field--full">${suggestion}</div>` : ""}
+      </div>
     `;
   }
 
@@ -3565,10 +3920,10 @@ export class FrickeldaveStorePanel extends LitElement {
     if (!this._canManageImages()) {
       return html`
         <div class="fd-state fd-state--inline">
-          <h3>Bilder nach dem Speichern</h3>
+          <h3>Bilder nach dem Anlegen</h3>
           <p class="fd-hint">
-            Die Artikelnummer wird erst beim Anlegen vergeben. Speichere das Produkt – danach wechselt der
-            Dialog automatisch in diesen Tab und du kannst bis zu ${MAX_IMAGES} Bilder hochladen.
+            Die Artikelnummer wird erst beim Anlegen vergeben. Mit „Weiter“ wird das Produkt angelegt –
+            danach kannst du bis zu ${MAX_IMAGES} Bilder hochladen.
           </p>
         </div>
       `;
@@ -4252,6 +4607,7 @@ export class FrickeldaveStorePanel extends LitElement {
     const running = dialog.busy;
     const result = dialog.result;
     const showIntro = dialog.phase === "confirm" || dialog.phase === "running";
+    const preview = dialog.preview;
 
     return html`
       <dialog
@@ -4290,7 +4646,10 @@ export class FrickeldaveStorePanel extends LitElement {
                     Der aktuelle Katalog von <strong>frickeldave.de</strong> wird in diese Verwaltung geladen.
                   </p>
                   <ul class="fd-import-notes">
-                    <li>Bereits vorhandene Artikelnummern werden übersprungen und niemals überschrieben.</li>
+                    <li>
+                      Ohne „Bestehende Produkte überschreiben“ bleiben vorhandene Produkte unverändert;
+                      es werden nur neue Produkte angelegt.
+                    </li>
                     <li>
                       Zu jedem Produkt werden bis zu ${MAX_IMAGES} Bilder aus dem Website-Repository
                       übernommen.
@@ -4301,6 +4660,69 @@ export class FrickeldaveStorePanel extends LitElement {
                     </li>
                   </ul>
                 </div>
+
+                <div class="fd-field">
+                  <label class="fd-switch">
+                    <input
+                      type="checkbox"
+                      .checked=${Boolean(dialog.overwrite)}
+                      ?disabled=${running}
+                      aria-describedby="fd-import-overwrite-hint"
+                      @change=${(event) => this._toggleImportOverwrite(event.target.checked)}
+                    />
+                    <span>Bestehende Produkte überschreiben</span>
+                  </label>
+                  <p class="fd-hint" id="fd-import-overwrite-hint">
+                    Standardmäßig aus. Vorhandene Produkte bleiben dann unverändert.
+                  </p>
+                </div>
+
+                ${dialog.overwrite
+                  ? html`
+                      <div class="fd-banner fd-banner--warning" role="note">
+                        <p><strong>Vorhandene Produkte werden überschrieben.</strong></p>
+                        <p>
+                          Überschrieben werden: Name, Beschreibung, Preis, Größe, Tags, Sichtbarkeit,
+                          Personalisierbarkeit und Bestand.
+                        </p>
+                        <p>
+                          Erhalten bleiben: Artikelnummer, Anlagedatum, Bilder, Buchungen, Archiv-Status
+                          und Kategorie.
+                        </p>
+                      </div>
+                    `
+                  : ""}
+
+                ${dialog.previewLoading
+                  ? html`
+                      <div
+                        id="fd-import-preview-status"
+                        class="fd-state fd-state--inline"
+                        role="status"
+                        aria-live="polite"
+                        tabindex="-1"
+                      >
+                        <span class="fd-spinner" aria-hidden="true"></span>
+                        <p>Vorschau wird geladen …</p>
+                      </div>
+                    `
+                  : dialog.previewError
+                    ? html`
+                        <div
+                          id="fd-import-preview-error"
+                          class="fd-banner fd-banner--error"
+                          role="alert"
+                          tabindex="-1"
+                        >
+                          <p>${dialog.previewError}</p>
+                          <button type="button" class="fd-button" @click=${() => this._loadImportPreview()}>
+                            Vorschau erneut laden
+                          </button>
+                        </div>
+                      `
+                    : preview
+                      ? this._renderImportPreview(preview)
+                      : ""}
               `
             : ""}
 
@@ -4322,7 +4744,7 @@ export class FrickeldaveStorePanel extends LitElement {
                   tabindex="-1"
                 >
                   <span class="fd-spinner" aria-hidden="true"></span>
-                  <p>Katalog wird geladen …</p>
+                  <p>Katalog wird importiert …</p>
                 </div>
               `
             : ""}
@@ -4331,13 +4753,24 @@ export class FrickeldaveStorePanel extends LitElement {
         </div>
 
         <div class="fd-dialog-foot">
-            ${dialog.phase === "result"
-              ? html`
+          ${dialog.phase === "result"
+            ? html`
+                <div class="fd-dialog-foot-actions">
+                  <button
+                    type="button"
+                    class="fd-button"
+                    @click=${() => this._resetImportPreview()}
+                    ?disabled=${running}
+                  >
+                    Erneut prüfen
+                  </button>
                   <button type="button" class="fd-button fd-button--primary" @click=${() => this._closeImport()}>
                     Schließen
                   </button>
-                `
-              : html`
+                </div>
+              `
+            : html`
+                <div class="fd-dialog-foot-actions">
                   <button
                     type="button"
                     class="fd-button fd-button--plain"
@@ -4345,20 +4778,83 @@ export class FrickeldaveStorePanel extends LitElement {
                     ?disabled=${running}
                     data-autofocus
                   >
-                    ${dialog.phase === "error" ? "Schließen" : "Abbrechen"}
+                    Abbrechen
                   </button>
                   <button
                     type="button"
                     class="fd-button fd-button--primary"
                     @click=${() => this._startImport()}
-                    ?disabled=${running}
+                    ?disabled=${running || dialog.previewLoading}
                     aria-busy=${running ? "true" : "false"}
                   >
-                    ${running ? "Import läuft …" : dialog.phase === "error" ? "Erneut versuchen" : "Import starten"}
+                    ${running
+                      ? "Import läuft …"
+                      : dialog.overwrite
+                        ? "Import mit Überschreiben starten"
+                        : "Import starten"}
                   </button>
-                `}
+                </div>
+              `}
         </div>
       </dialog>
+    `;
+  }
+
+  _renderImportPreview(preview) {
+    return html`
+      <section id="fd-import-preview" class="fd-import-preview" aria-live="polite">
+        <h3>Vorschau</h3>
+
+        <dl class="fd-import-summary">
+          <div class="fd-import-stat">
+            <dt>Neu</dt>
+            <dd>${formatNumber(preview.wouldCreate)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Zu überschreiben</dt>
+            <dd>${formatNumber(preview.wouldOverwrite)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Unverändert</dt>
+            <dd>${formatNumber(preview.unchanged)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Fehlerhaft</dt>
+            <dd class=${preview.failed > 0 ? "fd-import-stat--error" : ""}>
+              ${formatNumber(preview.failed)}
+            </dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Bilder</dt>
+            <dd>${formatNumber(preview.imagesImported)}</dd>
+          </div>
+        </dl>
+
+        ${preview.summary
+          ? html`<p class="fd-hint">${preview.summary}</p>`
+          : html`<p class="fd-hint">
+              ${formatNumber(preview.productsTotal)} Produkte im Katalog geprüft. Es wurde nichts
+              geschrieben.
+            </p>`}
+
+        ${preview.errors.length > 0
+          ? html`
+              <div class="fd-import-errors">
+                <h4>Hinweise aus der Vorschau</h4>
+                <ul role="list">
+                  ${preview.errors.map(
+                    (entry) => html`
+                      <li>
+                        <strong>${entry.articleNumber || "Ohne Artikelnummer"}</strong>
+                        <span>${entry.message || "Unbekannter Fehler."}</span>
+                      </li>
+                    `,
+                  )}
+                </ul>
+              </div>
+            `
+          : ""}
+      </section>
     `;
   }
 
@@ -4375,7 +4871,11 @@ export class FrickeldaveStorePanel extends LitElement {
             <dd>${formatNumber(result.created)}</dd>
           </div>
           <div class="fd-import-stat">
-            <dt>Übersprungen</dt>
+            <dt>Überschrieben</dt>
+            <dd>${formatNumber(result.overwritten)}</dd>
+          </div>
+          <div class="fd-import-stat">
+            <dt>Unverändert</dt>
             <dd>${formatNumber(result.skipped)}</dd>
           </div>
           <div class="fd-import-stat">
@@ -4389,6 +4889,8 @@ export class FrickeldaveStorePanel extends LitElement {
             <dd>${formatNumber(result.imagesImported)}</dd>
           </div>
         </dl>
+
+        ${result.summary ? html`<p class="fd-hint">${result.summary}</p>` : ""}
 
         <p class="fd-muted fd-small">
           ${result.productsTotal === 1
@@ -5674,6 +6176,27 @@ export class FrickeldaveStorePanel extends LitElement {
       margin-inline-start: calc(-1 * var(--fd-space-2));
     }
 
+    /* Artikelnummer im Dialogkopf: HA-Tokens, in Light und Dark lesbar ----- */
+
+    .fd-article-badge {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      align-self: flex-start;
+      min-height: 28px;
+      margin-block-start: 2px;
+      padding: 2px var(--fd-space-3);
+      border: 1px solid var(--fd-accent);
+      border-radius: var(--fd-radius-pill);
+      background: var(--fd-accent-soft);
+      color: var(--fd-on-accent-soft);
+      font-family: var(--ha-font-family-code, monospace);
+      font-size: var(--fd-font-small);
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
     .fd-dialog-form {
       display: flex;
       flex: 1;
@@ -5694,10 +6217,26 @@ export class FrickeldaveStorePanel extends LitElement {
       display: flex;
       flex: none;
       flex-wrap: wrap;
+      align-items: center;
       justify-content: flex-end;
       gap: var(--fd-space-3);
       padding: var(--fd-space-4);
       border-top: 1px solid var(--fd-divider);
+    }
+
+    .fd-dialog-foot-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--fd-space-3);
+      margin-inline-start: auto;
+    }
+
+    .fd-foot-hint {
+      flex: 1 1 260px;
+      margin: 0;
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+      text-align: start;
     }
 
     .fd-dialog--shake {
@@ -5753,10 +6292,21 @@ export class FrickeldaveStorePanel extends LitElement {
       gap: var(--fd-space-3);
     }
 
+    .fd-import-preview {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-3);
+    }
+
+    .fd-import-preview h3,
     .fd-import-result h3 {
       margin: 0;
       font-size: 1rem;
       font-weight: 500;
+    }
+
+    .fd-banner .fd-button {
+      margin-top: var(--fd-space-2);
     }
 
     .fd-import-summary {
@@ -6173,6 +6723,47 @@ export class FrickeldaveStorePanel extends LitElement {
       font-size: var(--fd-font-small);
       font-weight: 500;
       white-space: nowrap;
+    }
+
+    .fd-sort-header {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 44px;
+      margin-block: -4px;
+      padding: 0 var(--fd-space-1);
+      border: none;
+      border-radius: var(--fd-radius-sm);
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      letter-spacing: inherit;
+      text-transform: inherit;
+      cursor: pointer;
+      transition: color var(--fd-duration-fast) ease;
+    }
+
+    .fd-sort-header:hover {
+      color: var(--fd-text);
+    }
+
+    .fd-sort-header[aria-label] {
+      white-space: nowrap;
+    }
+
+    .fd-sort-arrow {
+      display: inline-block;
+      min-width: 1em;
+      color: var(--fd-text-muted);
+      font-size: 1em;
+      line-height: 1;
+      text-align: center;
+    }
+
+    .fd-sort-header:hover .fd-sort-arrow,
+    .fd-product-table thead th[aria-sort="ascending"] .fd-sort-arrow,
+    .fd-product-table thead th[aria-sort="descending"] .fd-sort-arrow {
+      color: var(--fd-accent);
     }
 
     .fd-product-table tbody tr:last-child td {
