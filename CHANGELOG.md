@@ -46,6 +46,17 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   legt der erste Schreibvorgang nach dem Laden einen Snapshot
   `<zeitstempel>-pre-save.json` an (identische Stände werden nicht dupliziert).
 
+### Changed
+
+- **Lagerstätten-Filter wirkt standardmäßig (#289).** Die Auswahl einer
+  Lagerstätte im Panel sendet jetzt immer `in_location=true`; angezeigt werden
+  nur Produkte mit Bestand > 0 in dieser Lagerstätte. Die bisherige Checkbox
+  „Nur mit Bestand in …“ wurde zum Opt-out „Auch Produkte ohne Bestand anzeigen“
+  (Standard: aus, sendet `in_location=false`). Sie ist ohne gewählte Lagerstätte
+  deaktiviert und wird beim Zurücksetzen auf „Alle Lagerstätten“ zurückgesetzt.
+  Der Hinweistext unter dem Auswahlfeld beschreibt genau dieses Verhalten;
+  „Filter zurücksetzen“ und der Hinweis „Filter aktiv“ folgen der neuen Semantik.
+
 ### Wiederherstellung
 
 Ein Snapshot lässt sich ohne Neuinstallation zurückholen: HA stoppen, den

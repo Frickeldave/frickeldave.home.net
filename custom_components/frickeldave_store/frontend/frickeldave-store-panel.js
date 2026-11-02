@@ -278,7 +278,7 @@ export class FrickeldaveStorePanel extends LitElement {
     _tagFilter: { state: true },
     _customizableOnly: { state: true },
     _locationFilter: { state: true },
-    _inLocationOnly: { state: true },
+    _includeWithoutStock: { state: true },
     _visibility: { state: true },
     _showArchived: { state: true },
     _sort: { state: true },
@@ -331,7 +331,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._tagFilter = [];
     this._customizableOnly = false;
     this._locationFilter = "";
-    this._inLocationOnly = false;
+    this._includeWithoutStock = false;
     this._visibility = "all";
     this._showArchived = false;
     this._sort = "name";
@@ -760,7 +760,7 @@ export class FrickeldaveStorePanel extends LitElement {
       this._locationsError = "";
       if (this._locationFilter && !this._locations.some((entry) => entry.id === this._locationFilter)) {
         this._locationFilter = "";
-        this._inLocationOnly = false;
+        this._includeWithoutStock = false;
         this._offset = 0;
         this._loadProducts();
       }
@@ -816,9 +816,8 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     if (this._locationFilter) {
       params.set("location", this._locationFilter);
-      if (this._inLocationOnly) {
-        params.set("in_location", "true");
-      }
+      // Die Auswahl filtert immer nach Bestand; der Opt-out erweitert auf Produkte ohne Bestand.
+      params.set("in_location", this._includeWithoutStock ? "false" : "true");
     }
     if (this._visibility !== "all") {
       params.set("visibility", this._visibility);
@@ -897,14 +896,14 @@ export class FrickeldaveStorePanel extends LitElement {
   _setLocationFilter(locationId) {
     this._locationFilter = locationId || "";
     if (!this._locationFilter) {
-      this._inLocationOnly = false;
+      this._includeWithoutStock = false;
     }
     this._offset = 0;
     this._loadProducts();
   }
 
-  _setInLocationOnly(value) {
-    this._inLocationOnly = Boolean(value) && Boolean(this._locationFilter);
+  _setIncludeWithoutStock(value) {
+    this._includeWithoutStock = Boolean(value) && Boolean(this._locationFilter);
     this._offset = 0;
     this._loadProducts();
   }
@@ -951,6 +950,7 @@ export class FrickeldaveStorePanel extends LitElement {
         this._categoryFilter.length > 0 ||
         this._tagFilter.length > 0 ||
         this._customizableOnly ||
+        // Eine Lagerstätte ist für sich ein aktiver Filter; der Opt-out allein nicht.
         Boolean(this._locationFilter) ||
         this._visibility !== "all" ||
         this._showArchived,
@@ -963,7 +963,7 @@ export class FrickeldaveStorePanel extends LitElement {
     this._tagFilter = [];
     this._customizableOnly = false;
     this._locationFilter = "";
-    this._inLocationOnly = false;
+    this._includeWithoutStock = false;
     this._visibility = "all";
     this._showArchived = false;
     this._offset = 0;
@@ -2748,19 +2748,6 @@ export class FrickeldaveStorePanel extends LitElement {
                 <label class="fd-switch">
                   <input
                     type="checkbox"
-                    .checked=${this._inLocationOnly}
-                    ?disabled=${!this._locationFilter}
-                    @change=${(event) => this._setInLocationOnly(event.target.checked)}
-                  />
-                  <span>
-                    Nur mit Bestand${this._locationFilter
-                      ? ` in ${this._locationName(this._locationFilter)}`
-                      : " (Lagerstätte wählen)"}
-                  </span>
-                </label>
-                <label class="fd-switch">
-                  <input
-                    type="checkbox"
                     .checked=${this._showArchived}
                     @change=${(event) => this._setFlag("_showArchived", event.target.checked)}
                   />
@@ -2788,7 +2775,23 @@ export class FrickeldaveStorePanel extends LitElement {
                       )}
                     </select>
                   `}
-              <p class="fd-hint">Filtert Produkte nach dem Bestand der gewählten Lagerstätte.</p>
+              <p class="fd-hint" id="fd-location-hint">
+                ${this._locationFilter
+                  ? `Zeigt nur Produkte mit Bestand > 0 in ${this._locationName(this._locationFilter)}.`
+                  : "Ohne Auswahl erscheinen Produkte aller Lagerstätten."}
+                Die Option „Auch Produkte ohne Bestand anzeigen“ erweitert die Liste um Produkte
+                ohne Bestand in der gewählten Lagerstätte.
+              </p>
+              <label class="fd-switch">
+                <input
+                  type="checkbox"
+                  .checked=${this._includeWithoutStock}
+                  ?disabled=${!this._locationFilter}
+                  aria-describedby="fd-location-hint"
+                  @change=${(event) => this._setIncludeWithoutStock(event.target.checked)}
+                />
+                <span>Auch Produkte ohne Bestand anzeigen</span>
+              </label>
             </div>
 
             <fieldset class="fd-fieldset fd-fieldset--inline">
@@ -4955,6 +4958,15 @@ export class FrickeldaveStorePanel extends LitElement {
       height: 20px;
       accent-color: var(--fd-accent);
       cursor: pointer;
+    }
+
+    .fd-switch input:disabled {
+      cursor: not-allowed;
+    }
+
+    .fd-switch:has(input:disabled) {
+      color: var(--fd-text-muted);
+      cursor: not-allowed;
     }
 
     /* Buttons ------------------------------------------------------------- */
