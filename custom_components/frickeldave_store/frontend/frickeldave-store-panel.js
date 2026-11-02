@@ -4606,7 +4606,7 @@ export class FrickeldaveStorePanel extends LitElement {
     }
     const running = dialog.busy;
     const result = dialog.result;
-    const showIntro = dialog.phase === "confirm" || dialog.phase === "running";
+    const showIntro = dialog.phase !== "result";
     const preview = dialog.preview;
 
     return html`
