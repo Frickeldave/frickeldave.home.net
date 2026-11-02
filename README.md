@@ -297,10 +297,29 @@ Mit `"dry_run": true` liefert derselbe Endpunkt einen vollständigen Plan je Dat
 Zielbranch, Deployment-Hinweis und eine deutsche Zusammenfassung. Der Dry-Run liest
 ausschließlich: kein Commit, kein Workflow-Dispatch, kein Store-Schreibzugriff.
 
+Jede Antwort enthält `warning` (`string|null`). Ist der lokale Store leer (oder
+enthält nur archivierte Produkte), würde eine Veröffentlichung den kompletten
+Website-Katalog löschen. Deshalb:
+
+| Fall | Verhalten |
+| --- | --- |
+| `dry_run: true`, leerer Store | `200` mit vollständiger Vorschau, `warning` gesetzt, Hinweis in `summary`; es wird nichts geschrieben |
+| Veröffentlichen, leerer Store | `409 publish_empty_catalog`, kein Commit |
+| Veröffentlichen mit `"allow_empty": true` | Commit wie angefordert (Katalog wird geleert), `warning` bleibt gesetzt |
+
+`allow_empty` ist ein boolescher Notausgang (Standard `false`) und nur über
+`POST /publish` mit `app_admin` erreichbar. Die Oberfläche muss ihn bewusst
+bestätigen lassen. Fehlt eine Bilddatei oder ist sie nicht lesbar, antwortet der
+Endpunkt mit `409 publish_artifacts_unavailable` und nennt Artikelnummer und
+Datei, statt still Bilder aus dem Katalog zu entfernen.
+
 Fehlt das Token, antwortet der Endpunkt mit `400 publish_token_missing` und einer
 deutschen Meldung. Ein abgelehntes Token ergibt `502 github_unauthorized`, ein
 unbekanntes Repository `404 github_not_found`, ein währenddessen bewegter Branch
-`409 github_conflict`.
+`409 github_conflict`, eine nicht-JSON-Antwort von GitHub (Störungsseite)
+`502 github_unavailable`. Unerwartete Serverfehler werden mit vollständigem
+Traceback im HA-Protokoll geloggt und als `500 internal_error` mit deutscher
+Meldung beantwortet.
 
 ## KI-Beschreibungen
 

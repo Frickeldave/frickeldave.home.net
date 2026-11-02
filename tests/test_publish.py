@@ -15,6 +15,9 @@ from custom_components.frickeldave_store.permissions import PermissionManager
 from custom_components.frickeldave_store.products import ProductService
 from custom_components.frickeldave_store.publish import (
     FileChange,
+    GitHubError,
+    PublishArtifactsUnavailable,
+    PublishEmptyCatalog,
     PublishNotConfigured,
     PublishService,
     PublishSettings,
@@ -333,10 +336,14 @@ async def test_publish_view_requires_app_admin_and_returns_plan(tmp_path: Path) 
 
 
 class FakeHTTPResponse:
-    def __init__(self, status: int, payload: Any = None) -> None:
+    """aiohttp-Antwort mit echtem Body; ``content_length=None`` = chunked."""
+
+    def __init__(
+        self, status: int, payload: Any = None, *, content_length: int | None = None
+    ) -> None:
         self.status = status
         self._payload = payload
-        self.content_length = 2 if payload is not None else 0
+        self.content_length = content_length
 
     async def json(self, content_type: str | None = None) -> Any:
         if isinstance(self._payload, Exception):
@@ -344,7 +351,11 @@ class FakeHTTPResponse:
         return self._payload
 
     async def read(self) -> bytes:
-        return self._payload if isinstance(self._payload, bytes) else b""
+        if isinstance(self._payload, (bytes, bytearray)):
+            return bytes(self._payload)
+        if self._payload is None:
+            return b""
+        return json.dumps(self._payload).encode("utf-8")
 
     async def __aenter__(self) -> FakeHTTPResponse:
         return self
@@ -471,3 +482,235 @@ async def test_github_client_reads_recursive_tree() -> None:
     assert tree.head_sha == "head-1"
     assert tree.tree_sha == "tree-1"
     assert tree.blobs == {"public/data/handmade.json": "abc"}
+
+
+def _publish_settings() -> PublishSettings:
+    return PublishSettings("o/r", "dev", "main", "fd-deploy-prd.yml", "ghp-test")
+
+
+async def _empty_store(tmp_path: Path) -> CatalogStore:
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+    store.update_settings(
+        {
+            "publish": {
+                "repository": "o/r",
+                "dev_branch": "dev",
+                "prod_branch": "main",
+                "prod_workflow": "fd-deploy-prd.yml",
+                "token": "ghp-test",
+            }
+        }
+    )
+    return store
+
+
+async def test_empty_catalog_blocks_publish_with_german_message(tmp_path: Path) -> None:
+    store = await _empty_store(tmp_path)
+    fake = FakeGitHub(_publish_settings(), remote={_catalog_path(): "alter-stand"})
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    with pytest.raises(PublishEmptyCatalog) as err:
+        await service.async_publish("dev")
+
+    assert err.value.code == "publish_empty_catalog"
+    assert "keine Produkte" in err.value.message
+    assert "löschen" in err.value.message
+    assert fake.commits == [], "leerer Store darf den Website-Katalog nicht löschen"
+
+
+async def test_empty_catalog_dry_run_previews_with_warning(tmp_path: Path) -> None:
+    store = await _empty_store(tmp_path)
+    fake = FakeGitHub(_publish_settings(), remote={_catalog_path(): "alter-stand"})
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["commit"] is None
+    assert result["products"]["total"] == 0
+    assert result["warning"], "Dry-Run muss den leeren Katalog ankündigen"
+    assert "keine Produkte" in result["warning"]
+    assert "Hinweis:" in result["summary"]
+    assert fake.commits == []
+
+
+async def test_empty_catalog_allow_empty_publishes_the_lock_away(tmp_path: Path) -> None:
+    store = await _empty_store(tmp_path)
+    fake = FakeGitHub(
+        _publish_settings(),
+        remote={
+            _catalog_path(): "alter-stand",
+            "src/assets/handmade/LA/LA0001/LA0001-01.jpg": "altes-bild",
+        },
+    )
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    result = await service.async_publish("dev", allow_empty=True)
+
+    assert result["changed"] is True
+    assert len(fake.commits) == 1
+    removed = {change.path for change in fake.commits[0]["changes"] if change.status == "removed"}
+    assert "src/assets/handmade/LA/LA0001/LA0001-01.jpg" in removed
+    assert result["warning"] and "allow_empty" in result["warning"]
+
+
+async def test_non_empty_catalog_has_no_warning(tmp_path: Path) -> None:
+    store, _ = await _store_with_product(tmp_path)
+    service = PublishService(store, client_factory=lambda settings: FakeGitHub(_publish_settings()))
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert result["warning"] is None
+
+
+async def test_missing_image_file_is_a_structured_error(tmp_path: Path) -> None:
+    store, article = await _store_with_product(tmp_path)
+    image_name = store.get_product(article).images[0].name
+    store.images.path_for(article, image_name).unlink()
+    service = PublishService(store, client_factory=lambda settings: FakeGitHub(_publish_settings()))
+
+    with pytest.raises(PublishArtifactsUnavailable) as err:
+        await service.async_publish("dev", dry_run=True)
+
+    assert err.value.code == "publish_artifacts_unavailable"
+    assert article in err.value.message
+    assert "nicht lesbar" in err.value.message or "fehlt" in err.value.message
+
+
+async def test_unreadable_image_file_is_a_structured_error(tmp_path: Path) -> None:
+    store, article = await _store_with_product(tmp_path)
+    image_name = store.get_product(article).images[0].name
+    path = store.images.path_for(article, image_name)
+    path.chmod(0o000)
+    service = PublishService(store, client_factory=lambda settings: FakeGitHub(_publish_settings()))
+
+    try:
+        with pytest.raises(PublishArtifactsUnavailable) as err:
+            await service.async_publish("dev")
+    finally:
+        path.chmod(0o644)
+
+    assert err.value.code == "publish_artifacts_unavailable"
+
+
+async def test_commit_rejects_change_without_artifact() -> None:
+    from custom_components.frickeldave_store.publish import GitHubClient
+
+    client = GitHubClient(_publish_settings(), session=FakeHTTPSession([]))  # type: ignore[arg-type]
+    changes = [FileChange("public/data/handmade.json", "changed", "catalog")]
+
+    with pytest.raises(PublishArtifactsUnavailable) as err:
+        await client.async_commit({}, changes, head_sha="head", tree_sha="base", message="test")
+
+    assert err.value.code == "publish_artifacts_unavailable"
+
+
+async def test_github_html_response_maps_to_github_unavailable() -> None:
+    from custom_components.frickeldave_store.publish import GitHubClient
+
+    html = b"<html><body>502 Bad Gateway</body></html>"
+    session = FakeHTTPSession([FakeHTTPResponse(502, html)])
+    client = GitHubClient(_publish_settings(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(GitHubError) as err:
+        await client.async_read_tree()
+
+    assert err.value.code == "github_unavailable"
+    assert "nicht erreichbar" in err.value.message
+
+    # 200 mit HTML (Proxy/Captive-Portal) ist ebenfalls keine gültige Antwort.
+    session = FakeHTTPSession([FakeHTTPResponse(200, html)])
+    client = GitHubClient(_publish_settings(), session=session)  # type: ignore[arg-type]
+    with pytest.raises(GitHubError) as err:
+        await client.async_read_tree()
+    assert err.value.code == "github_unavailable"
+    assert "Störungsseite" in err.value.message
+
+
+async def test_github_empty_response_is_structured_not_attributeerror() -> None:
+    from custom_components.frickeldave_store.publish import GitHubClient
+
+    session = FakeHTTPSession([FakeHTTPResponse(200, None)])
+    client = GitHubClient(_publish_settings(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(GitHubError) as err:
+        await client.async_read_tree()
+
+    assert err.value.code == "github_failed"
+    assert "erwarteten Format" in err.value.message
+
+
+async def test_github_chunked_json_without_content_length_is_read() -> None:
+    """Regression #289: ``content_length`` ist bei chunked Antworten ``None``."""
+
+    from custom_components.frickeldave_store.publish import GitHubClient
+
+    response = FakeHTTPResponse(200, {"object": {"sha": "head-1"}})
+    assert response.content_length is None, "Fixture muss chunked abbilden"
+    session = FakeHTTPSession([response])
+    client = GitHubClient(_publish_settings(), session=session)  # type: ignore[arg-type]
+
+    body = await client._async_json("GET", "https://api.github.com/repos/o/r/git/ref/heads/dev")
+
+    assert body == {"object": {"sha": "head-1"}}
+
+
+async def test_dry_run_reads_chunked_github_responses_end_to_end(tmp_path: Path) -> None:
+    """Der Lesepfad (Branch → Commit → Baum → Katalog) mit chunked Antworten."""
+
+    from custom_components.frickeldave_store.publish import GitHubClient
+
+    store, _ = await _store_with_product(tmp_path)
+    catalog = json.dumps({"products": []}).encode("utf-8")
+    session = FakeHTTPSession(
+        [
+            FakeHTTPResponse(200, {"object": {"sha": "head-1"}}),
+            FakeHTTPResponse(200, {"tree": {"sha": "tree-1"}}),
+            FakeHTTPResponse(
+                200,
+                {
+                    "tree": [
+                        {"path": _catalog_path(), "type": "blob", "sha": "anderer-stand"},
+                    ],
+                    "truncated": False,
+                },
+            ),
+            FakeHTTPResponse(200, catalog),
+        ]
+    )
+    service = PublishService(
+        store,
+        client_factory=lambda settings: GitHubClient(settings, session=session),  # type: ignore[arg-type]
+    )
+
+    result = await service.async_publish("dev", dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["commit"] is None
+    assert result["counts"]["total"] == 2
+    assert result["products"]["added"] == 1
+
+
+async def test_catalog_with_only_archived_products_is_blocked(tmp_path: Path) -> None:
+    store, article = await _store_with_product(tmp_path)
+    await ProductService(store).async_archive(article)
+    fake = FakeGitHub(_publish_settings(), remote={_catalog_path(): "alter-stand"})
+    service = PublishService(store, client_factory=lambda settings: fake)
+
+    with pytest.raises(PublishEmptyCatalog) as err:
+        await service.async_publish("dev")
+
+    assert err.value.code == "publish_empty_catalog"
+    assert fake.commits == []
+
+
+async def test_malformed_publish_settings_are_reported_not_a_500(tmp_path: Path) -> None:
+    store, _ = await _store_with_product(tmp_path)
+    store.data["settings"]["publish"] = "kaputt"
+    service = PublishService(store, client_factory=lambda settings: FakeGitHub(settings))
+
+    with pytest.raises(PublishNotConfigured) as err:
+        await service.async_publish("dev")
+
+    assert err.value.code == "publish_not_configured"

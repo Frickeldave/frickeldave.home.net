@@ -75,11 +75,14 @@ STATUS_BY_CODE: dict[str, int] = {
     "publish_not_configured": 400,
     "publish_token_missing": 400,
     "publish_failed": 502,
+    "publish_empty_catalog": 409,
+    "publish_artifacts_unavailable": 409,
     "github_unauthorized": 502,
     "github_not_found": 404,
     "github_conflict": 409,
     "github_failed": 502,
     "github_unavailable": 502,
+    "internal_error": 500,
 }
 
 
@@ -90,6 +93,26 @@ class NotLoadedError(StoreError):
 def _error_response(err: StoreError) -> web.Response:
     status = STATUS_BY_CODE.get(err.code, 400)
     return web.json_response({"error": err.as_dict}, status=status)
+
+
+def _internal_error_response(err: Exception, *, action: str) -> web.Response:
+    """Unerwartete Fehler strukturiert beantworten statt als nacktes 500."""
+
+    _LOGGER.exception("Unerwarteter Fehler beim %s", action)
+    return web.json_response(
+        {
+            "error": {
+                "code": "internal_error",
+                "message": (
+                    "Unerwarteter Serverfehler. Der vollständige Traceback steht im "
+                    "Home-Assistant-Protokoll (Filter: frickeldave_store). Bitte erneut "
+                    "versuchen; bleibt der Fehler bestehen, das Protokoll an die "
+                    "Fehleranalyse weitergeben."
+                ),
+            }
+        },
+        status=500,
+    )
 
 
 def _hass(request: web.Request) -> HomeAssistant:
@@ -776,7 +799,7 @@ class PublishView(HomeAssistantView):
         try:
             runtime, user = _authorize(request, ROLE_APP_ADMIN)
             payload = await _optional_json_body(request)
-            unknown = set(payload) - {"target", "dry_run", "message"}
+            unknown = set(payload) - {"target", "dry_run", "message", "allow_empty"}
             if unknown:
                 raise ValidationError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
             target = payload.get("target")
@@ -785,16 +808,27 @@ class PublishView(HomeAssistantView):
             dry_run = payload.get("dry_run", False)
             if not isinstance(dry_run, bool):
                 raise ValidationError("dry_run muss ein Wahrheitswert sein.")
+            allow_empty = payload.get("allow_empty", False)
+            if not isinstance(allow_empty, bool):
+                raise ValidationError("allow_empty muss ein Wahrheitswert sein.")
             message = payload.get("message", "")
             if not isinstance(message, str):
                 raise ValidationError("message muss eine Zeichenkette sein.")
             service = runtime.publish or PublishService(runtime.store)
             result = await service.async_publish(
-                str(target), dry_run=dry_run, message=message, user_id=str(user.id)
+                str(target),
+                dry_run=dry_run,
+                message=message,
+                user_id=str(user.id),
+                allow_empty=allow_empty,
             )
             return web.json_response(result)
         except StoreError as err:
             return _error_response(err)
+        except Exception as err:
+            # Fremde Fehler (OSError, JSONDecodeError, Programmierfehler) nie als
+            # nacktes 500 durchreichen: das Panel braucht eine verwertbare Meldung.
+            return _internal_error_response(err, action="Veröffentlichen")
 
 
 class ExportView(HomeAssistantView):
@@ -864,6 +898,8 @@ class CatalogImportView(HomeAssistantView):
             return web.json_response(result.to_dict())
         except StoreError as err:
             return _error_response(err)
+        except Exception as err:
+            return _internal_error_response(err, action="Importieren des Katalogs")
 
 
 VIEWS: tuple[type[HomeAssistantView], ...] = (

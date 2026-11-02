@@ -6,6 +6,55 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-02
+
+### Added
+
+- **Sperre gegen versehentliches Leeren des Website-Katalogs (#289).**
+  Enthält der lokale Store keine veröffentlichbaren Produkte (auch: nur noch
+  archivierte), verweigert `POST /api/frickeldave_store/publish` die
+  Veröffentlichung mit `409 publish_empty_catalog` und einer deutschen Meldung.
+  Ein Dry-Run liefert weiterhin eine vollständige Vorschau, setzt aber das neue
+  Feld `warning` (string|null) und ergänzt die `summary` um einen Hinweis. Der
+  Notausgang ist das Body-Feld `allow_empty` (bool, Standard `false`): nur
+  `app_admin` kann die Sperre bewusst umgehen; auch dann bleibt `warning`
+  gesetzt. Ohne `allow_empty` wird kein Commit erzeugt – der Website-Katalog
+  bleibt unangetastet.
+- **Strukturierte Antwort statt nacktem 500 beim Veröffentlichen (#289).**
+  `PublishView` fängt unerwartete Exceptions, loggt den vollständigen Traceback
+  mit `_LOGGER.exception` und antwortet mit `500 internal_error` und einer
+  deutschen Meldung, die auf das Home-Assistant-Protokoll verweist. Dasselbe gilt
+  für den Katalogimport.
+
+### Fixed
+
+- **Veröffentlichen scheiterte an chunked GitHub-Antworten (#289).**
+  `GitHubClient._async_json` verwarf den Body, sobald
+  `response.content_length` leer war (`not None` ist `True`). GitHub liefert
+  REST-Antworten regelmäßig mit `Transfer-Encoding: chunked` und ohne
+  `Content-Length`; der Body wurde damit weggeworfen und `_async_json` gab
+  `None` zurück. Schon der erste Leseaufruf (`GET git/ref/heads/dev`) endete in
+  `AttributeError: 'NoneType' object has no attribute 'get'` → unbehandelter
+  500, im Panel sichtbar als „Der Server hat einen Fehler gemeldet.“ Das betraf
+  **jeden** Lesevorgang, also auch den Dry-Run, seit der Einführung der
+  GitHub-Daten-API. Jetzt wird der Body immer gelesen (`response.read()`);
+  `None` gibt es nur bei echten Null-Body-Status (204, 205, 304). Ungültiges
+  JSON wird zu `502 github_unavailable`. Alle Stellen, die ein Objekt erwarten
+  (Branch, Commit, Baum, Blob), prüfen den Typ und melden einen fachlichen
+  Fehler statt `AttributeError`.
+- **Nicht-JSON-Antworten von GitHub führen zu `github_unavailable` (#289).**
+  Eine HTML- oder Proxy-Antwort (GitHub-Störung, Cloudflare-Seite) warf
+  `json.JSONDecodeError` und schlug als unbehandelter 500 durch. Jetzt wird sie
+  als `502 github_unavailable` mit deutscher Meldung zurückgegeben; 5xx von
+  GitHub ebenfalls.
+- **Fehlende oder unlesbare Bilddateien werden gemeldet (#289).**
+  `build_artifacts` übersprang solche Bilder stillschweigend, `read_bytes()`
+  konnte dagegen mit `PermissionError`/`OSError` als 500 durchschlagen. Jetzt
+  sammelt der Aufbau die betroffenen Dateien und antwortet mit
+  `409 publish_artifacts_unavailable` (Artikelnummer und Datei in der Meldung).
+  Dasselbe gilt für einen Änderungseintrag ohne Artefakt in `async_commit`
+  (vorher `KeyError`).
+
 ## [0.1.12] - 2026-11-02
 
 ### Added

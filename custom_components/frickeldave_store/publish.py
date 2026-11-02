@@ -48,6 +48,8 @@ GITHUB_TIMEOUT = 30
 MAX_MESSAGE_LENGTH = 200
 #: Obergrenze für die Dateiliste in der Antwort (Zählungen bleiben vollständig).
 MAX_CHANGE_ENTRIES = 500
+#: Status ohne Body: hier ist ``None`` das korrekte Ergebnis, nicht ein Fehler.
+NO_BODY_STATUSES: tuple[int, ...] = (204, 205, 304)
 
 DEFAULT_COMMIT_MESSAGE = "chore(catalog): Katalog aus Home Assistant veröffentlicht (#289)"
 
@@ -94,6 +96,63 @@ class GitHubNotFound(GitHubError):
 
 class GitHubConflict(GitHubError):
     code = "github_conflict"
+
+
+class PublishEmptyCatalog(PublishError):
+    """Der lokale Store enthält keine veröffentlichbaren Produkte."""
+
+    code = "publish_empty_catalog"
+
+
+class PublishArtifactsUnavailable(PublishError):
+    """Eine Datei des Veröffentlichungssatzes fehlt oder ist nicht lesbar."""
+
+    code = "publish_artifacts_unavailable"
+
+
+EMPTY_CATALOG_MESSAGE = (
+    "Der lokale Store enthält keine Produkte. Eine Veröffentlichung würde den "
+    "kompletten Website-Katalog löschen. Bitte zuerst Produkte importieren oder "
+    "anlegen. Ein bewusstes Leeren ist nur mit allow_empty möglich."
+)
+
+
+def empty_catalog_warning(*, allow_empty: bool, dry_run: bool) -> str:
+    if dry_run:
+        return (
+            "Der lokale Store enthält keine Produkte. Ein Veröffentlichen würde den "
+            "Website-Katalog vollständig leeren."
+        )
+    if allow_empty:
+        return (
+            "Der lokale Store enthält keine Produkte. Der Website-Katalog wurde bewusst "
+            "geleert (allow_empty)."
+        )
+    return EMPTY_CATALOG_MESSAGE
+
+
+def _summary_with_warning(summary: str, warning: str | None) -> str:
+    return f"{summary} Hinweis: {warning}" if warning else summary
+
+
+def _decoded_or_empty(raw: bytes) -> dict[str, Any]:
+    """Fehlerantwort-Body für ``_raise_for_status``; kaputtes JSON zählt als leer."""
+
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _as_mapping(value: Any, message: str) -> dict[str, Any]:
+    """Antwort als Objekt erwarten: nie ``AttributeError`` auf ``None``/Listen."""
+
+    if not isinstance(value, dict):
+        raise GitHubError(message, code="github_failed")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +213,8 @@ def blob_sha(data: bytes) -> str:
 
 
 def publish_settings_from_store(store: CatalogStore) -> PublishSettings:
-    settings = store.settings.get("publish") or {}
+    raw = store.settings.get("publish")
+    settings = raw if isinstance(raw, dict) else {}
     return PublishSettings(
         repository=str(settings.get("repository", "") or ""),
         dev_branch=str(settings.get("dev_branch", "") or "dev"),
@@ -175,24 +235,48 @@ def build_artifacts(
     locations: list[dict[str, str]],
     images: ImageStorage,
 ) -> dict[str, bytes]:
-    """Alle zu veröffentlichenden Dateien als Pfad → Bytes (read-only)."""
+    """Alle zu veröffentlichenden Dateien als Pfad → Bytes (read-only).
+
+    Fehlende oder unlesbare Bilddateien werden gesammelt und als fachlicher Fehler
+    gemeldet: eine Veröffentlichung mit unvollständigem Bildsatz würde sonst still
+    Bilder aus dem Website-Katalog entfernen.
+    """
 
     product_list = list(products)
     artifacts: dict[str, bytes] = {
         CATALOG_RELATIVE_PATH.as_posix(): catalog_bytes(product_list, locations=locations)
     }
+    problems: list[str] = []
     for product in sorted(product_list, key=lambda item: item.article_number):
         if product.archived:
             continue
         for index, image in enumerate(ordered_images(product), start=1):
             target_name = desired_image_name(product, index, image.name)
             source = images.path_for(product.article_number, image.name)
-            if not source.is_file():
+            try:
+                data = source.read_bytes()
+            except FileNotFoundError:
+                problems.append(f"{product.article_number}/{image.name} (fehlt)")
+                continue
+            except OSError as err:
+                reason = err.strerror or err.__class__.__name__
+                problems.append(f"{product.article_number}/{image.name} ({reason})")
                 continue
             path = (
                 IMAGES_RELATIVE_PATH / product.category / product.article_number / target_name
             ).as_posix()
-            artifacts[path] = source.read_bytes()
+            artifacts[path] = data
+    if problems:
+        preview = ", ".join(problems[:3])
+        more = "" if len(problems) <= 3 else f" und {len(problems) - 3} weitere"
+        if len(problems) == 1:
+            detail = f"Eine Bilddatei fehlt oder ist nicht lesbar: {problems[0]}."
+        else:
+            detail = f"{len(problems)} Bilddateien fehlen oder sind nicht lesbar: {preview}{more}."
+        raise PublishArtifactsUnavailable(
+            f"{detail} Bitte die betroffenen Bilder erneut hochladen oder aus dem "
+            "Produkt entfernen und erneut veröffentlichen."
+        )
     return artifacts
 
 
@@ -347,12 +431,22 @@ class GitHubClient:
                 headers=self._headers(),
                 timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as response:
-                if response.status == 204 or not response.content_length:
-                    self._raise_for_status(response.status, {})
+                # Body immer lesen: ``response.content_length`` ist bei chunked
+                # Antworten (``Transfer-Encoding: chunked``) ``None`` und taugt
+                # nicht als Leer-Kriterium. GitHub antwortet regelmäßig so.
+                raw = await response.read()
+                if response.status >= 400:
+                    self._raise_for_status(response.status, _decoded_or_empty(raw))
+                if response.status in NO_BODY_STATUSES or not raw:
                     return None
-                body = await response.json(content_type=None)
-                self._raise_for_status(response.status, body)
-                return body
+                try:
+                    return json.loads(raw)
+                except ValueError as err:
+                    raise GitHubError(
+                        "GitHub hat keine gültige Antwort geliefert (vermutlich eine "
+                        "Störungsseite). Bitte später erneut versuchen.",
+                        code="github_unavailable",
+                    ) from err
         except (TimeoutError, aiohttp.ClientError) as err:
             raise GitHubError(
                 "GitHub ist momentan nicht erreichbar. Bitte später erneut versuchen.",
@@ -399,20 +493,38 @@ class GitHubClient:
                 "Der Branch wurde während der Veröffentlichung geändert. "
                 "Bitte den Vorgang erneut starten."
             )
+        if status >= 500:
+            raise GitHubError(
+                "GitHub ist momentan nicht erreichbar (Störung auf der GitHub-Seite). "
+                "Bitte später erneut versuchen.",
+                code="github_unavailable",
+            )
         raise GitHubError(f"GitHub hat die Anfrage abgelehnt (HTTP {status}).")
 
     # ------------------------------------------------------------------ Lesen
     async def async_read_tree(self) -> RemoteTree:
         branch = quote(self._settings.dev_branch, safe="")
-        ref = await self._async_json("GET", self._url(f"git/ref/heads/{branch}"))
+        ref = _as_mapping(
+            await self._async_json("GET", self._url(f"git/ref/heads/{branch}")),
+            "GitHub hat den Branch-Status nicht im erwarteten Format geliefert. "
+            "Bitte später erneut versuchen.",
+        )
         head_sha = str((ref.get("object") or {}).get("sha", ""))
         if not head_sha:
             raise GitHubError("Der Branch hat keinen lesbaren Kopf-Commit.")
-        commit = await self._async_json("GET", self._url(f"git/commits/{head_sha}"))
+        commit = _as_mapping(
+            await self._async_json("GET", self._url(f"git/commits/{head_sha}")),
+            "GitHub hat den Commit nicht im erwarteten Format geliefert. "
+            "Bitte später erneut versuchen.",
+        )
         tree_sha = str((commit.get("tree") or {}).get("sha", ""))
         if not tree_sha:
             raise GitHubError("Der Branch hat keinen lesbaren Baum.")
-        tree = await self._async_json("GET", self._url(f"git/trees/{tree_sha}?recursive=1"))
+        tree = _as_mapping(
+            await self._async_json("GET", self._url(f"git/trees/{tree_sha}?recursive=1")),
+            "GitHub hat den Dateibaum nicht im erwarteten Format geliefert. "
+            "Bitte später erneut versuchen.",
+        )
         blobs: dict[str, str] = {}
         for entry in tree.get("tree") or []:
             if isinstance(entry, dict) and entry.get("type") == "blob":
@@ -447,14 +559,23 @@ class GitHubClient:
                 continue
             if change.status == STATUS_UNCHANGED:
                 continue
-            data = artifacts[change.path]
-            blob = await self._async_json(
-                "POST",
-                self._url("git/blobs"),
-                payload={
-                    "content": base64.b64encode(data).decode("ascii"),
-                    "encoding": "base64",
-                },
+            data = artifacts.get(change.path)
+            if data is None:
+                raise PublishArtifactsUnavailable(
+                    f"Die Datei „{change.path}“ fehlt im Veröffentlichungssatz. "
+                    "Bitte den Vorgang erneut starten."
+                )
+            blob = _as_mapping(
+                await self._async_json(
+                    "POST",
+                    self._url("git/blobs"),
+                    payload={
+                        "content": base64.b64encode(data).decode("ascii"),
+                        "encoding": "base64",
+                    },
+                ),
+                "GitHub hat den Blob nicht im erwarteten Format geliefert. "
+                "Bitte den Vorgang erneut starten.",
             )
             tree_entries.append(
                 {
@@ -464,17 +585,25 @@ class GitHubClient:
                     "sha": str(blob.get("sha", "")),
                 }
             )
-        tree = await self._async_json(
-            "POST",
-            self._url("git/trees"),
-            # base_tree hält alle nicht genannten Dateien unverändert.
-            payload={"base_tree": tree_sha, "tree": tree_entries},
+        tree = _as_mapping(
+            await self._async_json(
+                "POST",
+                self._url("git/trees"),
+                # base_tree hält alle nicht genannten Dateien unverändert.
+                payload={"base_tree": tree_sha, "tree": tree_entries},
+            ),
+            "GitHub hat den Baum nicht im erwarteten Format geliefert. "
+            "Bitte den Vorgang erneut starten.",
         )
         tree_sha = str(tree.get("sha", ""))
-        commit = await self._async_json(
-            "POST",
-            self._url("git/commits"),
-            payload={"message": message, "tree": tree_sha, "parents": [head_sha]},
+        commit = _as_mapping(
+            await self._async_json(
+                "POST",
+                self._url("git/commits"),
+                payload={"message": message, "tree": tree_sha, "parents": [head_sha]},
+            ),
+            "GitHub hat den Commit nicht im erwarteten Format geliefert. "
+            "Bitte den Vorgang erneut starten.",
         )
         commit_sha = str(commit.get("sha", ""))
         branch = quote(self._settings.dev_branch, safe="")
@@ -526,6 +655,7 @@ class PublishService:
         dry_run: bool = False,
         message: str = "",
         user_id: str = "",
+        allow_empty: bool = False,
     ) -> dict[str, Any]:
         if target not in PUBLISH_TARGETS:
             raise PublishError("target muss 'dev' oder 'prod' sein.", code="validation_error")
@@ -542,6 +672,27 @@ class PublishService:
         )
 
         products = self._store.products()
+        # Archivierte Produkte landen nicht im Katalog: auch ein Store, der nur noch
+        # archivierte Produkte enthält, würde den Website-Katalog leeren.
+        empty_catalog = not any(not product.archived for product in products)
+        if empty_catalog and not dry_run and not allow_empty:
+            _LOGGER.warning(
+                "Veröffentlichen nach %s abgelehnt: lokaler Store ohne Produkte (Benutzer %s)",
+                target,
+                user_id or "-",
+            )
+            raise PublishEmptyCatalog(EMPTY_CATALOG_MESSAGE)
+        warning = (
+            empty_catalog_warning(allow_empty=allow_empty, dry_run=dry_run)
+            if empty_catalog
+            else None
+        )
+        if empty_catalog and not dry_run:
+            _LOGGER.warning(
+                "Veröffentlichen nach %s mit leerem Katalog (allow_empty, Benutzer %s)",
+                target,
+                user_id or "-",
+            )
         locations = self._store.locations()
         artifacts = await asyncio.to_thread(
             build_artifacts, products, locations, self._store.images
@@ -574,6 +725,7 @@ class PublishService:
                 counts=counts,
                 product_counts=product_counts,
                 image_counts=image_counts,
+                warning=warning,
             )
 
             if dry_run:
@@ -614,14 +766,17 @@ class PublishService:
                 result["deployment"]["triggered"] = commit_sha is not None
             result["commit"] = commit_sha
             result["changed"] = commit_sha is not None
-            result["summary"] = self._summary(
-                target,
-                settings,
-                counts,
-                product_counts,
-                image_counts,
-                dry_run=False,
-                committed=commit_sha is not None,
+            result["summary"] = _summary_with_warning(
+                self._summary(
+                    target,
+                    settings,
+                    counts,
+                    product_counts,
+                    image_counts,
+                    dry_run=False,
+                    committed=commit_sha is not None,
+                ),
+                warning,
             )
             return result
         finally:
@@ -637,6 +792,7 @@ class PublishService:
         counts: dict[str, int],
         product_counts: dict[str, int],
         image_counts: dict[str, int],
+        warning: str | None = None,
     ) -> dict[str, Any]:
         files = changes[:MAX_CHANGE_ENTRIES]
         deployment = {
@@ -664,14 +820,18 @@ class PublishService:
             "files": [change.to_dict() for change in files],
             "files_truncated": len(changes) > MAX_CHANGE_ENTRIES,
             "deployment": deployment,
-            "summary": self._summary(
-                target,
-                settings,
-                counts,
-                product_counts,
-                image_counts,
-                dry_run=dry_run,
-                committed=False,
+            "warning": warning,
+            "summary": _summary_with_warning(
+                self._summary(
+                    target,
+                    settings,
+                    counts,
+                    product_counts,
+                    image_counts,
+                    dry_run=dry_run,
+                    committed=False,
+                ),
+                warning,
             ),
         }
 
@@ -729,9 +889,12 @@ class PublishService:
 
 
 __all__ = [
+    "EMPTY_CATALOG_MESSAGE",
     "FILE_STATUSES",
     "GitHubClient",
     "GitHubError",
+    "PublishArtifactsUnavailable",
+    "PublishEmptyCatalog",
     "PublishError",
     "PublishNotConfigured",
     "PublishService",
@@ -743,5 +906,6 @@ __all__ = [
     "diff_artifacts",
     "diff_images",
     "diff_products",
+    "empty_catalog_warning",
     "publish_settings_from_store",
 ]
