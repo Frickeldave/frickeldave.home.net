@@ -21,14 +21,11 @@ const REQUEST_TIMEOUT_MS = 30000;
 const TOAST_TIMEOUT_MS = 6000;
 // Event der Basis, sobald sich registrierte Erweiterungen ändern (Contract 1).
 const FEATURES_EVENT = "frickeldave_store_features_changed";
-const BASE_PROVIDER = "frickeldave_store";
-const SYNC_PROVIDER = "frickeldave_store_syncfd";
 
 const TABS = Object.freeze([
   { id: "general", label: "Allgemeine Einstellungen", panelId: "fd-config-panel-general" },
   { id: "users", label: "Benutzerverwaltung", panelId: "fd-config-panel-users" },
   { id: "locations", label: "Lagerstätten", panelId: "fd-config-panel-locations" },
-  { id: "publish", label: "Veröffentlichen", panelId: "fd-config-panel-publish" },
   { id: "ai", label: "KI-Einstellungen", panelId: "fd-config-panel-ai" },
 ]);
 
@@ -116,20 +113,6 @@ const normalizeLocations = (data) => {
   }));
 };
 
-const normalizePublish = (data) => {
-  const payload = data && typeof data === "object" ? data : {};
-  return {
-    form: {
-      repository: asText(payload.repository),
-      dev_branch: asText(payload.dev_branch),
-      prod_branch: asText(payload.prod_branch),
-      prod_workflow: asText(payload.prod_workflow),
-      token: "",
-    },
-    tokenSet: Boolean(payload.token_set),
-  };
-};
-
 const normalizeStorage = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const dataPath = asText(payload.data_path);
@@ -179,7 +162,7 @@ const normalizeFeatureStatus = (entry) => {
 
 /**
  * Feature-Status aus `/me` bzw. `/settings`. `null` bedeutet: die Basis liefert
- * die Angabe noch nicht (ältere Version); dann bleibt der eingebaute Tab aktiv.
+ * die Angabe noch nicht; dann bleibt nur der allgemeine Erweiterungshinweis.
  */
 const normalizeFeatures = (raw) => {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -207,7 +190,6 @@ const normalizeSettingsPayload = (data) => {
     },
     apiKeySet: Boolean(ai?.api_key_set),
     locations: normalizeLocations(payload.locations),
-    publish: normalizePublish(payload.publish),
     storage: normalizeStorage(payload.storage),
     features: normalizeFeatures(payload.features),
   };
@@ -221,7 +203,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     _accessError: { state: true },
     _me: { state: true },
     _features: { state: true },
-    _featureDetails: { state: true },
 
     _tab: { state: true },
 
@@ -237,7 +218,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     _ai: { state: true },
     _locations: { state: true },
-    _publish: { state: true },
     _storage: { state: true },
     _toast: { state: true },
 
@@ -256,7 +236,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     this._accessError = "";
     this._me = null;
     this._features = null;
-    this._featureDetails = null;
     this._featureUnsubscribe = null;
     this._featureConnection = null;
     this._featureSubscribing = false;
@@ -291,14 +270,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       notice: "",
       items: normalizeLocations(null).map((entry) => ({ ...entry, originalName: entry.name })),
       loaded: false,
-    };
-
-    this._publish = {
-      saving: false,
-      error: "",
-      notice: "",
-      form: { repository: "", dev_branch: "", prod_branch: "", prod_workflow: "", token: "" },
-      tokenSet: false,
     };
 
     this._storage = {
@@ -535,56 +506,20 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     return Boolean(this._me?.can?.[permission]);
   }
 
-  /**
-   * Fähigkeit `publish` inklusive Anbieter. `legacy` gilt für eine Basis, die
-   * noch keine Feature-Angabe liefert; dort bleibt der eingebaute Tab sichtbar.
-   */
-  _publishFeature() {
-    if (this._features === null) {
-      return {
-        legacy: true,
-        present: false,
-        available: true,
-        reason: "",
-        provider: BASE_PROVIDER,
-        contractVersion: 0,
-      };
-    }
+  /** Hinweis auf den Ort der Veröffentlichungs-Einstellungen (nur Text, kein Formular). */
+  _publishHint() {
     const feature = this._features?.publish;
     if (!feature) {
-      return {
-        legacy: false,
-        present: false,
-        available: false,
-        reason: "",
-        provider: "",
-        contractVersion: 0,
-      };
+      return "Veröffentlichen wird von einer Erweiterung bereitgestellt. Token und Ziel-Repository pflegst du in deren Einstellungen; im Basis-Panel wird kein Token gespeichert.";
     }
-    return { legacy: false, present: true, ...feature };
-  }
-
-  _showPublishTab() {
-    const feature = this._publishFeature();
-    return feature.legacy || (feature.present && feature.provider === BASE_PROVIDER);
+    if (!feature.available) {
+      return feature.reason || "Veröffentlichen ist derzeit nicht verfügbar.";
+    }
+    return `Veröffentlichen wird von „${feature.provider || "einer Erweiterung"}“ verwaltet. Token und Ziel-Repository pflegst du in deren Einstellungen; im Basis-Panel wird kein Token gespeichert.`;
   }
 
   _visibleTabs() {
-    return this._showPublishTab() ? TABS : TABS.filter((tab) => tab.id !== "publish");
-  }
-
-  _publishHint() {
-    const feature = this._publishFeature();
-    if (feature.legacy || (feature.present && feature.provider === BASE_PROVIDER)) {
-      return "";
-    }
-    if (!feature.present) {
-      return "Die Frickeldave-Synchronisation ist nicht installiert. Veröffentlichen ist erst nach Installation der Erweiterung „Frickeldave Store Sync“ verfügbar; Token und Ziele werden dort gepflegt.";
-    }
-    if (feature.provider === SYNC_PROVIDER) {
-      return "Veröffentlichen wird von der Erweiterung „Frickeldave Store Sync“ verwaltet. Token und Ziel-Repository pflegst du unter Einstellungen → Geräte & Dienste → Frickeldave Store Sync; im Basis-Panel wird kein Token mehr gespeichert.";
-    }
-    return `Veröffentlichen wird vom Anbieter „${feature.provider || "Erweiterung"}“ verwaltet. Die Einstellungen dazu liegen in der jeweiligen Erweiterung.`;
+    return TABS;
   }
 
   _ensureValidTab() {
@@ -664,7 +599,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     if (!this.hass || !this._token() || this._accessState !== "ready" || !this._can("app_admin")) {
       return;
     }
-    if (this._ai.loading || this._publish.saving) {
+    if (this._ai.loading) {
       return;
     }
     await this._loadSettings();
@@ -1183,13 +1118,12 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   /* --------------------------------------------------------------------- */
-  /* Einstellungen (KI, Lagerstätten, Veröffentlichung)                     */
+  /* Einstellungen (KI, Lagerstätten, Speicherort)                         */
   /* --------------------------------------------------------------------- */
 
   _applySettingsPayload(data) {
     const normalized = normalizeSettingsPayload(data);
     this._features = normalized.features ?? this._features;
-    this._featureDetails = normalizeFeatures(data?.feature_details) ?? this._featureDetails;
     this._ensureValidTab();
     this._ai = {
       ...this._ai,
@@ -1203,11 +1137,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       loading: false,
       loaded: true,
       items: normalized.locations.map((entry) => ({ ...entry, originalName: entry.name })),
-    };
-    this._publish = {
-      ...this._publish,
-      form: normalized.publish.form,
-      tokenSet: normalized.publish.tokenSet,
     };
     const storage = normalized.storage;
     this._storage = {
@@ -1403,79 +1332,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         return;
       }
       this._locations = { ...this._locations, saving: false, error: this._errorText(error) };
-    }
-  }
-
-  _setPublishField(field, value) {
-    this._publish = {
-      ...this._publish,
-      error: "",
-      notice: "",
-      form: { ...this._publish.form, [field]: value },
-    };
-  }
-
-  async _savePublish(event) {
-    event?.preventDefault();
-    if (!this._can("app_admin") || this._publish.saving) {
-      return;
-    }
-    if (!this._locations.loaded) {
-      this._publish = {
-        ...this._publish,
-        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
-        notice: "",
-      };
-      return;
-    }
-    const form = this._publish.form;
-    const publish = {
-      repository: form.repository.trim(),
-      dev_branch: form.dev_branch.trim(),
-      prod_branch: form.prod_branch.trim(),
-      prod_workflow: form.prod_workflow.trim(),
-    };
-    if (!publish.repository || !publish.dev_branch || !publish.prod_branch || !publish.prod_workflow) {
-      this._publish = {
-        ...this._publish,
-        error: "Bitte Repository, dev-Branch, prod-Branch und prod-Workflow angeben.",
-        notice: "",
-      };
-      return;
-    }
-    const token = form.token.trim();
-    if (token) {
-      publish.token = token;
-    }
-
-    this._publish = { ...this._publish, saving: true, error: "", notice: "" };
-    try {
-      const data = await this._api(`${API_ROOT}/settings`, { method: "PATCH", body: { publish } });
-      const hasPayload = Boolean(data && typeof data === "object" && data.publish);
-      if (hasPayload) {
-        const normalized = normalizePublish(data.publish);
-        this._publish = {
-          ...this._publish,
-          saving: false,
-          form: normalized.form,
-          tokenSet: normalized.tokenSet || Boolean(token),
-          notice: "Veröffentlichungs-Einstellungen gespeichert.",
-        };
-      } else {
-        this._publish = {
-          ...this._publish,
-          saving: false,
-          form: { ...this._publish.form, token: "" },
-          tokenSet: this._publish.tokenSet || Boolean(token),
-          notice: "Veröffentlichungs-Einstellungen gespeichert.",
-        };
-      }
-    } catch (error) {
-      if (isAbortError(error)) {
-        this._publish = { ...this._publish, saving: false };
-        return;
-      }
-      this._publish = { ...this._publish, saving: false, error: this._errorText(error) };
     }
   }
 
@@ -1722,9 +1578,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
               ? this._renderUsersTab()
               : this._tab === "locations"
                 ? this._renderLocationsTab()
-                : this._tab === "publish"
-                  ? this._renderPublishTab()
-                  : this._renderAiTab()}
+                : this._renderAiTab()}
           ${this._me?.version
             ? html`<footer class="fd-config-footer" aria-label="Geladene Panel-Version">
                 v${this._me.version}
@@ -2392,141 +2246,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                   ${state.error ? "Nicht gespeichert" : "Konfiguration geladen"}
                 </span>`
               : ""}
-          </div>
-        </form>
-      </section>
-    `;
-  }
-
-  _renderPublishTab() {
-    const publish = this._publish;
-    const state = this._locations;
-    const busy = state.loading || state.saving || !state.loaded;
-    const form = publish.form;
-
-    return html`
-      <section
-        id="fd-config-panel-publish"
-        role="tabpanel"
-        aria-labelledby="fd-config-tab-publish"
-        class="fd-card fd-config-section"
-      >
-        <div class="fd-config-toolbar">
-          <div>
-            <h2>Veröffentlichen</h2>
-            <p class="fd-muted fd-small">
-              Ziel-Repository und Branches für „Nach dev veröffentlichen“ und „Nach prod veröffentlichen“
-              im Store-Panel. Das Token wird nie angezeigt.
-            </p>
-          </div>
-          <button type="button" class="fd-button" @click=${() => this._loadSettings()} ?disabled=${busy}>
-            Neu laden
-          </button>
-        </div>
-
-        <div class="fd-live" role="status" aria-live="polite">
-          ${state.loading ? "Einstellungen werden geladen …" : ""}
-        </div>
-        ${publish.error ? html`<div class="fd-banner fd-banner--error" role="alert">${publish.error}</div>` : ""}
-        ${publish.notice ? html`<div class="fd-banner fd-banner--success" role="status">${publish.notice}</div>` : ""}
-
-        <form class="fd-form-grid" @submit=${(event) => this._savePublish(event)} novalidate>
-          <div class="fd-field fd-field--full">
-            <label class="fd-label" for="fd-publish-repository">Repository</label>
-            <input
-              id="fd-publish-repository"
-              class="fd-input"
-              type="text"
-              placeholder="Frickeldave/frickeldave.github.io"
-              required
-              aria-required="true"
-              .value=${form.repository}
-              ?disabled=${busy || publish.saving}
-              @input=${(event) => this._setPublishField("repository", event.target.value)}
-            />
-            <p class="fd-hint">GitHub-Repository im Format owner/name.</p>
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-publish-dev-branch">dev-Branch</label>
-            <input
-              id="fd-publish-dev-branch"
-              class="fd-input"
-              type="text"
-              required
-              aria-required="true"
-              .value=${form.dev_branch}
-              ?disabled=${busy || publish.saving}
-              @input=${(event) => this._setPublishField("dev_branch", event.target.value)}
-            />
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-publish-prod-branch">prod-Branch</label>
-            <input
-              id="fd-publish-prod-branch"
-              class="fd-input"
-              type="text"
-              required
-              aria-required="true"
-              .value=${form.prod_branch}
-              ?disabled=${busy || publish.saving}
-              @input=${(event) => this._setPublishField("prod_branch", event.target.value)}
-            />
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-publish-workflow">prod-Workflow</label>
-            <input
-              id="fd-publish-workflow"
-              class="fd-input"
-              type="text"
-              required
-              aria-required="true"
-              placeholder="fd-deploy-prd.yml"
-              .value=${form.prod_workflow}
-              ?disabled=${busy || publish.saving}
-              @input=${(event) => this._setPublishField("prod_workflow", event.target.value)}
-            />
-          </div>
-
-          <div class="fd-field">
-            <label class="fd-label" for="fd-publish-token">GitHub-Token</label>
-            <input
-              id="fd-publish-token"
-              class="fd-input"
-              type="password"
-              autocomplete="new-password"
-              placeholder=${publish.tokenSet ? "Token hinterlegt" : "Noch kein Token hinterlegt"}
-              .value=${form.token}
-              ?disabled=${busy || publish.saving}
-              @input=${(event) => this._setPublishField("token", event.target.value)}
-            />
-            <p class="fd-hint">
-              Leer lassen, um das gespeicherte Token beizubehalten. Nur schreibbar, nie lesbar.
-            </p>
-          </div>
-
-          <div class="fd-field fd-field--full">
-            <div class="fd-inline-actions">
-              <button
-                type="submit"
-                class="fd-button fd-button--primary"
-                ?disabled=${busy || publish.saving}
-                aria-busy=${publish.saving ? "true" : "false"}
-              >
-                ${publish.saving ? "Speichern …" : "Speichern"}
-              </button>
-              <span
-                class="fd-status ${!state.loaded || !publish.tokenSet ? "fd-status--warn" : "fd-status--ok"}"
-              >
-                ${!state.loaded
-                  ? "Token-Status wird geladen …"
-                  : publish.tokenSet
-                    ? "Token hinterlegt"
-                    : "Kein Token hinterlegt"}
-              </span>
-            </div>
           </div>
         </form>
       </section>

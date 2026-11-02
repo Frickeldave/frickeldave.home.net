@@ -180,8 +180,8 @@ const toggleInList = (list, value) =>
   list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value];
 
 /**
- * Feature-Status aus `/me`: `null` bedeutet, die Basis liefert die Angabe noch
- * nicht (ältere Version). In diesem Fall bleibt das bisherige Verhalten aktiv.
+ * Feature-Status aus `/me`. `null` bedeutet, die Basis liefert die Angabe nicht;
+ * dann gilt keine Fähigkeit als vorhanden.
  */
 const normalizeFeatures = (raw) => {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -587,24 +587,13 @@ export class FrickeldaveStorePanel extends LitElement {
   }
 
   /**
-   * Status einer Fähigkeit. `legacy` kennzeichnet eine Basis ohne Feature-Angabe:
-   * dort bleibt die Fähigkeit nutzbar, damit ältere Versionen weiterlaufen.
+   * Status einer Fähigkeit. Ab 0.2.0 gibt es keinen eingebauten Publish-/Import-
+   * Pfad mehr; eine fehlende Angabe bedeutet daher „nicht vorhanden“.
    */
   _featureInfo(name) {
-    if (this._features === null) {
-      return {
-        legacy: true,
-        present: false,
-        available: true,
-        reason: "",
-        provider: "",
-        contractVersion: 0,
-      };
-    }
     const feature = this._features?.[name];
     if (!feature) {
       return {
-        legacy: false,
         present: false,
         available: false,
         reason: "",
@@ -612,7 +601,7 @@ export class FrickeldaveStorePanel extends LitElement {
         contractVersion: 0,
       };
     }
-    return { legacy: false, present: true, ...feature };
+    return { present: true, ...feature };
   }
 
   _featureHint(info, fallback) {
@@ -3146,8 +3135,8 @@ export class FrickeldaveStorePanel extends LitElement {
     const canPublish = this._can("app_admin");
     const publishFeature = this._featureInfo("publish");
     const importFeature = this._featureInfo("import");
-    const showPublish = canPublish && (publishFeature.legacy || publishFeature.present);
-    const showImport = canProduct && (importFeature.legacy || importFeature.present);
+    const showPublish = canPublish && publishFeature.present;
+    const showImport = canProduct && importFeature.present;
 
     return html`
       <div class="fd-app">
@@ -4835,11 +4824,7 @@ export class FrickeldaveStorePanel extends LitElement {
     const text = this._errorText(error);
     if (error instanceof ApiError) {
       if (error.code === "publish_token_missing" || error.code === "publish_not_configured") {
-        const provider = this._featureInfo("publish").provider;
-        if (provider === "frickeldave_store_syncfd") {
-          return `${text} Hinterlege das Token in den Einstellungen der Erweiterung „Frickeldave Store Sync“ unter Geräte & Dienste.`;
-        }
-        return `${text} Hinterlege das Token unter Einstellungen → Frickeldave Store → Veröffentlichen.`;
+        return `${text} Hinterlege das Token in den Einstellungen der Erweiterung „Frickeldave Store Sync“ unter Geräte & Dienste.`;
       }
       if (error.code === "internal_error") {
         return `${text} Details stehen im Home-Assistant-Protokoll (Filter: frickeldave_store).`;
