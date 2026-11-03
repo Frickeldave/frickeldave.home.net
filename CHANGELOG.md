@@ -4,6 +4,18 @@ Alle nennenswerten Änderungen an diesem Projekt werden hier festgehalten.
 Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Panel blendet nicht installierte Fähigkeiten aus (#289).** Solange keine
+  Erweiterung registriert ist (`provider: ""`), zeigt die Kopfleiste die
+  Schaltflächen „Nach dev veröffentlichen“, „Nach prod veröffentlichen“ und
+  „Katalog importieren“ gar nicht mehr an, statt sie nur deaktiviert
+  darzustellen. Ist eine Erweiterung registriert, aber nicht bereit (z. B.
+  fehlender Token), bleiben die Schaltflächen sichtbar, deaktiviert und nennen
+  den Grund.
+
 ## [0.2.0] - 2026-11-02
 
 **Breaking Release.** Die frickeldave-Synchronisation ist jetzt eine eigene

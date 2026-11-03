@@ -93,4 +93,4 @@ def test_publish_buttons_share_icon_and_differ_by_badge() -> None:
         assert badge, f"Der {target}-Button braucht ein Badge."
         assert badge.group(1) == badge_text
         assert f'aria-label="Nach {label} veröffentlichen"' in button
-        assert f'title="Nach {label} veröffentlichen"' in button
+        assert f'"Nach {label} veröffentlichen"' in button
