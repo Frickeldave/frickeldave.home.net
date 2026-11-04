@@ -1,6 +1,6 @@
 # Frickeldave Store
 
-![CI](https://github.com/Frickeldave/frickeldave.home.net/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Frickeldave/homeassistant-frickeldave-store/actions/workflows/ci.yml/badge.svg)
 
 Home-Assistant-Custom-Integration für die Verwaltung des Frickeldave-Handmade-Katalogs:
 Produkte, Bilder, Tags, Bestände, Berechtigungen und KI-Beschreibungsvorschläge – alles
@@ -15,9 +15,11 @@ Rechte, KI); die Synchronisation ist ein optionales Paket.
 Die Integration läuft mit **Home Assistant Container** – ohne Supervisor, Add-on oder
 zusätzlichen Anwendungscontainer. Es gibt keine `hassio`- oder Supervisor-Aufrufe.
 
-> Repository-Hinweis: Die ursprüngliche Spezifikation nennt `Frickeldave/frickeldave-store`.
-> Auf ausdrückliche Anweisung liegt die Integration in **`Frickeldave/frickeldave.home.net`**.
-> Alle URLs in Manifest, HACS-Metadaten und Dokumentation verweisen auf dieses Repository.
+> Repository-Hinweis: Die Spezifikation in Issue #289 nennt `Frickeldave/frickeldave-store`.
+> Am 2026-10-27 wurde das Repository zu `Frickeldave/frickeldave.home.net` umbenannt,
+> seit dem 2026-11-03 heißt es **`Frickeldave/homeassistant-frickeldave-store`**.
+> Die Domain der Integration bleibt `frickeldave_store`; alle URLs in Manifest,
+> HACS-Metadaten und Dokumentation verweisen auf das aktuelle Repository.
 
 ## Voraussetzungen
 
@@ -28,7 +30,7 @@ zusätzlichen Anwendungscontainer. Es gibt keine `hassio`- oder Supervisor-Aufru
 ## Installation über HACS
 
 1. HACS öffnen → **Integrationen** → Drei-Punkte-Menü → **Benutzerdefinierte Repositories**.
-2. Repository `https://github.com/Frickeldave/frickeldave.home.net` eintragen,
+2. Repository `https://github.com/Frickeldave/homeassistant-frickeldave-store` eintragen,
    Kategorie **Integration** wählen.
 3. „Frickeldave Store“ installieren.
 4. Home Assistant neu starten.
