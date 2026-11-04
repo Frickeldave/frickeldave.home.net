@@ -6,6 +6,16 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Veröffentlichungsdialog aufgeräumt (#289).** Der doppelte Zusammenfassungs-
+  absatz und der Dry-Run-Untertitel in der Titelleiste entfallen; die
+  Metadatenboxen (Ziel, Zielbranch, Repository) haben mehr Abstand zur
+  Titelleiste. Die Übersichten „Dateien“, „Produkte“ und „Bilder“ sind kompakter
+  und zeigen ihre Gesamtzahl rechts neben der Überschrift. Über der Dateiliste
+  filtern Schaltflächen (Alle, Neu, Geändert, Entfernt, Unverändert) mit Anzahl
+  die Änderungen; ohne Treffer erscheint ein Hinweis.
+
 ### Fixed
 
 - **Versionskonstante folgt wieder dem Release (#289).** `VERSION` in `const.py`
