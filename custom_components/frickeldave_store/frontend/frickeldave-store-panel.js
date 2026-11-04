@@ -17,6 +17,12 @@
 
 import { LitElement, html, css } from "./lit.js";
 import { featureInfo, normalizeFeatures } from "./features.js";
+import {
+  FILE_FILTER_ALL,
+  fileStatusCounts,
+  filterFileChanges,
+  statusOptions,
+} from "./publish-filters.js";
 
 const API_ROOT = "/api/frickeldave_store";
 const MAX_IMAGES = 10;
@@ -4754,6 +4760,7 @@ export class FrickeldaveStorePanel extends LitElement {
       emptyCatalog: false,
       allowEmpty: false,
       confirmRemovals: false,
+      fileFilter: FILE_FILTER_ALL,
     };
     this._requestPublish(true);
   }
@@ -4789,6 +4796,17 @@ export class FrickeldaveStorePanel extends LitElement {
       confirmRemovals: Boolean(value),
       error: this._publishDialog.removalsBlocked ? "" : this._publishDialog.error,
     };
+  }
+
+  _setPublishFilter(status) {
+    const dialog = this._publishDialog;
+    if (!dialog || dialog.fileFilter === status) {
+      return;
+    }
+    if (status !== FILE_FILTER_ALL && !PUBLISH_STATUS_META[status]) {
+      return;
+    }
+    this._publishDialog = { ...dialog, fileFilter: status };
   }
 
   _publishErrorText(error) {
@@ -4882,6 +4900,7 @@ export class FrickeldaveStorePanel extends LitElement {
           emptyCatalog: false,
           allowEmpty: false,
           confirmRemovals: false,
+          fileFilter: FILE_FILTER_ALL,
         };
       } else {
         this._publishDialog = {
@@ -4893,6 +4912,7 @@ export class FrickeldaveStorePanel extends LitElement {
           emptyCatalog: false,
           allowEmpty: false,
           confirmRemovals: false,
+          fileFilter: FILE_FILTER_ALL,
         };
         this._showToast(this._publishToastMessage(result));
       }
@@ -4944,6 +4964,17 @@ export class FrickeldaveStorePanel extends LitElement {
     }
   }
 
+  _renderPublishHeading(id, title, total) {
+    return html`
+      <h3 id=${id}>
+        <span>${title}</span>
+        <span class="fd-publish-total">
+          <span class="fd-sr-only">gesamt: </span>${formatNumber(total)}
+        </span>
+      </h3>
+    `;
+  }
+
   _renderCounts(counts) {
     return html`
       <dl class="fd-publish-counts">
@@ -4977,13 +5008,15 @@ export class FrickeldaveStorePanel extends LitElement {
       !done && (Boolean(dialog.removalsBlocked) || Boolean(result?.removalGuard?.triggered));
     const warning = emptyCatalog || dialog.removalsBlocked ? "" : result?.warning || "";
     const deploymentBranch = result?.deployment?.branch || result?.branch || "";
+    const fileFilter = dialog.fileFilter || FILE_FILTER_ALL;
+    const fileCounts = result ? fileStatusCounts(result.files) : null;
+    const visibleFiles = result ? filterFileChanges(result.files, fileFilter) : [];
 
     return html`
       <dialog
         id="fd-publish-dialog"
         class="fd-dialog fd-dialog--wide"
         aria-labelledby="fd-publish-title"
-        aria-describedby="fd-publish-description"
         @cancel=${(event) => this._handleDialogCancel(event, () => this._closePublish())}
         @click=${(event) => {
           if (event.target === event.currentTarget) {
@@ -5004,11 +5037,6 @@ export class FrickeldaveStorePanel extends LitElement {
           </button>
           <div class="fd-dialog-title">
             <h2 id="fd-publish-title">${done ? "Veröffentlicht" : `Nach ${target} veröffentlichen`}</h2>
-            <p class="fd-muted fd-small" id="fd-publish-description">
-              ${done
-                ? `Die Veröffentlichung nach ${target} ist abgeschlossen.`
-                : `Dry-Run für das Ziel ${target}. Es wird noch nichts geschrieben.`}
-            </p>
           </div>
         </div>
 
@@ -5119,29 +5147,30 @@ export class FrickeldaveStorePanel extends LitElement {
                   </div>
                 </dl>
 
-                <p class="fd-publish-summary">${result.summary || "Keine Zusammenfassung verfügbar."}</p>
-
                 <section class="fd-publish-section" aria-labelledby="fd-publish-files-title">
-                  <h3 id="fd-publish-files-title">
-                    Dateien
-                    <span class="fd-muted fd-small">(${formatNumber(result.counts.total)} gesamt)</span>
-                  </h3>
+                  ${this._renderPublishHeading(
+                    "fd-publish-files-title",
+                    "Dateien",
+                    result.counts.total,
+                  )}
                   ${this._renderCounts(result.counts)}
                 </section>
 
                 <section class="fd-publish-section" aria-labelledby="fd-publish-products-title">
-                  <h3 id="fd-publish-products-title">
-                    Produkte
-                    <span class="fd-muted fd-small">(${formatNumber(result.products.total)} gesamt)</span>
-                  </h3>
+                  ${this._renderPublishHeading(
+                    "fd-publish-products-title",
+                    "Produkte",
+                    result.products.total,
+                  )}
                   ${this._renderCounts(result.products)}
                 </section>
 
                 <section class="fd-publish-section" aria-labelledby="fd-publish-images-title">
-                  <h3 id="fd-publish-images-title">
-                    Bilder
-                    <span class="fd-muted fd-small">(${formatNumber(result.images.total)} gesamt)</span>
-                  </h3>
+                  ${this._renderPublishHeading(
+                    "fd-publish-images-title",
+                    "Bilder",
+                    result.images.total,
+                  )}
                   ${this._renderCounts(result.images)}
                 </section>
 
@@ -5166,23 +5195,55 @@ export class FrickeldaveStorePanel extends LitElement {
                   ${result.files.length === 0
                     ? html`<p class="fd-hint">Keine Dateien in der Antwort.</p>`
                     : html`
-                        <ul class="fd-publish-filelist" role="list">
-                          ${result.files.map((entry) => {
-                            const meta = PUBLISH_STATUS_META[entry.status];
+                        <div
+                          class="fd-publish-filters"
+                          role="group"
+                          aria-label="Dateiliste nach Status filtern"
+                        >
+                          ${statusOptions(fileCounts).map((option) => {
+                            const meta =
+                              option.status === FILE_FILTER_ALL
+                                ? { label: "Alle" }
+                                : PUBLISH_STATUS_META[option.status];
                             return html`
-                              <li class="fd-publish-file">
-                                <span class="fd-status-icon" aria-hidden="true">${meta.icon}</span>
-                                <span class="fd-publish-file-status">${meta.label}</span>
-                                <span class="fd-publish-file-path">${entry.path}</span>
-                                <span class="fd-muted fd-small">
-                                  ${entry.kind === "image" ? "Bild" : "Katalog"}${entry.articleNumber
-                                    ? ` · ${entry.articleNumber}`
-                                    : ""}
+                              <button
+                                type="button"
+                                class="fd-chip fd-publish-filter"
+                                aria-pressed=${fileFilter === option.status ? "true" : "false"}
+                                @click=${() => this._setPublishFilter(option.status)}
+                              >
+                                ${meta.label}
+                                <span class="fd-publish-filter-count">
+                                  ${formatNumber(option.count)}
                                 </span>
-                              </li>
+                              </button>
                             `;
                           })}
-                        </ul>
+                        </div>
+                        ${visibleFiles.length === 0
+                          ? html`<p class="fd-hint" role="status">
+                              Keine Dateien mit dem Status
+                              „${PUBLISH_STATUS_META[fileFilter]?.label || fileFilter}“.
+                            </p>`
+                          : html`
+                              <ul class="fd-publish-filelist" role="list">
+                                ${visibleFiles.map((entry) => {
+                                  const meta = PUBLISH_STATUS_META[entry.status];
+                                  return html`
+                                    <li class="fd-publish-file">
+                                      <span class="fd-status-icon" aria-hidden="true">${meta.icon}</span>
+                                      <span class="fd-publish-file-status">${meta.label}</span>
+                                      <span class="fd-publish-file-path">${entry.path}</span>
+                                      <span class="fd-muted fd-small">
+                                        ${entry.kind === "image" ? "Bild" : "Katalog"}${entry.articleNumber
+                                          ? ` · ${entry.articleNumber}`
+                                          : ""}
+                                      </span>
+                                    </li>
+                                  `;
+                                })}
+                              </ul>
+                            `}
                       `}
                   ${result.filesTruncated
                     ? html`<p class="fd-hint">
@@ -7453,7 +7514,7 @@ export class FrickeldaveStorePanel extends LitElement {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       gap: var(--fd-space-2);
-      margin: 0;
+      margin: var(--fd-space-4) 0 0;
     }
 
     .fd-publish-meta div {
@@ -7473,20 +7534,26 @@ export class FrickeldaveStorePanel extends LitElement {
       overflow-wrap: anywhere;
     }
 
-    .fd-publish-summary {
-      margin: 0;
-    }
-
     .fd-publish-section {
       display: flex;
       flex-direction: column;
-      gap: var(--fd-space-2);
+      gap: var(--fd-space-1);
     }
 
     .fd-publish-section h3 {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: var(--fd-space-2);
       margin: 0;
       font-size: var(--ha-font-size-m, 14px);
       font-weight: 500;
+    }
+
+    .fd-publish-total {
+      color: var(--fd-text-muted);
+      font-size: var(--fd-font-small);
+      font-variant-numeric: tabular-nums;
     }
 
     .fd-publish-confirm {
@@ -7507,16 +7574,16 @@ export class FrickeldaveStorePanel extends LitElement {
 
     .fd-publish-counts {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-      gap: var(--fd-space-2);
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      gap: var(--fd-space-1);
       margin: 0;
     }
 
     .fd-publish-count {
       display: flex;
       flex-direction: column;
-      gap: 2px;
-      padding: var(--fd-space-2) var(--fd-space-3);
+      gap: 0;
+      padding: var(--fd-space-1) var(--fd-space-2);
       border: 1px solid var(--fd-divider);
       border-radius: var(--fd-radius);
       background: var(--fd-surface-alt);
@@ -7525,15 +7592,33 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-publish-count dt {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
       color: var(--fd-text-muted);
       font-size: var(--fd-font-small);
     }
 
     .fd-publish-count dd {
       margin: 0;
-      font-size: 1.15rem;
+      font-size: 1rem;
+      font-weight: 500;
       font-variant-numeric: tabular-nums;
+    }
+
+    .fd-publish-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--fd-space-1);
+    }
+
+    .fd-publish-filter {
+      min-height: 32px;
+      padding: 2px 10px;
+    }
+
+    .fd-publish-filter-count {
+      margin-inline-start: 6px;
+      font-variant-numeric: tabular-nums;
+      opacity: 0.85;
     }
 
     .fd-status-icon {
