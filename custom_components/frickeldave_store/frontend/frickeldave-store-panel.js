@@ -16,6 +16,7 @@
  */
 
 import { LitElement, html, css } from "./lit.js";
+import { featureInfo, normalizeFeatures } from "./features.js";
 
 const API_ROOT = "/api/frickeldave_store";
 const MAX_IMAGES = 10;
@@ -178,30 +179,6 @@ const productPath = (articleNumber) =>
 
 const toggleInList = (list, value) =>
   list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value];
-
-/**
- * Feature-Status aus `/me`. `null` bedeutet, die Basis liefert die Angabe nicht;
- * dann gilt keine Fähigkeit als vorhanden.
- */
-const normalizeFeatures = (raw) => {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return null;
-  }
-  const features = {};
-  for (const [name, entry] of Object.entries(raw)) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      continue;
-    }
-    const contractVersion = Number(entry.contract_version);
-    features[name] = {
-      available: Boolean(entry.available),
-      reason: typeof entry.reason === "string" ? entry.reason.trim() : "",
-      provider: typeof entry.provider === "string" ? entry.provider : "",
-      contractVersion: Number.isFinite(contractVersion) ? contractVersion : 0,
-    };
-  }
-  return features;
-};
 
 const isFeatureError = (error) =>
   error instanceof ApiError && FEATURE_ERROR_CODES.has(String(error.code || ""));
@@ -588,20 +565,12 @@ export class FrickeldaveStorePanel extends LitElement {
 
   /**
    * Status einer Fähigkeit. Ab 0.2.0 gibt es keinen eingebauten Publish-/Import-
-   * Pfad mehr; eine fehlende Angabe bedeutet daher „nicht vorhanden“.
+   * Pfad mehr; `present` bedeutet daher „von einer Erweiterung installiert“.
+   * Reservierte Fähigkeiten ohne Erweiterung (leerer `provider`) fehlen in der
+   * Karte und gelten damit als nicht installiert.
    */
   _featureInfo(name) {
-    const feature = this._features?.[name];
-    if (!feature) {
-      return {
-        present: false,
-        available: false,
-        reason: "",
-        provider: "",
-        contractVersion: 0,
-      };
-    }
-    return { present: true, ...feature };
+    return featureInfo(this._features, name);
   }
 
   _featureHint(info, fallback) {
@@ -3182,7 +3151,9 @@ export class FrickeldaveStorePanel extends LitElement {
                                 aria-disabled=${importFeature.available ? "false" : "true"}
                                 aria-describedby=${importFeature.available ? undefined : "fd-feature-import-reason"}
                                 aria-label="Katalog importieren"
-                                title="Katalog importieren"
+                                title=${importFeature.available
+                                  ? "Katalog importieren"
+                                  : this._featureHint(importFeature, "Der Katalogimport")}
                               >
                                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                                   <path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" />
@@ -3214,7 +3185,9 @@ export class FrickeldaveStorePanel extends LitElement {
                           aria-disabled=${publishFeature.available ? "false" : "true"}
                           aria-describedby=${publishFeature.available ? undefined : "fd-feature-publish-reason"}
                           aria-label="Nach dev veröffentlichen"
-                          title="Nach dev veröffentlichen"
+                          title=${publishFeature.available
+                            ? "Nach dev veröffentlichen"
+                            : this._featureHint(publishFeature, "Veröffentlichen")}
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                             <path
@@ -3231,7 +3204,9 @@ export class FrickeldaveStorePanel extends LitElement {
                           aria-disabled=${publishFeature.available ? "false" : "true"}
                           aria-describedby=${publishFeature.available ? undefined : "fd-feature-publish-reason"}
                           aria-label="Nach prod veröffentlichen"
-                          title="Nach prod veröffentlichen"
+                          title=${publishFeature.available
+                            ? "Nach prod veröffentlichen"
+                            : this._featureHint(publishFeature, "Veröffentlichen")}
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                             <path

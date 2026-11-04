@@ -1,10 +1,13 @@
 # Frontend
 
-Das Verzeichnis enthält genau zwei ausgelieferte Dateien:
+Das Verzeichnis enthält die ausgelieferten Dateien des Panels:
 
 - `frickeldave-store-panel.js` – das Panel-Modul (`frickeldave-store-panel`,
   Lit-Element, Shadow DOM). Es wird über `panel_custom` mit `embed_iframe=False`
   geladen.
+- `features.js` – reine Feature-Normalisierung aus `GET /me` (Contract 1), ohne
+  Lit- oder DOM-Abhängigkeiten. Wird vom Panel relativ importiert und in
+  `tests/frontend/features.test.mjs` direkt mit `node --test` geprüft.
 - `lit.js` – Lit 3.3.3 als vendored, minifiziertes ESM-Bundle inklusive
   Lizenzbanner. Das Bundle wird **nicht** von Hand bearbeitet.
 
@@ -35,5 +38,6 @@ exakt gepinnt; das Ergebnis ist etwa 15 kB groß.
 ```bash
 node --check custom_components/frickeldave_store/frontend/lit.js
 node --check custom_components/frickeldave_store/frontend/frickeldave-store-panel.js
+node --test tests/frontend/features.test.mjs
 python -m pytest tests/test_frontend_assets.py -q
 ```

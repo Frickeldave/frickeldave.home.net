@@ -37,6 +37,8 @@ jobs:
           node --check custom_components/frickeldave_store/frontend/frickeldave-store-config-panel.js
       - name: "Syntax: Lit-Bundle"
         run: node --check custom_components/frickeldave_store/frontend/lit.js
+      - name: "Tests: Feature-Gating"
+        run: node --test tests/frontend/features.test.mjs
 
   typing:
     name: "mypy"
