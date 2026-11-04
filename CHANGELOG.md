@@ -8,6 +8,14 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Fixed
 
+- **Versionskonstante folgt wieder dem Release (#289).** `VERSION` in `const.py`
+  war fest auf 0.2.0 verdrahtet, während das Release 0.2.1 nur Manifest und
+  `pyproject.toml` anhob. Dadurch zeigte der Panel-Footer weiterhin 0.2.0 und die
+  Modul-URL des Panels (`?v=…`) blieb zwischen den Releases gleich, sodass
+  Browser das alte ES-Modul aus dem Cache verwenden konnten. `VERSION` steht
+  jetzt auf 0.2.2; ein Test wacht darüber, dass Konstante, Manifest und
+  `pyproject.toml` übereinstimmen. Die `REPOSITORY_URL` zeigt auf das umbenannte
+  Repository `Frickeldave/homeassistant-frickeldave-store`.
 - **Panel blendet nicht installierte Fähigkeiten aus (#289).** Solange keine
   Erweiterung registriert ist (`provider: ""`), zeigt die Kopfleiste die
   Schaltflächen „Nach dev veröffentlichen“, „Nach prod veröffentlichen“ und
