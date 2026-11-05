@@ -11,10 +11,15 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - **Veröffentlichungsdialog aufgeräumt (#289).** Der doppelte Zusammenfassungs-
   absatz und der Dry-Run-Untertitel in der Titelleiste entfallen; die
   Metadatenboxen (Ziel, Zielbranch, Repository) haben mehr Abstand zur
-  Titelleiste. Die Übersichten „Dateien“, „Produkte“ und „Bilder“ sind kompakter
+  Titelleiste. Die Übersichten „Produkte“ und „Bilder“ sind kompakter
   und zeigen ihre Gesamtzahl rechts neben der Überschrift. Über der Dateiliste
   filtern Schaltflächen (Alle, Neu, Geändert, Entfernt, Unverändert) mit Anzahl
   die Änderungen; ohne Treffer erscheint ein Hinweis.
+- **Redundante „Dateien“-Übersicht entfernt (#289).** Die Zählung der Dateien
+  wiederholte nur den Katalog (`handmade.json`) und die verwalteten Bilder. Der
+  Veröffentlichungsdialog zeigt deshalb nur noch „Produkte“ und „Bilder“ sowie
+  die filterbare Dateiliste; diese Informationen beschreiben die Änderung
+  vollständig.
 
 ### Fixed
 
