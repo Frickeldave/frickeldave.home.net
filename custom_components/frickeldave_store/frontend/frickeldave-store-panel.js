@@ -5147,15 +5147,6 @@ export class FrickeldaveStorePanel extends LitElement {
                   </div>
                 </dl>
 
-                <section class="fd-publish-section" aria-labelledby="fd-publish-files-title">
-                  ${this._renderPublishHeading(
-                    "fd-publish-files-title",
-                    "Dateien",
-                    result.counts.total,
-                  )}
-                  ${this._renderCounts(result.counts)}
-                </section>
-
                 <section class="fd-publish-section" aria-labelledby="fd-publish-products-title">
                   ${this._renderPublishHeading(
                     "fd-publish-products-title",
@@ -5247,8 +5238,7 @@ export class FrickeldaveStorePanel extends LitElement {
                       `}
                   ${result.filesTruncated
                     ? html`<p class="fd-hint">
-                        Die Liste ist gekürzt: weitere Dateien werden nicht angezeigt. Die Zählungen oben
-                        sind vollständig.
+                        Die Liste ist gekürzt: weitere Dateien werden nicht angezeigt.
                       </p>`
                     : ""}
                 </section>
