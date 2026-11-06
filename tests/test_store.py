@@ -8,8 +8,19 @@ from pathlib import Path
 import pytest
 
 from custom_components.frickeldave_store.const import STORAGE_KEY
-from custom_components.frickeldave_store.models import SCHEMA_VERSION, ConflictError, StoreError
-from custom_components.frickeldave_store.store import CatalogStore, FileBackend
+from custom_components.frickeldave_store.models import (
+    SCHEMA_VERSION,
+    ConflictError,
+    StoreError,
+    ValidationError,
+)
+from custom_components.frickeldave_store.store import (
+    DEFAULT_IMAGE_MAX_BYTES,
+    MAX_IMAGE_MAX_BYTES,
+    MIN_IMAGE_MAX_BYTES,
+    CatalogStore,
+    FileBackend,
+)
 
 
 async def test_roundtrip_and_atomic_write(tmp_path: Path) -> None:
@@ -220,3 +231,68 @@ async def test_rename_keeps_stock_and_delete_requires_empty_location(tmp_path: P
         "lager": 3,
         "auto": 0,
     }
+
+
+def test_default_image_max_bytes_is_500_kib(tmp_path: Path) -> None:
+    store = CatalogStore(data_dir=tmp_path)
+
+    assert DEFAULT_IMAGE_MAX_BYTES == 512000
+    assert store.image_max_bytes == 512000
+    assert store.public_settings()["images"] == {"max_bytes": 512000}
+
+
+async def test_update_image_max_bytes(tmp_path: Path) -> None:
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+
+    settings = store.update_settings({"images": {"max_bytes": 614400}})
+
+    assert settings["images"] == {"max_bytes": 614400}
+    assert store.image_max_bytes == 614400
+    assert store.public_settings()["images"] == {"max_bytes": 614400}
+
+    await store.async_save()
+    reloaded = CatalogStore(data_dir=tmp_path)
+    await reloaded.async_load()
+    assert reloaded.image_max_bytes == 614400
+
+
+@pytest.mark.parametrize(
+    "value",
+    [MIN_IMAGE_MAX_BYTES - 1, MAX_IMAGE_MAX_BYTES + 1, 0, -1, True, "512000", 512000.0],
+)
+async def test_update_image_max_bytes_rejects_invalid_values(tmp_path: Path, value: object) -> None:
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+
+    with pytest.raises(ValidationError):
+        store.update_settings({"images": {"max_bytes": value}})
+
+    assert store.image_max_bytes == DEFAULT_IMAGE_MAX_BYTES
+
+
+async def test_update_image_max_bytes_rejects_unknown_fields(tmp_path: Path) -> None:
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+
+    with pytest.raises(ValidationError):
+        store.update_settings({"images": {"max_bytes": 512000, "quality": 80}})
+    with pytest.raises(ValidationError):
+        store.update_settings({"images": []})
+
+
+async def test_old_payload_without_images_section_loads(tmp_path: Path) -> None:
+    store_file = tmp_path / STORAGE_KEY
+    store_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy = {
+        "schemaVersion": SCHEMA_VERSION,
+        "settings": {"ai": {"endpoint": "https://example.invalid", "model": "x", "prompt": ""}},
+    }
+    store_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+    store = CatalogStore(data_dir=tmp_path)
+    await store.async_load()
+
+    assert store.image_max_bytes == DEFAULT_IMAGE_MAX_BYTES
+    assert store.settings["images"] == {"max_bytes": DEFAULT_IMAGE_MAX_BYTES}
+    assert store.public_settings()["images"] == {"max_bytes": DEFAULT_IMAGE_MAX_BYTES}

@@ -143,7 +143,8 @@ async def websocket_subscribe(hass: HomeAssistant, connection: Any, msg: dict[st
         return
 
     async def _async_payload() -> dict[str, Any]:
-        products, total = _list_sync(runtime, filters)
+        # ``async_list`` deckt auch ``sort='size'`` ab (Bildgrößen im Executor).
+        products, total = await runtime.products.async_list(filters)
         return {
             "products": await runtime.products.async_serialise_products(products),
             "total": total,
@@ -173,24 +174,6 @@ async def websocket_subscribe(hass: HomeAssistant, connection: Any, msg: dict[st
     connection.send_result(msg["id"], await _async_payload())
     connection.subscriptions[msg["id"]] = runtime.store.add_listener(_on_change)
     _ = user_id
-
-
-def _list_sync(runtime: FrickeldaveStoreRuntime, filters: ProductFilter) -> tuple[list[Any], int]:
-    """Synchroner Pfad für Listener (reine In-Memory-Filterung, kein I/O)."""
-
-    from .products import product_matches, sort_products
-
-    locations = runtime.store.locations()
-    products = [
-        item for item in runtime.store.products() if product_matches(item, filters, locations)
-    ]
-    products = sort_products(products, filters.sort, filters.order)
-    total = len(products)
-    if filters.offset:
-        products = products[filters.offset :]
-    if filters.limit is not None:
-        products = products[: filters.limit]
-    return products, total
 
 
 COMMANDS = (websocket_me, websocket_products, websocket_subscribe)

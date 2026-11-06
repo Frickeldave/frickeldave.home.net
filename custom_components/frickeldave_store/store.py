@@ -18,7 +18,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from .const import (
     BACKUP_DIR_NAME,
@@ -59,11 +59,19 @@ ALLOWED_CONTENT_TYPES: dict[str, str] = {
     "image/gif": ".gif",
 }
 
+#: Harte Obergrenze für Uploads (unabhängig von der Optimierungsgrenze).
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+#: Standardgrenze, ab der ein Bild als "zu groß" gilt (500 KiB).
+DEFAULT_IMAGE_MAX_BYTES: Final = 500 * 1024
+#: Untergrenze der konfigurierbaren Bildgrenze (50 KiB).
+MIN_IMAGE_MAX_BYTES: Final = 50 * 1024
+#: Obergrenze der konfigurierbaren Bildgrenze (10 MiB).
+MAX_IMAGE_MAX_BYTES: Final = 10 * 1024 * 1024
 
 
 def default_settings() -> dict[str, Any]:
-    """Standard-Einstellungen (KI-Anbieter; Veröffentlichen liegt bei der Erweiterung)."""
+    """Standard-Einstellungen (KI-Anbieter, Bildgrenze)."""
 
     return {
         "ai": {
@@ -72,7 +80,34 @@ def default_settings() -> dict[str, Any]:
             "prompt": DEFAULT_AI_PROMPT,
             "api_key": "",
         },
+        "images": {"max_bytes": DEFAULT_IMAGE_MAX_BYTES},
     }
+
+
+def _valid_image_max_bytes(value: Any) -> int | None:
+    """Gültige Bildgrenze zurückgeben (bool zählt nicht als int), sonst ``None``."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if MIN_IMAGE_MAX_BYTES <= value <= MAX_IMAGE_MAX_BYTES:
+        return value
+    return None
+
+
+def _normalise_image_settings(raw: Any) -> dict[str, int]:
+    """Gespeicherte Bildgrenze defensiv lesen (Altbestände ohne ``images``)."""
+
+    value = raw.get("max_bytes") if isinstance(raw, dict) else None
+    valid = _valid_image_max_bytes(value)
+    if valid is None:
+        if raw is not None:
+            _LOGGER.warning(
+                "Ungültige Bildgrenze %r in den Einstellungen; Standard %s Bytes wird verwendet",
+                value,
+                DEFAULT_IMAGE_MAX_BYTES,
+            )
+        return {"max_bytes": DEFAULT_IMAGE_MAX_BYTES}
+    return {"max_bytes": valid}
 
 
 def new_payload() -> dict[str, Any]:
@@ -197,6 +232,7 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         return base
     settings = payload.get("settings") or {}
     ai_settings = {**base["settings"]["ai"], **(settings.get("ai") or {})}
+    image_settings = _normalise_image_settings(settings.get("images"))
     locations = _coerce_locations(payload.get("locations"))
     location_ids = [str(item["id"]) for item in locations]
     raw_products = payload.get("products") or []
@@ -238,6 +274,7 @@ def coerce_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
             # gelesen, aber auch nicht gelöscht (Rückfallweg auf 0.1.x).
             **settings,
             "ai": ai_settings,
+            "images": image_settings,
         },
         "updatedAt": payload.get("updatedAt") or to_iso(),
     }
@@ -780,6 +817,16 @@ class CatalogStore:
     def settings(self) -> dict[str, Any]:
         return self._data["settings"]
 
+    @property
+    def image_max_bytes(self) -> int:
+        """Effektive Grenze, ab der ein Bild als "zu groß" gilt (Bytes)."""
+
+        settings = self._data.get("settings") or {}
+        images = settings.get("images")
+        value = images.get("max_bytes") if isinstance(images, dict) else None
+        valid = _valid_image_max_bytes(value)
+        return DEFAULT_IMAGE_MAX_BYTES if valid is None else valid
+
     def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         ai_changes = changes.get("ai")
         if ai_changes is not None:
@@ -789,7 +836,29 @@ class CatalogStore:
             unknown = set(ai_changes) - allowed
             if unknown:
                 raise ValidationError(f"Unbekannte ai-Felder: {', '.join(sorted(unknown))}")
+        image_max_bytes: int | None = None
+        image_changes = changes.get("images")
+        if image_changes is not None:
+            if not isinstance(image_changes, dict):
+                raise ValidationError("images muss ein Objekt sein.")
+            unknown = set(image_changes) - {"max_bytes"}
+            if unknown:
+                raise ValidationError(f"Unbekannte images-Felder: {', '.join(sorted(unknown))}")
+            if "max_bytes" not in image_changes:
+                raise ValidationError("images.max_bytes fehlt.")
+            value = image_changes["max_bytes"]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValidationError("images.max_bytes muss eine ganze Zahl (Bytes) sein.")
+            if not MIN_IMAGE_MAX_BYTES <= value <= MAX_IMAGE_MAX_BYTES:
+                raise ValidationError(
+                    "images.max_bytes muss zwischen 51200 (50 KiB) und 10485760 (10 MiB) liegen."
+                )
+            image_max_bytes = value
+        # Erst nach vollständiger Prüfung anwenden (keine Teiländerung bei Fehlern).
+        if ai_changes is not None:
             self._data["settings"]["ai"].update(ai_changes)
+        if image_max_bytes is not None:
+            self._data["settings"]["images"] = {"max_bytes": image_max_bytes}
         return self._data["settings"]
 
     def public_settings(self) -> dict[str, Any]:
@@ -803,6 +872,7 @@ class CatalogStore:
                 "prompt": ai_settings.get("prompt", ""),
                 "api_key_set": bool(ai_settings.get("api_key")),
             },
+            "images": {"max_bytes": self.image_max_bytes},
         }
 
 

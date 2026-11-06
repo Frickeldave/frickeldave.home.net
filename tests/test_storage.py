@@ -36,6 +36,7 @@ from custom_components.frickeldave_store.storage import (
     normalise_data_path,
     resolve_data_dir,
     storage_payload,
+    storage_usage,
 )
 from custom_components.frickeldave_store.store import CatalogStore
 from custom_components.frickeldave_store.views import SettingsView
@@ -499,3 +500,72 @@ async def test_options_flow_rejects_non_empty_target(
     assert result["type"] == "form"
     assert result["errors"] == {"data_path": "target_not_empty"}
     assert entry.options["data_path"] == "share"
+
+
+def test_storage_usage_counts_exact_bytes_without_following_symlinks(tmp_path: Path) -> None:
+    store_path = tmp_path / "frickeldave_store"
+    (store_path / IMAGES_DIR_NAME / "nested").mkdir(parents=True)
+    (store_path / BACKUP_DIR_NAME).mkdir(parents=True)
+
+    (store_path / STORAGE_KEY).write_bytes(b"x" * 10)
+    (store_path / IMAGES_DIR_NAME / "a.jpg").write_bytes(b"x" * 100)
+    (store_path / IMAGES_DIR_NAME / "nested" / "b.jpg").write_bytes(b"x" * 200)
+    (store_path / BACKUP_DIR_NAME / "snapshot.json").write_bytes(b"x" * 300)
+    (store_path / "other.txt").write_bytes(b"x" * 50)
+    # Symlink auf eine Datei außerhalb: darf weder Größe noch Dateizahl erhöhen.
+    (store_path / IMAGES_DIR_NAME / "link.jpg").symlink_to(tmp_path / "outside.bin")
+    (tmp_path / "outside.bin").write_bytes(b"x" * 4096)
+
+    usage = storage_usage(store_path)
+
+    assert usage == {
+        "total_bytes": 660,
+        "data_bytes": 10,
+        "images_bytes": 300,
+        "backups_bytes": 300,
+        "files": 5,
+    }
+    assert usage["total_bytes"] >= (
+        usage["data_bytes"] + usage["images_bytes"] + usage["backups_bytes"]
+    )
+
+
+def test_storage_usage_missing_dirs_and_file_count_zero(tmp_path: Path) -> None:
+    store_path = tmp_path / "leer"
+    store_path.mkdir()
+
+    assert storage_usage(store_path) == {
+        "total_bytes": 0,
+        "data_bytes": 0,
+        "images_bytes": 0,
+        "backups_bytes": 0,
+        "files": 0,
+    }
+    # Ganz fehlender Ordner ebenso.
+    assert storage_usage(tmp_path / "gibt-es-nicht")["total_bytes"] == 0
+
+
+async def test_settings_reports_storage_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_roots(monkeypatch, tmp_path)
+    data_dir = tmp_path / "config" / "frickeldave_store"
+    hass = FakeHass(tmp_path / "config")
+    runtime = await _runtime(hass, data_dir)
+    await runtime.store.async_save()
+    await runtime.store.images.async_write("LAH3K3", "LAH3K3-01.jpg", b"x" * 120)
+    runtime.store.backup_dir.mkdir(parents=True, exist_ok=True)
+    (runtime.store.backup_dir / "snap.json").write_text("{}", encoding="utf-8")
+
+    response = await SettingsView().get(FakeRequest(hass, "admin"))
+
+    assert response.status == 200
+    usage = _payload(response)["storage"]["usage"]
+    data_bytes = (data_dir / STORAGE_KEY).stat().st_size
+    assert usage == {
+        "total_bytes": data_bytes + 120 + 2,
+        "data_bytes": data_bytes,
+        "images_bytes": 120,
+        "backups_bytes": 2,
+        "files": 3,
+    }

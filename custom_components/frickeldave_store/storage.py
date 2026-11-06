@@ -202,6 +202,64 @@ def storage_payload(
     }
 
 
+def _tree_usage(root: Path) -> tuple[int, int]:
+    """Summe und Anzahl regulärer Dateien unter ``root`` (keine Symlinks)."""
+
+    if not root.is_dir():
+        return 0, 0
+    total = 0
+    files = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as iterator:
+                entries = list(iterator)
+        except OSError:  # pragma: no cover - Verzeichnis verschwindet während des Laufs
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+                    files += 1
+            except OSError:  # pragma: no cover - Rennen mit Löschvorgängen
+                continue
+    return total, files
+
+
+def _regular_file_size(path: Path) -> int:
+    """Größe einer regulären Datei; Symlinks und fehlende Dateien zählen 0."""
+
+    try:
+        if path.is_symlink() or not path.is_file():
+            return 0
+        return path.stat().st_size
+    except OSError:  # pragma: no cover - Rechte/ENOENT
+        return 0
+
+
+def storage_usage(store_path: Path) -> dict[str, int]:
+    """Belegter Speicher des Datenordners (Executor-Aufruf, ohne Symlink-Following).
+
+    ``total_bytes`` umfasst **alle** regulären Dateien unter ``store_path`` und
+    ist damit mindestens die Summe aus Store-Datei, Bildern und Snapshots.
+    """
+
+    root = Path(store_path)
+    total_bytes, files = _tree_usage(root)
+    return {
+        "total_bytes": total_bytes,
+        "data_bytes": _regular_file_size(root / STORAGE_KEY),
+        "images_bytes": _tree_usage(root / IMAGES_DIR_NAME)[0],
+        "backups_bytes": _tree_usage(root / BACKUP_DIR_NAME)[0],
+        "files": files,
+    }
+
+
 def data_path_for_dir(
     hass: Any,
     directory: Path,
@@ -250,4 +308,5 @@ __all__ = [
     "normalise_data_path",
     "resolve_data_dir",
     "storage_payload",
+    "storage_usage",
 ]

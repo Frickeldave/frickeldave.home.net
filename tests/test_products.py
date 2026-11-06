@@ -222,7 +222,7 @@ def _sortable_product(
     )
 
 
-@pytest.mark.parametrize("sort", ["name", "price", "category", "stock", "status"])
+@pytest.mark.parametrize("sort", ["name", "price", "category", "stock", "status", "size"])
 def test_filter_accepts_all_sort_keys(sort: str) -> None:
     assert ProductFilter.from_query({"sort": sort}).sort == sort
 
@@ -233,7 +233,7 @@ def test_unknown_sort_value_names_all_allowed_keys() -> None:
     assert err.value.code == "validation_error"
     message = err.value.message
     assert message.startswith("sort muss ")
-    for key in ("name", "price", "category", "stock", "status"):
+    for key in ("name", "price", "category", "stock", "status", "size"):
         assert f"'{key}'" in message
 
 
@@ -335,6 +335,67 @@ async def test_service_lists_with_new_sort_keys(tmp_path: Path) -> None:
 
     by_stock, _ = await service.async_list(ProductFilter(sort="stock", order="asc"))
     assert [item.article_number for item in by_stock] == [holz.article_number, laser.article_number]
+
+
+async def _attach_image(store: CatalogStore, product: Product, name: str, size: int) -> None:
+    """Bilddatei mit exakt ``size`` Bytes an ein Produkt hängen (ohne Optimierung)."""
+
+    await store.images.async_write(product.article_number, name, b"x" * size)
+    stored = store.get_product(product.article_number)
+    stored.images.append(Image(name=name, is_main=not stored.images))
+    store.put_product(stored)
+
+
+async def test_sort_by_size_uses_file_totals_and_stable_ties(tmp_path: Path) -> None:
+    store, service = await _service(tmp_path)
+    empty = await _create(service, name="Ohne Bild")
+    small = await _create(service, name="Klein")
+    medium = await _create(service, name="Mittel")
+    large = await _create(service, name="Groß")
+    tie_zulu = await _create(service, name="Zulu")
+    tie_alpha = await _create(service, name="Alpha")
+    outside = await _create(service, name="Außen", category="EP")
+
+    await _attach_image(store, small, "klein.jpg", 10)
+    await _attach_image(store, medium, "mittel.jpg", 200)
+    await _attach_image(store, large, "gross-1.jpg", 200)
+    await _attach_image(store, large, "gross-2.jpg", 100)  # Summe 300
+    await _attach_image(store, tie_zulu, "zulu.jpg", 100)
+    await _attach_image(store, tie_alpha, "alpha.jpg", 100)
+    await _attach_image(store, outside, "aussen.jpg", 999)
+
+    ascending, total = await service.async_list(ProductFilter(sort="size", order="asc"))
+    assert total == 7
+    assert [item.article_number for item in ascending] == [
+        empty.article_number,
+        small.article_number,
+        tie_alpha.article_number,
+        tie_zulu.article_number,
+        medium.article_number,
+        large.article_number,
+        outside.article_number,
+    ]
+
+    descending, _ = await service.async_list(ProductFilter(sort="size", order="desc"))
+    assert [item.article_number for item in descending] == [
+        outside.article_number,
+        large.article_number,
+        medium.article_number,
+        tie_alpha.article_number,
+        tie_zulu.article_number,
+        small.article_number,
+        empty.article_number,
+    ]
+
+    # Sortiert wird vor Limit/Offset; ``total`` zählt alle gefilterten Produkte.
+    page, total = await service.async_list(
+        ProductFilter(categories=["LA"], sort="size", order="asc", offset=1, limit=2)
+    )
+    assert total == 6
+    assert [item.article_number for item in page] == [
+        small.article_number,
+        tie_alpha.article_number,
+    ]
 
 
 async def test_preview_article_number_format_and_uniqueness(tmp_path: Path) -> None:
@@ -614,7 +675,7 @@ async def test_oversized_flag_uses_long_edge_and_bytes(
     data = jpeg_bytes(size, quality=95)
     if pad:
         # Sicherstellen, dass die Byte-Grenze wirklich überschritten wird.
-        data += b"\x00" * (400 * 1024)
+        data += b"\x00" * (500 * 1024)
     await store.images.async_write(product.article_number, name, data)
     stored = store.get_product(product.article_number)
     stored.images.append(Image(name=name, is_main=True))

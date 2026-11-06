@@ -11,8 +11,10 @@ from PIL import Image
 
 from custom_components.frickeldave_store import imaging
 from custom_components.frickeldave_store.imaging import (
+    MAX_IMAGE_BYTES,
     MAX_LONG_EDGE,
     format_bytes,
+    is_oversized,
     optimize_image_sync,
 )
 from custom_components.frickeldave_store.models import ValidationError
@@ -169,3 +171,19 @@ def test_format_bytes_uses_german_notation() -> None:
     assert format_bytes(12 * 1024 * 1024) == "12,0 MB"
     assert format_bytes(285_000) == "278 KB"
     assert format_bytes(1) == "1 Byte"
+
+
+def test_max_image_bytes_defaults_to_500_kib() -> None:
+    assert MAX_IMAGE_BYTES == 512000
+
+
+def test_is_oversized_respects_explicit_max_bytes() -> None:
+    # 400 KiB + 1 Byte: unter der 500-KiB-Grenze, über einer 400-KiB-Grenze.
+    size = 400 * 1024 + 1
+    width, height = 800, 600
+
+    assert is_oversized(width, height, size, 500 * 1024) is False
+    assert is_oversized(width, height, size, 400 * 1024) is True
+    # Lange Kante bleibt unabhängig von der Byte-Grenze wirksam.
+    assert is_oversized(MAX_LONG_EDGE + 1, height, 1024, 500 * 1024) is True
+    assert is_oversized(MAX_LONG_EDGE, height, 1024, 500 * 1024) is False

@@ -194,6 +194,44 @@ async def test_invalid_filter_returns_validation_error(tmp_path: Path) -> None:
     assert _payload(response)["error"]["code"] == "validation_error"
 
 
+async def test_products_can_be_sorted_by_image_size(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
+    small = await runtime.products.async_create({"name": "Klein", "category": "LA"})
+    large = await runtime.products.async_create({"name": "Groß", "category": "LA"})
+    await runtime.store.images.async_write(large.article_number, "gross.jpg", b"x" * 500)
+    stored = runtime.store.get_product(large.article_number)
+    stored.images.append(Image(name="gross.jpg", is_main=True))
+    runtime.store.put_product(stored)
+
+    response = await ProductsView().get(FakeRequest(hass, "user-1", query={"sort": "size"}))
+    body = _payload(response)
+
+    assert response.status == 200
+    assert body["total"] == 2
+    assert [item["name"] for item in body["products"]] == ["Klein", "Groß"]
+    assert body["products"][0]["images"] == []
+    assert body["products"][1]["images"][0]["bytes"] == 500
+    assert small.article_number != large.article_number
+
+    descending = _payload(
+        await ProductsView().get(
+            FakeRequest(hass, "user-1", query={"sort": "size", "order": "desc"})
+        )
+    )
+    assert [item["name"] for item in descending["products"]] == ["Groß", "Klein"]
+
+
+async def test_products_reject_unknown_sort_value(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"user-1": ["product"]})
+
+    response = await ProductsView().get(FakeRequest(hass, "user-1", query={"sort": "groesse"}))
+
+    assert response.status == 400
+    error = _payload(response)["error"]
+    assert error["code"] == "validation_error"
+    assert "'size'" in error["message"]
+
+
 async def test_article_number_preview_endpoint(tmp_path: Path) -> None:
     hass, runtime = await _setup(tmp_path, {"user-1": ["product"]})
 
@@ -302,6 +340,54 @@ async def test_settings_patch_does_not_echo_secret(tmp_path: Path) -> None:
     assert response.status == 200
     assert b"neu-geheim" not in response.body
     assert _payload(response)["ai"]["api_key_set"] is True
+
+
+async def test_settings_get_includes_image_limit(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"admin": ["app_admin"]})
+
+    response = await SettingsView().get(FakeRequest(hass, "admin"))
+
+    assert response.status == 200
+    assert _payload(response)["images"] == {"max_bytes": 512000}
+
+
+async def test_settings_patch_accepts_image_limit(tmp_path: Path) -> None:
+    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
+
+    response = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"images": {"max_bytes": 614400}})
+    )
+
+    assert response.status == 200
+    assert _payload(response)["images"] == {"max_bytes": 614400}
+    assert runtime.store.image_max_bytes == 614400
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1024, 10485761, True, "512000", 512000.5, None],
+)
+async def test_settings_patch_rejects_invalid_image_limit(tmp_path: Path, value: object) -> None:
+    hass, runtime = await _setup(tmp_path, {"admin": ["app_admin"]})
+
+    response = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"images": {"max_bytes": value}})
+    )
+
+    assert response.status == 400
+    assert _payload(response)["error"]["code"] == "validation_error"
+    assert runtime.store.image_max_bytes == 512000
+
+
+async def test_settings_patch_rejects_unknown_image_fields(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"admin": ["app_admin"]})
+
+    response = await SettingsView().patch(
+        FakeRequest(hass, "admin", body={"images": {"max_bytes": 512000, "quality": 80}})
+    )
+
+    assert response.status == 400
+    assert _payload(response)["error"]["code"] == "validation_error"
 
 
 async def test_ai_rate_limit_returns_readable_error_without_mutation(tmp_path: Path) -> None:
