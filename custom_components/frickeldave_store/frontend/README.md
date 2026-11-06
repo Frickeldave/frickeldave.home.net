@@ -8,6 +8,9 @@ Das Verzeichnis enthält die ausgelieferten Dateien des Panels:
 - `features.js` – reine Feature-Normalisierung aus `GET /me` (Contract 1), ohne
   Lit- oder DOM-Abhängigkeiten. Wird vom Panel relativ importiert und in
   `tests/frontend/features.test.mjs` direkt mit `node --test` geprüft.
+- `auth-retry.js` – reine Entscheidung, ob ein 401 genau eine Erneuerung des
+  HA-Access-Tokens auslöst (403 nie); geprüft in
+  `tests/frontend/auth-retry.test.mjs`.
 - `format-bytes.js` – reine Größenformatierung (dezimal, deutsches
   Dezimalkomma) für Belegt-Zeile und Größen-Spalte; geprüft in
   `tests/frontend/format-bytes.test.mjs`.
@@ -43,6 +46,7 @@ node --check custom_components/frickeldave_store/frontend/lit.js
 node --check custom_components/frickeldave_store/frontend/frickeldave-store-panel.js
 node --check custom_components/frickeldave_store/frontend/frickeldave-store-config-panel.js
 node --test tests/frontend/features.test.mjs
+node --test tests/frontend/auth-retry.test.mjs
 node --test tests/frontend/format-bytes.test.mjs
 python -m pytest tests/test_frontend_assets.py -q
 ```
