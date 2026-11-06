@@ -42,6 +42,12 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Fixed
 
+- **Abgelaufene Sitzung liefert `401` statt `403` (#289).** Fehlte `hass_user` an
+  einer Anfrage (abgelaufenes oder fehlendes HA-Token), antwortete die API mit
+  `403 forbidden` und die Oberfläche meldete irreführend, der Home-Assistant-
+  Benutzer sei „für diese Verwaltung nicht freigegeben“. Jetzt antwortet sie mit
+  `401 not_authenticated` und der Meldung „Die Sitzung ist abgelaufen. Bitte die
+  Seite neu laden.“; fehlende Rollen bleiben unverändert `403 forbidden`.
 - **Versionskonstante folgt wieder dem Release (#289).** `VERSION` in `const.py`
   war fest auf 0.2.0 verdrahtet, während das Release 0.2.1 nur Manifest und
   `pyproject.toml` anhob. Dadurch zeigte der Panel-Footer weiterhin 0.2.0 und die

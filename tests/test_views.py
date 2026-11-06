@@ -144,6 +144,27 @@ async def test_me_reports_roles_and_can_flags(tmp_path: Path) -> None:
     assert _payload(unknown)["version"] == VERSION
 
 
+@pytest.mark.parametrize("view_class", [MeView, SettingsView])
+async def test_missing_session_returns_401(tmp_path: Path, view_class: Any) -> None:
+    hass, _ = await _setup(tmp_path, {"admin": ["app_admin"]})
+    response = await view_class().get(FakeRequest(hass, None))
+    assert response.status == 401
+    body = _payload(response)
+    assert body == {
+        "error": {
+            "code": "not_authenticated",
+            "message": "Die Sitzung ist abgelaufen. Bitte die Seite neu laden.",
+        }
+    }
+
+
+async def test_missing_role_still_returns_403(tmp_path: Path) -> None:
+    hass, _ = await _setup(tmp_path, {"user-1": ["product"]})
+    response = await SettingsView().get(FakeRequest(hass, "user-1"))
+    assert response.status == 403
+    assert _payload(response)["error"]["code"] == "forbidden"
+
+
 async def test_default_deny_returns_403_without_protected_data(tmp_path: Path) -> None:
     hass, _ = await _setup(tmp_path, {"user-1": ["product"]})
     response = await ProductsView().get(FakeRequest(hass, "ghost"))

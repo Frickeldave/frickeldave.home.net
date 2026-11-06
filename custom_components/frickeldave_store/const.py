@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "frickeldave_store"
 NAME: Final = "Frickeldave Store"
 MANUFACTURER: Final = "Frickeldave"
-VERSION: Final = "0.2.5"
+VERSION: Final = "0.2.6"
 ISSUE_URL: Final = "https://github.com/Frickeldave/frickeldave.github.io/issues/289"
 REPOSITORY_URL: Final = "https://github.com/Frickeldave/homeassistant-frickeldave-store"
 
