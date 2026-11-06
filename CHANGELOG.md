@@ -24,6 +24,10 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Changed
 
+- **Bildgröße wird mit „Einstellungen speichern“ gesichert (#289).** Der separate
+  Button „Bildgröße speichern“ entfällt. Speicherort und Maximalgröße für Bilder
+  teilen sich ein Formular, ein „Einstellungen speichern“ und ein „Änderung
+  verwerfen“; die API erhält nur die tatsächlich geänderten Abschnitte.
 - **Standard-Bildgrenze von 400 KiB auf 500 KiB angehoben (#289).** Bilder bis
   500 KiB werden unverändert übernommen; die Grenze ist über die Einstellungen
   anpassbar.
@@ -42,6 +46,13 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Fixed
 
+- **Panel verbindet wieder: `fetchWithAuth` bekommt einen relativen Pfad (#289).**
+  Seit 0.2.6 übergab das Panel `hass.fetchWithAuth` eine absolute URL. Home
+  Assistant stellt die Instanz-URL selbst voran, sodass eine ungültige URL wie
+  `https://ha…https://ha…/api/…` entstand, `fetch` abbrach und nur noch
+  „Verbindung zum Server fehlgeschlagen“ zu sehen war. `fetchWithAuth` erhält
+  jetzt den relativen Pfad; die absolute URL bleibt dem rohen `fetch`-Fallback
+  vorbehalten.
 - **Abgelaufene Sitzung liefert `401` statt `403` (#289).** Fehlte `hass_user` an
   einer Anfrage (abgelaufenes oder fehlendes HA-Token), antwortete die API mit
   `403 forbidden` und die Oberfläche meldete irreführend, der Home-Assistant-

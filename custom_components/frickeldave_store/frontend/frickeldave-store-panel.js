@@ -16,7 +16,7 @@
  */
 
 import { LitElement, html, css } from "./lit.js";
-import { shouldRefreshToken } from "./auth-retry.js";
+import { authRequestUrl, shouldRefreshToken } from "./auth-retry.js";
 import { featureInfo, normalizeFeatures } from "./features.js";
 import { formatBytes } from "./format-bytes.js";
 import {
@@ -832,7 +832,6 @@ export class FrickeldaveStorePanel extends LitElement {
     // fetchWithAuth signiert selbst; nur der Fallback braucht den Bearer-Header.
     const authFetch =
       typeof this.hass.fetchWithAuth === "function" ? this.hass.fetchWithAuth.bind(this.hass) : null;
-    const url = `${this._baseUrl()}${path}`;
 
     const send = (useAuthFetch) => {
       const requestHeaders = { ...headers };
@@ -846,6 +845,8 @@ export class FrickeldaveStorePanel extends LitElement {
         signal: controller.signal,
         credentials: "same-origin",
       };
+      // fetchWithAuth stellt die Instanz-URL selbst voran: nur relativer Pfad.
+      const url = authRequestUrl(path, this._baseUrl(), useAuthFetch);
       return useAuthFetch ? authFetch(url, init) : fetch(url, init);
     };
 

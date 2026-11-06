@@ -324,10 +324,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
 
     this._images = {
       loading: false,
-      saving: false,
       loaded: false,
       error: "",
-      notice: "",
       maxBytes: IMAGE_MAX_BYTES_DEFAULT,
       draftKb: String(IMAGE_MAX_BYTES_DEFAULT / 1024),
     };
@@ -1201,6 +1199,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       ...this._images,
       loading: false,
       loaded: true,
+      error: "",
       maxBytes: images.maxBytes,
       draftKb: String(Math.round(images.maxBytes / 1024)),
     };
@@ -1213,7 +1212,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     this._ai = { ...this._ai, loading: true, error: "", notice: "" };
     this._locations = { ...this._locations, loading: true, error: "", notice: "" };
     this._storage = { ...this._storage, loading: true, error: "", notice: "" };
-    this._images = { ...this._images, loading: true, error: "", notice: "" };
+    this._images = { ...this._images, loading: true, error: "" };
     try {
       const data = await this._api(`${API_ROOT}/settings`);
       this._applySettingsPayload(data);
@@ -1290,7 +1289,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
   }
 
   _setImageMaxKb(value) {
-    this._images = { ...this._images, draftKb: value, error: "", notice: "" };
+    this._images = { ...this._images, draftKb: value, error: "" };
   }
 
   _validateImageMaxKb(value) {
@@ -1308,54 +1307,118 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     return "";
   }
 
-  async _saveImages(event) {
+  /** Speicherort und Bildgröße teilen sich einen Entwurf und einen Button. */
+  async _saveGeneral(event) {
     event?.preventDefault();
-    const state = this._images;
-    if (!this._can("app_admin") || state.saving || state.loading) {
+    const storage = this._storage;
+    const images = this._images;
+    if (!this._can("app_admin") || storage.saving || storage.loading || images.loading) {
       return;
     }
-    if (!state.loaded) {
-      this._images = {
-        ...state,
+    if (!storage.loaded || !images.loaded) {
+      this._storage = {
+        ...storage,
         error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
         notice: "",
+        reloadRequired: false,
       };
-      return;
-    }
-    const validationError = this._validateImageMaxKb(state.draftKb);
-    if (validationError) {
-      this._images = { ...state, error: validationError, notice: "" };
       return;
     }
 
-    const maxBytes = Number(String(state.draftKb).trim().replace(",", ".")) * 1024;
-    this._images = { ...state, saving: true, error: "", notice: "" };
-    try {
-      const data = await this._api(`${API_ROOT}/settings`, {
-        method: "PATCH",
-        body: { images: { max_bytes: maxBytes } },
-      });
-      // Nur ein vollständiges Einstellungs-Payload ersetzt die übrigen Bereiche.
-      if (isObject(data) && isObject(data.storage)) {
-        this._applySettingsPayload(data);
+    const storageChanged = Boolean(storage.draftPath) && storage.draftPath !== storage.dataPath;
+    const imagesChanged =
+      String(images.draftKb).trim() !== String(Math.round(images.maxBytes / 1024));
+    if (!storageChanged && !imagesChanged) {
+      return;
+    }
+
+    let maxBytes = 0;
+    if (imagesChanged) {
+      const validationError = this._validateImageMaxKb(images.draftKb);
+      if (validationError) {
+        this._images = { ...images, error: validationError };
+        return;
       }
-      const confirmed = isObject(data) && isObject(data.images);
-      const appliedBytes = confirmed ? normalizeImages(data.images).maxBytes : maxBytes;
-      this._images = {
-        ...this._images,
+      maxBytes = Number(String(images.draftKb).trim().replace(",", ".")) * 1024;
+    }
+
+    const payload = {};
+    if (storageChanged) {
+      payload.storage = { data_path: storage.draftPath };
+    }
+    if (imagesChanged) {
+      payload.images = { max_bytes: maxBytes };
+    }
+
+    this._storage = { ...storage, saving: true, error: "", notice: "", reloadRequired: false };
+    this._images = { ...images, error: "" };
+    try {
+      const data = await this._api(`${API_ROOT}/settings`, { method: "PATCH", body: payload });
+      // Nur der Speicherortwechsel verlangt ein Neuladen der Integration.
+      const reloadRequired = storageChanged && Boolean(data?.reload_required);
+      if (storageChanged && isObject(data) && isObject(data.storage)) {
+        this._applySettingsPayload(data);
+      } else if (imagesChanged && isObject(data) && isObject(data.images)) {
+        const appliedBytes = normalizeImages(data.images).maxBytes;
+        this._images = {
+          ...this._images,
+          loaded: true,
+          maxBytes: appliedBytes,
+          draftKb: String(Math.round(appliedBytes / 1024)),
+          error: "",
+        };
+      } else if (imagesChanged) {
+        this._images = {
+          ...this._images,
+          loaded: true,
+          maxBytes,
+          draftKb: String(Math.round(maxBytes / 1024)),
+          error: "",
+        };
+      }
+      this._storage = {
+        ...this._storage,
         saving: false,
         loaded: true,
-        maxBytes: appliedBytes,
-        draftKb: String(Math.round(appliedBytes / 1024)),
-        notice: "Bildgröße gespeichert.",
+        reloadRequired,
+        notice: reloadRequired
+          ? "Speicherort gespeichert. Lade die Integration neu, damit der neue Ordner verwendet wird."
+          : "Einstellungen gespeichert.",
       };
     } catch (error) {
       if (isAbortError(error)) {
-        this._images = { ...this._images, saving: false };
+        this._storage = { ...this._storage, saving: false };
         return;
       }
-      this._images = { ...this._images, saving: false, error: this._errorText(error) };
+      this._storage = {
+        ...this._storage,
+        saving: false,
+        // Auswahl zurückrollen: gespeicherten Speicherort wieder anzeigen.
+        draftPath: this._storage.dataPath,
+        error: this._errorText(error),
+        notice: "",
+        reloadRequired: false,
+      };
+      this._images = { ...this._images, error: "" };
     }
+  }
+
+  _discardGeneralChanges() {
+    if (this._storage.saving) {
+      return;
+    }
+    this._storage = {
+      ...this._storage,
+      draftPath: this._storage.dataPath,
+      error: "",
+      notice: "",
+      reloadRequired: false,
+    };
+    this._images = {
+      ...this._images,
+      draftKb: String(Math.round(this._images.maxBytes / 1024)),
+      error: "",
+    };
   }
 
   _setLocationName(index, value) {
@@ -1506,66 +1569,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       return;
     }
     this._setStoragePath(target.id);
-  }
-
-  async _saveStorage(event) {
-    event?.preventDefault();
-    const state = this._storage;
-    if (!this._can("app_admin") || state.saving || state.loading) {
-      return;
-    }
-    if (!state.loaded) {
-      this._storage = {
-        ...state,
-        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
-        notice: "",
-      };
-      return;
-    }
-    if (!state.draftPath || state.draftPath === state.dataPath) {
-      this._storage = {
-        ...state,
-        error: "",
-        notice: "Der Speicherort ist unverändert.",
-        reloadRequired: false,
-      };
-      return;
-    }
-
-    this._storage = { ...state, saving: true, error: "", notice: "", reloadRequired: false };
-    try {
-      const data = await this._api(`${API_ROOT}/settings`, {
-        method: "PATCH",
-        body: { storage: { data_path: state.draftPath } },
-      });
-      const reloadRequired = Boolean(data?.reload_required);
-      if (data && typeof data === "object" && data.storage) {
-        this._applySettingsPayload(data);
-      }
-      this._storage = {
-        ...this._storage,
-        saving: false,
-        loaded: true,
-        reloadRequired,
-        notice: reloadRequired
-          ? "Speicherort gespeichert. Lade die Integration neu, damit der neue Ordner verwendet wird."
-          : "Speicherort gespeichert.",
-      };
-    } catch (error) {
-      if (isAbortError(error)) {
-        this._storage = { ...this._storage, saving: false };
-        return;
-      }
-      this._storage = {
-        ...this._storage,
-        saving: false,
-        // Auswahl zurückrollen: gespeicherten Speicherort wieder anzeigen.
-        draftPath: this._storage.dataPath,
-        error: this._errorText(error),
-        notice: "",
-        reloadRequired: false,
-      };
-    }
   }
 
   /* --------------------------------------------------------------------- */
@@ -1725,7 +1728,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     const backupIncluded = this._storageDraftBackupIncluded();
     const changed = Boolean(state.draftPath) && state.draftPath !== state.dataPath;
     const images = this._images;
-    const imagesBusy = images.loading || images.saving || !images.loaded;
+    const imagesBusy = images.loading || state.saving || !images.loaded;
     const imagesChanged =
       String(images.draftKb).trim() !== String(Math.round(images.maxBytes / 1024));
 
@@ -1748,7 +1751,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
             type="button"
             class="fd-button"
             @click=${() => this._loadSettings()}
-            ?disabled=${state.loading || state.saving || images.loading || images.saving}
+            ?disabled=${state.loading || state.saving || images.loading}
           >
             Neu laden
           </button>
@@ -1776,7 +1779,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         ${!state.loaded
           ? html`<p class="fd-muted">Die Einstellungen sind noch nicht geladen.</p>`
           : html`
-              <form class="fd-storage-form" @submit=${(event) => this._saveStorage(event)} novalidate>
+              <form class="fd-storage-form" @submit=${(event) => this._saveGeneral(event)} novalidate>
                 <fieldset class="fd-fieldset" ?disabled=${busy}>
                   <legend>Backup</legend>
                   <label class="fd-switch">
@@ -1842,34 +1845,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                   Diese Pfade sind schreibgeschützt und ergeben sich aus dem Speicherort.
                 </p>
 
-                <div class="fd-inline-actions">
-                  <button
-                    type="submit"
-                    class="fd-button fd-button--primary"
-                    ?disabled=${busy || !changed}
-                    aria-busy=${state.saving ? "true" : "false"}
-                  >
-                    ${state.saving ? "Speichern …" : "Einstellungen speichern"}
-                  </button>
-                  ${changed
-                    ? html`<button
-                        type="button"
-                        class="fd-button"
-                        @click=${() => this._setStoragePath(state.dataPath)}
-                        ?disabled=${busy}
-                      >
-                        Änderung verwerfen
-                      </button>`
-                    : ""}
-                  ${state.loaded
-                    ? html`<span class="fd-status ${state.error ? "fd-status--warn" : "fd-status--ok"}">
-                        ${state.error ? "Nicht gespeichert" : "Konfiguration geladen"}
-                      </span>`
-                    : ""}
-                </div>
-              </form>
-
-              <form class="fd-image-form" @submit=${(event) => this._saveImages(event)} novalidate>
                 <fieldset class="fd-fieldset" ?disabled=${imagesBusy}>
                   <legend>Bilder</legend>
                   <div class="fd-field">
@@ -1895,22 +1870,33 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                   ${images.error
                     ? html`<div class="fd-banner fd-banner--error" role="alert">${images.error}</div>`
                     : ""}
-                  ${images.notice
-                    ? html`<div class="fd-banner fd-banner--success" role="status">
-                        ${images.notice}
-                      </div>`
-                    : ""}
-                  <div class="fd-inline-actions">
-                    <button
-                      type="submit"
-                      class="fd-button fd-button--primary"
-                      ?disabled=${imagesBusy || !imagesChanged}
-                      aria-busy=${images.saving ? "true" : "false"}
-                    >
-                      ${images.saving ? "Speichern …" : "Bildgröße speichern"}
-                    </button>
-                  </div>
                 </fieldset>
+
+                <div class="fd-inline-actions">
+                  <button
+                    type="submit"
+                    class="fd-button fd-button--primary"
+                    ?disabled=${busy || imagesBusy || (!changed && !imagesChanged)}
+                    aria-busy=${state.saving ? "true" : "false"}
+                  >
+                    ${state.saving ? "Speichern …" : "Einstellungen speichern"}
+                  </button>
+                  ${changed || imagesChanged
+                    ? html`<button
+                        type="button"
+                        class="fd-button"
+                        @click=${() => this._discardGeneralChanges()}
+                        ?disabled=${busy || imagesBusy}
+                      >
+                        Änderung verwerfen
+                      </button>`
+                    : ""}
+                  ${state.loaded
+                    ? html`<span class="fd-status ${state.error ? "fd-status--warn" : "fd-status--ok"}">
+                        ${state.error ? "Nicht gespeichert" : "Konfiguration geladen"}
+                      </span>`
+                    : ""}
+                </div>
               </form>
             `}
       </section>
@@ -3088,18 +3074,6 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       content: "·";
       margin: 0 8px;
       color: var(--fd-text-muted);
-    }
-
-    .fd-image-form {
-      display: flex;
-      flex-direction: column;
-      gap: var(--fd-space-3);
-    }
-
-    .fd-image-form .fd-fieldset {
-      display: flex;
-      flex-direction: column;
-      gap: var(--fd-space-2);
     }
 
     .fd-input--number {

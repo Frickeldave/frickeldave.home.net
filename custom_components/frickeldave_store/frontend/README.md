@@ -9,7 +9,9 @@ Das Verzeichnis enthält die ausgelieferten Dateien des Panels:
   Lit- oder DOM-Abhängigkeiten. Wird vom Panel relativ importiert und in
   `tests/frontend/features.test.mjs` direkt mit `node --test` geprüft.
 - `auth-retry.js` – reine Entscheidung, ob ein 401 genau eine Erneuerung des
-  HA-Access-Tokens auslöst (403 nie); geprüft in
+  HA-Access-Tokens auslöst (403 nie) und wie die Anfrage-URL aussieht:
+  relativer Pfad für `hass.fetchWithAuth` (die Instanz-URL stellt HA selbst
+  voran), absolute URL nur für den rohen `fetch`-Fallback; geprüft in
   `tests/frontend/auth-retry.test.mjs`.
 - `format-bytes.js` – reine Größenformatierung (dezimal, deutsches
   Dezimalkomma) für Belegt-Zeile und Größen-Spalte; geprüft in
