@@ -15,12 +15,18 @@
  */
 
 import { LitElement, html, css } from "./lit.js";
+import { formatBytes } from "./format-bytes.js";
 
 const API_ROOT = "/api/frickeldave_store";
 const REQUEST_TIMEOUT_MS = 30000;
 const TOAST_TIMEOUT_MS = 6000;
 // Event der Basis, sobald sich registrierte Erweiterungen ändern (Contract 1).
 const FEATURES_EVENT = "frickeldave_store_features_changed";
+
+// Grenzen der einstellbaren Bildgröße; der Server prüft denselben Bereich.
+const IMAGE_MAX_BYTES_DEFAULT = 500 * 1024;
+const IMAGE_MAX_KB_MIN = 50;
+const IMAGE_MAX_KB_MAX = 10240;
 
 const TABS = Object.freeze([
   { id: "general", label: "Allgemeine Einstellungen", panelId: "fd-config-panel-general" },
@@ -43,6 +49,8 @@ class ApiError extends Error {
 const isAbortError = (error) => error?.name === "AbortError";
 
 const asText = (value) => (typeof value === "string" ? value : "");
+
+const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 const numberFormatter = new Intl.NumberFormat("de-DE");
 
@@ -113,6 +121,19 @@ const normalizeLocations = (data) => {
   }));
 };
 
+const normalizeStorageUsage = (data) => {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return null;
+  }
+  return {
+    totalBytes: asCount(data.total_bytes),
+    dataBytes: asCount(data.data_bytes),
+    imagesBytes: asCount(data.images_bytes),
+    backupsBytes: asCount(data.backups_bytes),
+    files: asCount(data.files),
+  };
+};
+
 const normalizeStorage = (data) => {
   const payload = data && typeof data === "object" ? data : {};
   const dataPath = asText(payload.data_path);
@@ -141,6 +162,16 @@ const normalizeStorage = (data) => {
       typeof payload.exclude_from_backup === "boolean" ? payload.exclude_from_backup : !backupIncluded,
     paths,
     choices,
+    usage: normalizeStorageUsage(payload.usage),
+  };
+};
+
+const normalizeImages = (data) => {
+  const payload = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const maxBytes = Number(payload.max_bytes);
+  return {
+    maxBytes:
+      Number.isFinite(maxBytes) && maxBytes > 0 ? Math.round(maxBytes) : IMAGE_MAX_BYTES_DEFAULT,
   };
 };
 
@@ -191,6 +222,7 @@ const normalizeSettingsPayload = (data) => {
     apiKeySet: Boolean(ai?.api_key_set),
     locations: normalizeLocations(payload.locations),
     storage: normalizeStorage(payload.storage),
+    images: normalizeImages(payload.images),
     features: normalizeFeatures(payload.features),
   };
 };
@@ -219,6 +251,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     _ai: { state: true },
     _locations: { state: true },
     _storage: { state: true },
+    _images: { state: true },
     _toast: { state: true },
 
     _forwardAvailable: { state: true },
@@ -286,6 +319,17 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       excludeFromBackup: true,
       paths: [],
       choices: [],
+      usage: null,
+    };
+
+    this._images = {
+      loading: false,
+      saving: false,
+      loaded: false,
+      error: "",
+      notice: "",
+      maxBytes: IMAGE_MAX_BYTES_DEFAULT,
+      draftKb: String(IMAGE_MAX_BYTES_DEFAULT / 1024),
     };
 
     this._toast = null;
@@ -1150,6 +1194,15 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       excludeFromBackup: storage.excludeFromBackup,
       paths: storage.paths,
       choices: storage.choices,
+      usage: storage.usage,
+    };
+    const images = normalized.images;
+    this._images = {
+      ...this._images,
+      loading: false,
+      loaded: true,
+      maxBytes: images.maxBytes,
+      draftKb: String(Math.round(images.maxBytes / 1024)),
     };
   }
 
@@ -1160,6 +1213,7 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     this._ai = { ...this._ai, loading: true, error: "", notice: "" };
     this._locations = { ...this._locations, loading: true, error: "", notice: "" };
     this._storage = { ...this._storage, loading: true, error: "", notice: "" };
+    this._images = { ...this._images, loading: true, error: "", notice: "" };
     try {
       const data = await this._api(`${API_ROOT}/settings`);
       this._applySettingsPayload(data);
@@ -1168,12 +1222,14 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         this._ai = { ...this._ai, loading: false };
         this._locations = { ...this._locations, loading: false };
         this._storage = { ...this._storage, loading: false };
+        this._images = { ...this._images, loading: false };
         return;
       }
       const message = this._errorText(error);
       this._ai = { ...this._ai, loading: false, error: message };
       this._locations = { ...this._locations, loading: false, error: message };
       this._storage = { ...this._storage, loading: false, error: message };
+      this._images = { ...this._images, loading: false, error: message };
     }
   }
 
@@ -1230,6 +1286,75 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
         return;
       }
       this._ai = { ...this._ai, saving: false, error: this._errorText(error) };
+    }
+  }
+
+  _setImageMaxKb(value) {
+    this._images = { ...this._images, draftKb: value, error: "", notice: "" };
+  }
+
+  _validateImageMaxKb(value) {
+    const text = String(value ?? "").trim().replace(",", ".");
+    if (!text) {
+      return "Bitte eine Maximalgröße in kB angeben.";
+    }
+    const kb = Number(text);
+    if (!Number.isFinite(kb) || !Number.isInteger(kb)) {
+      return "Bitte eine ganze Zahl in kB angeben.";
+    }
+    if (kb < IMAGE_MAX_KB_MIN || kb > IMAGE_MAX_KB_MAX) {
+      return `Die Maximalgröße muss zwischen ${IMAGE_MAX_KB_MIN} und ${IMAGE_MAX_KB_MAX} kB liegen.`;
+    }
+    return "";
+  }
+
+  async _saveImages(event) {
+    event?.preventDefault();
+    const state = this._images;
+    if (!this._can("app_admin") || state.saving || state.loading) {
+      return;
+    }
+    if (!state.loaded) {
+      this._images = {
+        ...state,
+        error: "Die Einstellungen sind noch nicht geladen. Bitte „Neu laden“ wählen.",
+        notice: "",
+      };
+      return;
+    }
+    const validationError = this._validateImageMaxKb(state.draftKb);
+    if (validationError) {
+      this._images = { ...state, error: validationError, notice: "" };
+      return;
+    }
+
+    const maxBytes = Number(String(state.draftKb).trim().replace(",", ".")) * 1024;
+    this._images = { ...state, saving: true, error: "", notice: "" };
+    try {
+      const data = await this._api(`${API_ROOT}/settings`, {
+        method: "PATCH",
+        body: { images: { max_bytes: maxBytes } },
+      });
+      // Nur ein vollständiges Einstellungs-Payload ersetzt die übrigen Bereiche.
+      if (isObject(data) && isObject(data.storage)) {
+        this._applySettingsPayload(data);
+      }
+      const confirmed = isObject(data) && isObject(data.images);
+      const appliedBytes = confirmed ? normalizeImages(data.images).maxBytes : maxBytes;
+      this._images = {
+        ...this._images,
+        saving: false,
+        loaded: true,
+        maxBytes: appliedBytes,
+        draftKb: String(Math.round(appliedBytes / 1024)),
+        notice: "Bildgröße gespeichert.",
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        this._images = { ...this._images, saving: false };
+        return;
+      }
+      this._images = { ...this._images, saving: false, error: this._errorText(error) };
     }
   }
 
@@ -1599,6 +1724,10 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
     const draftChoice = this._storageDraftChoice();
     const backupIncluded = this._storageDraftBackupIncluded();
     const changed = Boolean(state.draftPath) && state.draftPath !== state.dataPath;
+    const images = this._images;
+    const imagesBusy = images.loading || images.saving || !images.loaded;
+    const imagesChanged =
+      String(images.draftKb).trim() !== String(Math.round(images.maxBytes / 1024));
 
     return html`
       <section
@@ -1611,14 +1740,15 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
           <div>
             <h2>Allgemeine Einstellungen</h2>
             <p class="fd-muted fd-small">
-              Speicherort des Produktkatalogs und Aufnahme in das Home-Assistant-Backup.
+              Speicherort des Produktkatalogs, Aufnahme in das Home-Assistant-Backup und
+              Maximalgröße für Bilder.
             </p>
           </div>
           <button
             type="button"
             class="fd-button"
             @click=${() => this._loadSettings()}
-            ?disabled=${state.loading || state.saving}
+            ?disabled=${state.loading || state.saving || images.loading || images.saving}
           >
             Neu laden
           </button>
@@ -1692,6 +1822,8 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                   </p>
                 </div>
 
+                ${state.usage ? this._renderStorageUsage(state.usage) : ""}
+
                 <dl class="fd-storage-meta" aria-label="Pfade des Speicherorts">
                   <div>
                     <dt>Aktiver Ordner</dt>
@@ -1736,8 +1868,66 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
                     : ""}
                 </div>
               </form>
+
+              <form class="fd-image-form" @submit=${(event) => this._saveImages(event)} novalidate>
+                <fieldset class="fd-fieldset" ?disabled=${imagesBusy}>
+                  <legend>Bilder</legend>
+                  <div class="fd-field">
+                    <label class="fd-label" for="fd-image-max-kb">Maximalgröße (kB)</label>
+                    <input
+                      id="fd-image-max-kb"
+                      class="fd-input fd-input--number"
+                      type="number"
+                      inputmode="numeric"
+                      min=${IMAGE_MAX_KB_MIN}
+                      max=${IMAGE_MAX_KB_MAX}
+                      step="1"
+                      .value=${images.draftKb}
+                      ?disabled=${imagesBusy}
+                      aria-invalid=${images.error ? "true" : "false"}
+                      @input=${(event) => this._setImageMaxKb(event.target.value)}
+                    />
+                    <p class="fd-hint">
+                      Ab dieser Dateigröße gilt ein Bild als zu groß; das Panel bietet dann das
+                      Verkleinern an.
+                    </p>
+                  </div>
+                  ${images.error
+                    ? html`<div class="fd-banner fd-banner--error" role="alert">${images.error}</div>`
+                    : ""}
+                  ${images.notice
+                    ? html`<div class="fd-banner fd-banner--success" role="status">
+                        ${images.notice}
+                      </div>`
+                    : ""}
+                  <div class="fd-inline-actions">
+                    <button
+                      type="submit"
+                      class="fd-button fd-button--primary"
+                      ?disabled=${imagesBusy || !imagesChanged}
+                      aria-busy=${images.saving ? "true" : "false"}
+                    >
+                      ${images.saving ? "Speichern …" : "Bildgröße speichern"}
+                    </button>
+                  </div>
+                </fieldset>
+              </form>
             `}
       </section>
+    `;
+  }
+
+  _renderStorageUsage(usage) {
+    return html`
+      <p class="fd-storage-usage">
+        <span>Belegt: <strong>${formatBytes(usage.totalBytes)}</strong></span>
+        <span>Bilder ${formatBytes(usage.imagesBytes)}</span>
+        <span>Metadaten ${formatBytes(usage.dataBytes)}</span>
+        <span>Snapshots ${formatBytes(usage.backupsBytes)}</span>
+        ${usage.files > 0
+          ? html`<span class="fd-muted fd-small">${formatNumber(usage.files)} Dateien</span>`
+          : ""}
+      </p>
     `;
   }
 
@@ -2884,6 +3074,36 @@ export class FrickeldaveStoreConfigPanel extends LitElement {
       overflow-wrap: anywhere;
       font-family: var(--ha-font-family-code, ui-monospace, SFMono-Regular, monospace);
       font-size: var(--fd-font-small);
+    }
+
+    .fd-storage-usage {
+      display: flex;
+      flex-wrap: wrap;
+      margin: 0;
+      color: var(--fd-text);
+      font-size: var(--fd-font-small);
+    }
+
+    .fd-storage-usage > span + span::before {
+      content: "·";
+      margin: 0 8px;
+      color: var(--fd-text-muted);
+    }
+
+    .fd-image-form {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-3);
+    }
+
+    .fd-image-form .fd-fieldset {
+      display: flex;
+      flex-direction: column;
+      gap: var(--fd-space-2);
+    }
+
+    .fd-input--number {
+      max-width: 180px;
     }
 
     .fd-fieldset {

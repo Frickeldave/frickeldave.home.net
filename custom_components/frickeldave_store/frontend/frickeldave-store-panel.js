@@ -17,6 +17,7 @@
 
 import { LitElement, html, css } from "./lit.js";
 import { featureInfo, normalizeFeatures } from "./features.js";
+import { formatBytes } from "./format-bytes.js";
 import {
   FILE_FILTER_ALL,
   fileStatusCounts,
@@ -60,6 +61,7 @@ const SORT_COLUMNS = Object.freeze([
   { field: "category", label: "Kategorie" },
   { field: "price", label: "Preis" },
   { field: "stock", label: "Bestand" },
+  { field: "size", label: "Größe" },
   { field: "status", label: "Status" },
 ]);
 
@@ -69,7 +71,7 @@ const EDITOR_TABS = Object.freeze(["general", "images", "description", "stock"])
 
 // Schwellwerte, die der Server für `oversized` verwendet (lange Kante und Dateigröße).
 const IMAGE_MAX_LONG_EDGE = 1600;
-const IMAGE_MAX_BYTES = 400 * 1024;
+const IMAGE_MAX_BYTES = 500 * 1024;
 
 const OVERSIZED_HINT =
   "Mindestens ein Bild ist zu groß. Produkt öffnen und Bilder optimieren.";
@@ -143,18 +145,6 @@ const formatDateTime = (value) => {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "—" : dateFormatter.format(date);
-};
-
-/** Dateigröße wie der Server: „12,0 MB“, „278 KB“, „900 Bytes“. */
-const formatBytes = (value) => {
-  const bytes = Math.max(0, Math.round(Number(value) || 0));
-  if (bytes >= 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`;
-  }
-  if (bytes >= 1024) {
-    return `${numberFormatter.format(Math.round(bytes / 1024))} KB`;
-  }
-  return `${numberFormatter.format(bytes)} ${bytes === 1 ? "Byte" : "Bytes"}`;
 };
 
 const formatDimensions = (width, height) => {
@@ -1246,6 +1236,16 @@ export class FrickeldaveStorePanel extends LitElement {
 
   _productOversizedCount(product) {
     return this._productImages(product).filter((image) => image.oversized).length;
+  }
+
+  /** Gesamtgröße der Produktbilder für die Spalte „Größe“. */
+  _productSizeLabel(product) {
+    const images = this._productImages(product);
+    if (images.length === 0) {
+      return "—";
+    }
+    const bytes = images.reduce((total, image) => total + image.bytes, 0);
+    return formatBytes(bytes);
   }
 
   _imageUrl(product, image) {
@@ -3669,6 +3669,7 @@ export class FrickeldaveStorePanel extends LitElement {
         <td data-label="Bestand">
           <div class="fd-stock-chips">${this._renderStockSummary(product)}</div>
         </td>
+        <td data-label="Größe" class="fd-size-cell">${this._productSizeLabel(product)}</td>
         <td data-label="Status">
           <div class="fd-badges">
             ${this._renderImageWarning(product, "row")} ${this._renderProductBadges(product)}
@@ -6852,6 +6853,7 @@ export class FrickeldaveStorePanel extends LitElement {
     .fd-badges {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: 6px;
     }
 
@@ -7359,6 +7361,21 @@ export class FrickeldaveStorePanel extends LitElement {
       text-transform: uppercase;
     }
 
+    /* In der Listenzeile genau so hoch wie ein .fd-badge daneben. */
+    .fd-image-warning--row {
+      align-self: center;
+      min-width: 0;
+      min-height: 0;
+      padding: 2px 8px;
+      font-size: 11px;
+      line-height: var(--fd-line-height, 1.6);
+    }
+
+    .fd-image-warning--row svg {
+      width: 14px;
+      height: 14px;
+    }
+
     .fd-image-warning--card {
       position: absolute;
       top: 4px;
@@ -7687,6 +7704,12 @@ export class FrickeldaveStorePanel extends LitElement {
       color: var(--fd-text-muted);
       font-size: var(--fd-font-small);
       font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .fd-size-cell {
+      color: var(--fd-text-muted);
+      font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
 
