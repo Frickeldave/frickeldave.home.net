@@ -16,6 +16,7 @@
  */
 
 import { LitElement, html, css } from "./lit.js";
+import { shouldRefreshToken } from "./auth-retry.js";
 import { featureInfo, normalizeFeatures } from "./features.js";
 import { formatBytes } from "./format-bytes.js";
 import {
@@ -422,6 +423,7 @@ export class FrickeldaveStorePanel extends LitElement {
 
     this._accessState = "idle";
     this._accessError = "";
+    this._accessRefreshScheduled = false;
     this._me = null;
     this._features = null;
     this._featureUnsubscribe = null;
@@ -667,7 +669,8 @@ export class FrickeldaveStorePanel extends LitElement {
         return;
       }
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        this._accessState = "denied";
+        // Ein 401 ist eine abgelaufene Sitzung, keine fehlende Freigabe.
+        this._accessState = error.status === 403 ? "denied" : "error";
         this._accessError = this._errorText(error);
         this._products = [];
         this._total = 0;
@@ -748,9 +751,52 @@ export class FrickeldaveStorePanel extends LitElement {
     return "Der Beschreibungsvorschlag konnte nicht erstellt werden.";
   }
 
+  _canRefreshToken() {
+    return typeof this.hass?.auth?.refreshAccessToken === "function";
+  }
+
   /**
-   * Zentrale HTTP-Schicht. Setzt immer den Bearer-Token, parst das
-   * Fehlerformat {"error":{"code","message"}} und bricht nach Timeout ab.
+   * Erneuert den HA-Access-Token. Der Rückgabewert sagt nur, ob die
+   * Erneuerung geklappt hat; der Aufrufer wiederholt die Anfrage dann genau
+   * einmal und zeigt sonst die reguläre 401-Meldung.
+   */
+  async _refreshAccessToken() {
+    if (!this._canRefreshToken()) {
+      return false;
+    }
+    try {
+      await this.hass.auth.refreshAccessToken();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Nach einer erfolgreichen Token-Erneuerung die Zugriffsdaten einmal neu
+   * laden, damit die Oberfläche ohne manuellen Reload weiterläuft. Das Flag
+   * verhindert zusätzliche Durchläufe, wenn mehrere parallele Anfragen
+   * gleichzeitig einen 401 gesehen haben.
+   */
+  _scheduleAccessRefresh() {
+    if (this._accessRefreshScheduled) {
+      return;
+    }
+    this._accessRefreshScheduled = true;
+    setTimeout(() => {
+      this._accessRefreshScheduled = false;
+      if (this._accessState === "ready") {
+        this._revalidateAccess();
+      }
+    }, 0);
+  }
+
+  /**
+   * Zentrale HTTP-Schicht. Bevorzugt `hass.fetchWithAuth`, damit Home
+   * Assistant die Anfrage signiert und abgelaufene Tokens erneuert; für ältere
+   * HA-Versionen bleibt der rohe fetch-Fallback mit Bearer-Header erhalten.
+   * Ein 401 löst genau eine Token-Erneuerung und genau einen Wiederholungs-
+   * versuch aus; 403 (fehlende Berechtigung) wird nie wiederholt.
    */
   async _api(path, options = {}) {
     const { method = "GET", body, formData, timeoutMs = REQUEST_TIMEOUT_MS } = options;
@@ -772,7 +818,6 @@ export class FrickeldaveStorePanel extends LitElement {
     }, timeoutMs);
 
     const headers = {
-      Authorization: `Bearer ${token}`,
       Accept: "application/json",
     };
 
@@ -784,14 +829,40 @@ export class FrickeldaveStorePanel extends LitElement {
       payload = JSON.stringify(body);
     }
 
-    try {
-      const response = await fetch(`${this._baseUrl()}${path}`, {
+    // fetchWithAuth signiert selbst; nur der Fallback braucht den Bearer-Header.
+    const authFetch =
+      typeof this.hass.fetchWithAuth === "function" ? this.hass.fetchWithAuth.bind(this.hass) : null;
+    const url = `${this._baseUrl()}${path}`;
+
+    const send = (useAuthFetch) => {
+      const requestHeaders = { ...headers };
+      if (!useAuthFetch) {
+        requestHeaders.Authorization = `Bearer ${this._token()}`;
+      }
+      const init = {
         method,
-        headers,
+        headers: requestHeaders,
         body: payload,
         signal: controller.signal,
         credentials: "same-origin",
-      });
+      };
+      return useAuthFetch ? authFetch(url, init) : fetch(url, init);
+    };
+
+    try {
+      const useAuthFetch = Boolean(authFetch);
+      let response = await send(useAuthFetch);
+      let retried = false;
+
+      if (shouldRefreshToken(response.status, retried) && this._canRefreshToken()) {
+        if (await this._refreshAccessToken()) {
+          retried = true;
+          response = await send(useAuthFetch);
+        }
+      }
+      if (response.ok && retried) {
+        this._scheduleAccessRefresh();
+      }
 
       if (!response.ok) {
         let message = "";
@@ -903,8 +974,7 @@ export class FrickeldaveStorePanel extends LitElement {
         return;
       }
       this._accessError = this._errorText(error);
-      this._accessState =
-        error instanceof ApiError && (error.status === 401 || error.status === 403) ? "denied" : "error";
+      this._accessState = error instanceof ApiError && error.status === 403 ? "denied" : "error";
     }
   }
 
@@ -953,7 +1023,8 @@ export class FrickeldaveStorePanel extends LitElement {
         return;
       }
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        this._accessState = "denied";
+        // Ein 401 ist eine abgelaufene Sitzung, keine fehlende Freigabe.
+        this._accessState = error.status === 403 ? "denied" : "error";
         this._accessError = this._errorText(error);
         this._products = [];
         this._total = 0;
