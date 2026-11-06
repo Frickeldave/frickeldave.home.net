@@ -113,6 +113,12 @@ class ImageLimitError(StoreError):
     code = "image_limit"
 
 
+class NotAuthenticated(StoreError):
+    """Die Anfrage trägt keine (mehr gültige) HA-Sitzung."""
+
+    code = "not_authenticated"
+
+
 class PermissionDenied(StoreError):
     """Default Deny: keine ausreichende Rolle."""
 

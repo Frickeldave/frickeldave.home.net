@@ -312,12 +312,15 @@ async def test_users_endpoints_require_app_admin(tmp_path: Path) -> None:
         UsersView().get(FakeRequest(hass, "user-1")),
         UserView().put(FakeRequest(hass, "user-1", body={"roles": ["app_admin"]}), "user-1"),
         UserView().delete(FakeRequest(hass, "user-1"), "admin"),
-        UsersView().get(FakeRequest(hass, None)),
     ]
     for request in requests:
         response = await request
         assert response.status == 403
         assert _payload(response)["error"]["code"] == "forbidden"
+
+    missing_session = await UsersView().get(FakeRequest(hass, None))
+    assert missing_session.status == 401
+    assert _payload(missing_session)["error"]["code"] == "not_authenticated"
 
     assert runtime.permissions.can("user-1", "app_admin") is False
     assert entry.options["users"] == before

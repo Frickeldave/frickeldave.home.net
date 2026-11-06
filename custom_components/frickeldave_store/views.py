@@ -45,8 +45,8 @@ from .extension import (
 from .models import (
     SCHEMA_VERSION,
     ConflictError,
+    NotAuthenticated,
     NotFoundError,
-    PermissionDenied,
     StoreError,
     ValidationError,
 )
@@ -74,6 +74,7 @@ STATUS_BY_CODE: dict[str, int] = {
     "not_found": 404,
     "conflict": 409,
     "image_limit": 409,
+    "not_authenticated": 401,
     "forbidden": 403,
     "ai_not_configured": 400,
     "ai_rate_limited": 429,
@@ -189,7 +190,7 @@ def _runtime(request: web.Request) -> FrickeldaveStoreRuntime:
 def _user(request: web.Request) -> Any:
     user = request.get("hass_user")
     if user is None:
-        raise PermissionDenied("Nicht authentifiziert.")
+        raise NotAuthenticated("Die Sitzung ist abgelaufen. Bitte die Seite neu laden.")
     return user
 
 

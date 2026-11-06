@@ -6,6 +6,10 @@
   geschützten HTTP- und WebSocket-Route `403` mit leerem Fehlerobjekt
   (`{"error": {"code": "forbidden", "message": "..."}}`) – ohne Produkt-, Kunden- oder
   Finanzdaten im Body.
+- **Fehlende Sitzung = `401`:** Trägt eine Anfrage keinen `hass_user` (abgelaufenes
+  oder fehlendes HA-Token), antwortet die API mit `401`
+  (`{"error": {"code": "not_authenticated", "message": "Die Sitzung ist abgelaufen. Bitte die Seite neu laden."}}`),
+  nicht mit `403`. Nur eine fehlende Rolle ist `403 forbidden`.
 - **Stabile Benutzer-ID:** Freigaben hängen an der HA-Benutzer-ID, nicht am Namen.
 - **Prüfung je Anfrage:** `require_admin` ist keine Zugangskontrolle. Jede Route ruft
   `PermissionManager.require()` auf; das Mapping wird bei jeder Anfrage neu gelesen.
