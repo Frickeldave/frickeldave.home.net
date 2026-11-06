@@ -319,12 +319,14 @@ mit `available`, `reason`, `provider`, `contract_version`); `/settings` enthält
 Filter für `GET /products`: `search`, `category` (Komma = ODER), `tags` (Komma = ODER),
 `customizable`, `in_stock`/`in_cabinet` (erste/zweite Lagerstätte), `location` +
 `in_location` (beliebige Lagerstätte), `visibility=visible|invisible`, `archived`,
-`sort=name|price|category|stock|status`, `order=asc|desc`, `limit`, `offset`.
+`sort=name|price|category|stock|status|size`, `order=asc|desc`, `limit`, `offset`.
 
 Sortierung: `category` ordnet nach dem sichtbaren Kategorie-Label, `stock` nach dem
 Gesamtbestand über alle Lagerstätten (unabhängig von `location`/`in_location`),
-`status` nach aktiv vor archiviert und sichtbar vor unsichtbar. Bei Gleichstand gilt
-Name, dann Artikelnummer – auch bei `order=desc`, das nur das Hauptkriterium dreht.
+`status` nach aktiv vor archiviert und sichtbar vor unsichtbar, `size` nach der Summe
+der Bilddateien (Bytes). Sortiert wird vor `limit`/`offset`; `total` zählt alle
+gefilterten Produkte. Bei Gleichstand gilt Name, dann Artikelnummer – auch bei
+`order=desc`, das nur das Hauptkriterium dreht.
 
 `GET /products/article-number?category=LA` liefert
 `{"articleNumber": "LAH3K3", "category": "LA", "reserved": false}` für den
@@ -333,8 +335,12 @@ erzeugt `POST /products` die Nummer erneut und gibt die tatsächliche zurück.
 
 `GET /settings` liefert neben `ai`, `users`, `export_path` und `locations` den Abschnitt
 `storage` mit `data_path`, `effective_path`, `backup_included`, `exclude_from_backup`,
-`paths` (Metadaten, Bilder, Snapshots) und `choices`. `PATCH /settings` akzeptiert
-`{"ai": {...}}`, `{"locations": [{"id"?: "...", "name": "..."}]}` und
+`paths` (Metadaten, Bilder, Snapshots), `choices` und `usage` (`total_bytes`,
+`data_bytes`, `images_bytes`, `backups_bytes`, `files`; Symlinks werden nicht
+verfolgt). `GET /settings` enthält außerdem `images` mit der Bildgrenze
+(`{"max_bytes": 512000}`). `PATCH /settings` akzeptiert `{"ai": {...}}`,
+`{"images": {"max_bytes": 51200..10485760}}`,
+`{"locations": [{"id"?: "...", "name": "..."}]}` und
 `{"storage": {"data_path": "config|share|media"}}`; ein mitgeschicktes `publish` gilt als
 unbekanntes Feld (`400`), die gespeicherten Werte bleiben aber erhalten. Nach einer
 erfolgreichen Migration enthält die Antwort
@@ -360,7 +366,7 @@ WebP und GIF bis 10 MB an und **verkleinert automatisch**:
 | PNG/WebP **mit** Transparenz | WebP, Qualität 85, Alpha bleibt erhalten |
 | PNG/WebP **ohne** Transparenz | JPEG, Qualität 82 |
 | GIF (auch animiert) und animiertes WebP | unverändert durchgereicht |
-| Bereits passend (≤ 1600 px **und** ≤ 400 KiB) | byteweise übernommen, kein Re-Encoding |
+| Bereits passend (≤ 1600 px **und** ≤ 500 KiB, konfigurierbar) | byteweise übernommen, kein Re-Encoding |
 
 Die Dateiendung folgt dem Ergebnis: aus `LA0001-03.png` mit Transparenz wird
 `LA0001-03.webp`. Defekte Dateien werden mit `400 image_invalid` und deutscher
@@ -379,8 +385,9 @@ Die Antwort enthält zusätzlich zu `images`:
 
 `GET /products/{article_number}/images`, die Produktliste und das Produktdetail
 liefern je Bild `bytes`, `width`, `height`, `content_type` und `oversized`
-(`true`, wenn die lange Kante > 1600 px **oder** die Datei > 400 KiB ist). Die
-Werte werden beim Lesen aus den Dateien ermittelt und nicht im Store gespeichert.
+(`true`, wenn die lange Kante > 1600 px **oder** die Datei größer als
+`settings.images.max_bytes` ist; Standard 500 KiB). Die Werte werden beim Lesen aus
+den Dateien ermittelt und nicht im Store gespeichert.
 
 `POST /products/{article_number}/images/optimize` verkleinert alle zu großen
 Bilder eines Produkts nach denselben Regeln, behält Reihenfolge und Hauptbild und

@@ -44,8 +44,9 @@ from .store import ALLOWED_CONTENT_TYPES, MAX_IMAGE_BYTES, CatalogStore
 #: Zeichen ohne Verwechslungsgefahr (kein I, O, 0, 1).
 _ARTICLE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-#: Erlaubte Sortierschlüssel (Panel, HTTP- und WebSocket-API).
-SORT_KEYS: Final[tuple[str, ...]] = ("name", "price", "category", "stock", "status")
+#: Erlaubte Sortierschlüssel (Panel, HTTP- und WebSocket-API). ``size``
+#: sortiert nach der Summe der Bilddateien (siehe :meth:`ProductService.async_list`).
+SORT_KEYS: Final[tuple[str, ...]] = ("name", "price", "category", "stock", "status", "size")
 SORT_VALUES_MESSAGE: Final = "sort muss " + ", ".join(f"'{key}'" for key in SORT_KEYS) + " sein."
 
 
@@ -215,7 +216,9 @@ def _status_order(product: Product) -> tuple[int, int]:
     return (1 if product.archived else 0, 0 if product.visible else 1)
 
 
-def _primary_key(sort: str) -> Callable[[Product], Any]:
+def _primary_key(
+    sort: str, image_bytes: Mapping[str, int] | None = None
+) -> Callable[[Product], Any]:
     if sort == "price":
         return lambda item: item.price
     if sort == "category":
@@ -224,18 +227,30 @@ def _primary_key(sort: str) -> Callable[[Product], Any]:
         return lambda item: item.total_stock()
     if sort == "status":
         return _status_order
+    if sort == "size":
+        totals = image_bytes or {}
+        return lambda item: totals.get(item.article_number, 0)
     return lambda item: item.name.casefold()
 
 
-def sort_products(products: list[Product], sort: str, order: str) -> list[Product]:
+def sort_products(
+    products: list[Product],
+    sort: str,
+    order: str,
+    *,
+    image_bytes: Mapping[str, int] | None = None,
+) -> list[Product]:
     """Stabile Sortierung nach ``sort``; Tiebreaker bleiben immer aufsteigend.
 
     ``order=desc`` dreht nur das Hauptkriterium. Der Tiebreaker (Name bzw.
     Artikelnummer) folgt bewusst weiter aufsteigend, damit gleiche Werte in
     beiden Richtungen dieselbe, deterministische Reihenfolge haben.
+
+    ``sort='size'`` benötigt die vorab ermittelten Bildgrößen je Artikelnummer
+    (``image_bytes``); fehlende Einträge zählen als 0 Bytes.
     """
 
-    if sort in {"category", "stock", "status"}:
+    if sort in {"category", "stock", "status", "size"}:
         tie_break: Callable[[Product], tuple[str, ...]] = lambda item: (  # noqa: E731
             item.name.casefold(),
             item.article_number,
@@ -244,7 +259,11 @@ def sort_products(products: list[Product], sort: str, order: str) -> list[Produc
         tie_break = lambda item: (item.article_number,)  # noqa: E731
 
     presorted = sorted(products, key=tie_break)
-    return sorted(presorted, key=_primary_key(sort), reverse=order == "desc")
+    return sorted(
+        presorted,
+        key=_primary_key(sort, image_bytes),
+        reverse=order == "desc",
+    )
 
 
 class ProductService:
@@ -361,13 +380,37 @@ class ProductService:
         products = [
             item for item in self._store.products() if product_matches(item, rules, locations)
         ]
-        products = sort_products(products, rules.sort, rules.order)
+        image_bytes = await self._image_bytes_totals(products) if rules.sort == "size" else None
+        products = sort_products(products, rules.sort, rules.order, image_bytes=image_bytes)
         total = len(products)
         if rules.offset:
             products = products[rules.offset :]
         if rules.limit is not None:
             products = products[: rules.limit]
         return products, total
+
+    async def _image_bytes_totals(self, products: list[Product]) -> dict[str, int]:
+        """Summe der Bilddateien je Artikelnummer – ein Executor-Lauf für alle Bilder.
+
+        Grundlage ist dieselbe Metadaten-Erhebung wie bei der Produktliste
+        (``_sync_images_all`` + ``async_inspect_paths``); es gibt also keine
+        N+1-Aufrufe pro Produkt.
+        """
+
+        if not products:
+            return {}
+        self._sync_images_all(products)
+        paths: list[Path] = []
+        owners: list[str] = []
+        for product in products:
+            for image in product.images:
+                paths.append(self._store.images.path_for(product.article_number, image.name))
+                owners.append(product.article_number)
+        infos = await async_inspect_paths(paths, self._store.image_max_bytes)
+        totals: dict[str, int] = {}
+        for article_number, info in zip(owners, infos, strict=True):
+            totals[article_number] = totals.get(article_number, 0) + info.bytes
+        return totals
 
     # ------------------------------------------------------------------ Tags
     async def async_list_tags(self) -> list[str]:
@@ -523,7 +566,7 @@ class ProductService:
             self._store.images.path_for(product.article_number, image.name)
             for image in product.images
         ]
-        infos = await async_inspect_paths(paths)
+        infos = await async_inspect_paths(paths, self._store.image_max_bytes)
         return [
             {
                 "name": image.name,
@@ -549,7 +592,7 @@ class ProductService:
             for product in products
             for image in product.images
         ]
-        infos = await async_inspect_paths(paths)
+        infos = await async_inspect_paths(paths, self._store.image_max_bytes)
         payloads: list[dict[str, Any]] = []
         cursor = 0
         for product in products:
@@ -593,7 +636,7 @@ class ProductService:
                     f"Maximal {MAX_IMAGES} Bilder pro Produkt. Bitte zuerst ein Bild löschen.",
                     code="image_limit",
                 )
-        optimized = await async_optimize_image(data, content_type)
+        optimized = await async_optimize_image(data, content_type, self._store.image_max_bytes)
 
         async with self._store.lock:
             product = self._store.get_product(article_number, include_archived=True)
@@ -680,11 +723,15 @@ class ProductService:
             for image in list(product.images):
                 original_name = image.name
                 path = self._store.images.path_for(product.article_number, image.name)
-                before = await asyncio.to_thread(read_info_sync, path)
+                before = await asyncio.to_thread(read_info_sync, path, self._store.image_max_bytes)
                 bytes_before_total += before.bytes
                 try:
                     raw = await asyncio.to_thread(path.read_bytes)
-                    optimized = await async_optimize_image(raw, content_type_for_name(image.name))
+                    optimized = await async_optimize_image(
+                        raw,
+                        content_type_for_name(image.name),
+                        self._store.image_max_bytes,
+                    )
                 except (OSError, ValidationError) as err:
                     bytes_after_total += before.bytes
                     message = (

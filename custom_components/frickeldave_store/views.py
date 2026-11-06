@@ -59,7 +59,7 @@ from .permissions import (
     normalise_roles,
 )
 from .products import ProductFilter
-from .storage import data_path_from_entry, storage_payload
+from .storage import data_path_from_entry, storage_payload, storage_usage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -702,7 +702,9 @@ class UserView(HomeAssistantView):
             return _error_response(err)
 
 
-def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> dict[str, Any]:
+async def _settings_payload(
+    hass: HomeAssistant, runtime: FrickeldaveStoreRuntime
+) -> dict[str, Any]:
     """Gemeinsames Antwortformat für GET und PATCH ``/settings``."""
 
     payload = runtime.store.public_settings()
@@ -712,7 +714,12 @@ def _settings_payload(hass: HomeAssistant, runtime: FrickeldaveStoreRuntime) -> 
         for grant in runtime.permissions.grants().values()
     ]
     payload["export_path"] = str(runtime.export_path)
-    payload["storage"] = storage_payload(hass, data_path_from_entry(runtime.entry))
+    storage = storage_payload(hass, data_path_from_entry(runtime.entry))
+    # Ein Verzeichnislauf pro Anfrage, außerhalb des Event-Loops.
+    storage["usage"] = await hass.async_add_executor_job(
+        storage_usage, Path(storage["effective_path"])
+    )
+    payload["storage"] = storage
     payload["locations"] = runtime.store.locations_payload()
     payload["features"] = _features_payload(hass)
     # Ausführliche Beschreibung nur für die Anwendungsverwaltung (Default Deny).
@@ -728,7 +735,7 @@ class SettingsView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         try:
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
-            return web.json_response(_settings_payload(_hass(request), runtime))
+            return web.json_response(await _settings_payload(_hass(request), runtime))
         except StoreError as err:
             return _error_response(err)
 
@@ -737,7 +744,7 @@ class SettingsView(HomeAssistantView):
             hass = _hass(request)
             runtime, _ = _authorize(request, ROLE_APP_ADMIN)
             payload = await _json_body(request)
-            unknown = set(payload) - {"ai", "storage", "locations"}
+            unknown = set(payload) - {"ai", "storage", "locations", "images"}
             if "publish" in unknown:
                 raise ValidationError(
                     "Der Abschnitt 'publish' gehört seit 0.2.0 zur Erweiterung "
@@ -788,7 +795,7 @@ class SettingsView(HomeAssistantView):
                     raise NotLoadedError("Die Integration ist nicht eingerichtet.")
                 reload_required = await async_set_data_path(hass, entry, new_data_path)
 
-            response = _settings_payload(hass, runtime)
+            response = await _settings_payload(hass, runtime)
             response["reload_required"] = reload_required
             return web.json_response(response)
         except StoreError as err:

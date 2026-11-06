@@ -8,8 +8,9 @@ Regeln (siehe ``.squad/decisions/inbox/bruce-289-bildoptimierung.md``):
 * PNG/WebP mit Transparenz werden zu WebP (:data:`WEBP_QUALITY`), ohne
   Transparenz zu JPEG.
 * GIF und animierte WebP bleiben unverändert.
-* Bilder, die bereits passen (lange Kante ≤ 1600 px **und** ≤ 400 KiB),
-  werden byteweise übernommen – kein Re-Encoding, kein Qualitätsverlust.
+* Bilder, die bereits passen (lange Kante ≤ 1600 px **und** ≤ der
+  konfigurierten Byte-Grenze, Standard 500 KiB), werden byteweise übernommen –
+  kein Re-Encoding, kein Qualitätsverlust.
 
 Pillow ist Core-Abhängigkeit von Home Assistant und wird deshalb **nicht** in
 ``manifest.json`` eingetragen. Der Import erfolgt bewusst erst bei Bedarf:
@@ -38,8 +39,9 @@ from .models import ValidationError
 
 #: Lange Kante des Ergebnisses in Pixeln.
 MAX_LONG_EDGE: Final = 1600
-#: Grenze, ab der ein Bild als "zu groß" gilt (400 KiB).
-MAX_IMAGE_BYTES: Final = 400 * 1024
+#: Standardgrenze, ab der ein Bild als "zu groß" gilt (500 KiB).
+#: Der effektive Wert kommt aus den Store-Einstellungen (``images.max_bytes``).
+MAX_IMAGE_BYTES: Final = 500 * 1024
 JPEG_QUALITY: Final = 82
 WEBP_QUALITY: Final = 85
 #: Schutz vor Dekomprimierungsbomben: 40 Megapixel reichen für jede Handykamera,
@@ -93,10 +95,15 @@ def suffix_for_content_type(content_type: str) -> str:
     return SUFFIX_BY_CONTENT_TYPE.get(content_type.casefold(), ".jpg")
 
 
-def is_oversized(width: int | None, height: int | None, size: int) -> bool:
-    """Zu groß = lange Kante über 1600 px **oder** mehr als 400 KiB."""
+def is_oversized(
+    width: int | None,
+    height: int | None,
+    size: int,
+    max_bytes: int = MAX_IMAGE_BYTES,
+) -> bool:
+    """Zu groß = lange Kante über 1600 px **oder** mehr als ``max_bytes``."""
 
-    if size > MAX_IMAGE_BYTES:
+    if size > max_bytes:
         return True
     longest = max(width or 0, height or 0)
     return longest > MAX_LONG_EDGE
@@ -192,7 +199,11 @@ def _save(image: Any, target_format: str) -> bytes:
     return buffer.getvalue()
 
 
-def optimize_image_sync(data: bytes, content_type: str) -> OptimizeResult:
+def optimize_image_sync(
+    data: bytes,
+    content_type: str,
+    max_bytes: int = MAX_IMAGE_BYTES,
+) -> OptimizeResult:
     """Rohbytes synchron verkleinern; Aufruf gehört in einen Executor."""
 
     image_mod = pillow()
@@ -227,6 +238,7 @@ def optimize_image_sync(data: bytes, content_type: str) -> OptimizeResult:
                     width=width,
                     height=height,
                     original_bytes=original_bytes,
+                    max_bytes=max_bytes,
                 )
                 if unchanged is not None:
                     return unchanged
@@ -296,6 +308,7 @@ def _unchanged_result(
     width: int,
     height: int,
     original_bytes: int,
+    max_bytes: int = MAX_IMAGE_BYTES,
 ) -> OptimizeResult | None:
     """Durchreichen, wenn das Format unangetastet bleiben muss oder bereits passt."""
 
@@ -317,7 +330,7 @@ def _unchanged_result(
                 f"({width}×{height}, {format_bytes(original_bytes)})."
             ),
         )
-    if is_oversized(width, height, original_bytes):
+    if is_oversized(width, height, original_bytes, max_bytes):
         return None
     return _passthrough(
         data,
@@ -365,13 +378,17 @@ def _target_format(image_format: str, has_alpha: bool) -> tuple[str, str]:
     return "JPEG", "image/jpeg"
 
 
-async def async_optimize_image(data: bytes, content_type: str) -> OptimizeResult:
+async def async_optimize_image(
+    data: bytes,
+    content_type: str,
+    max_bytes: int = MAX_IMAGE_BYTES,
+) -> OptimizeResult:
     """Verkleinerung im Executor, damit der Event-Loop frei bleibt."""
 
-    return await asyncio.to_thread(optimize_image_sync, data, content_type)
+    return await asyncio.to_thread(optimize_image_sync, data, content_type, max_bytes)
 
 
-def read_info_sync(path: Path) -> ImageInfo:
+def read_info_sync(path: Path, max_bytes: int = MAX_IMAGE_BYTES) -> ImageInfo:
     """Metadaten einer Datei lesen (nur Header, kein vollständiges Dekodieren)."""
 
     content_type = CONTENT_TYPE_BY_SUFFIX.get(path.suffix.casefold(), "application/octet-stream")
@@ -395,7 +412,7 @@ def read_info_sync(path: Path) -> ImageInfo:
         width=width,
         height=height,
         content_type=content_type,
-        oversized=is_oversized(width, height, size),
+        oversized=is_oversized(width, height, size, max_bytes),
     )
 
 
@@ -404,17 +421,17 @@ class MetadataCache:
 
     def __init__(self, max_entries: int = METADATA_CACHE_SIZE) -> None:
         self._max_entries = max_entries
-        self._entries: OrderedDict[tuple[str, int, int], ImageInfo] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, int, int, int], ImageInfo] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, key: tuple[str, int, int]) -> ImageInfo | None:
+    def get(self, key: tuple[str, int, int, int]) -> ImageInfo | None:
         with self._lock:
             info = self._entries.get(key)
             if info is not None:
                 self._entries.move_to_end(key)
             return info
 
-    def put(self, key: tuple[str, int, int], info: ImageInfo) -> None:
+    def put(self, key: tuple[str, int, int, int], info: ImageInfo) -> None:
         with self._lock:
             self._entries[key] = info
             self._entries.move_to_end(key)
@@ -439,34 +456,36 @@ def metadata_cache() -> MetadataCache:
     return _CACHE
 
 
-def inspect_sync(path: Path) -> ImageInfo:
-    """Metadaten mit Cache lesen; Schlüssel ist Pfad + mtime + Größe."""
+def inspect_sync(path: Path, max_bytes: int = MAX_IMAGE_BYTES) -> ImageInfo:
+    """Metadaten mit Cache lesen; Schlüssel ist Pfad + mtime + Größe + Grenze."""
 
     try:
         stat = path.stat()
     except OSError:
-        return read_info_sync(path)
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
+        return read_info_sync(path, max_bytes)
+    key = (str(path), stat.st_mtime_ns, stat.st_size, max_bytes)
     cached = _CACHE.get(key)
     if cached is not None:
         return cached
-    info = read_info_sync(path)
+    info = read_info_sync(path, max_bytes)
     _CACHE.put(key, info)
     return info
 
 
-def inspect_paths(paths: list[Path]) -> list[ImageInfo]:
+def inspect_paths(paths: list[Path], max_bytes: int = MAX_IMAGE_BYTES) -> list[ImageInfo]:
     """Mehrere Dateien in einem Durchgang prüfen (Executor-Aufruf)."""
 
-    return [inspect_sync(path) for path in paths]
+    return [inspect_sync(path, max_bytes) for path in paths]
 
 
-async def async_inspect_paths(paths: list[Path]) -> list[ImageInfo]:
+async def async_inspect_paths(
+    paths: list[Path], max_bytes: int = MAX_IMAGE_BYTES
+) -> list[ImageInfo]:
     """``inspect_paths`` im Executor ausführen."""
 
     if not paths:
         return []
-    return await asyncio.to_thread(inspect_paths, paths)
+    return await asyncio.to_thread(inspect_paths, paths, max_bytes)
 
 
 __all__ = [

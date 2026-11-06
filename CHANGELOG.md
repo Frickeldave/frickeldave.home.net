@@ -6,8 +6,27 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Added
+
+- **Bildgrenze konfigurierbar (#289).** `settings.images.max_bytes` legt fest,
+  ab welcher Dateigröße ein Bild als „zu groß“ gilt (Standard 500 KiB, erlaubt
+  sind 50 KiB bis 10 MiB). `GET /api/frickeldave_store/settings` liefert den
+  Wert unter `images`, `PATCH` nimmt ihn entgegen; die lange Kante bleibt bei
+  1600 px.
+- **Belegter Speicher in der API (#289).** `GET /api/frickeldave_store/settings`
+  liefert unter `storage.usage` die Größen von Store-Datei, Bildern, Snapshots
+  und dem gesamten Datenordner (`total_bytes`, `data_bytes`, `images_bytes`,
+  `backups_bytes`, `files`) – ohne Symlinks zu folgen.
+- **Produktliste nach Bildgröße sortierbar (#289).** `GET /api/frickeldave_store/products`
+  akzeptiert `sort=size` und ordnet nach der Summe aller Bilddateien eines
+  Produkts (`order=asc|desc`); sortiert wird vor `limit`/`offset`, `total`
+  zählt weiterhin alle gefilterten Produkte.
+
 ### Changed
 
+- **Standard-Bildgrenze von 400 KiB auf 500 KiB angehoben (#289).** Bilder bis
+  500 KiB werden unverändert übernommen; die Grenze ist über die Einstellungen
+  anpassbar.
 - **Veröffentlichungsdialog aufgeräumt (#289).** Der doppelte Zusammenfassungs-
   absatz und der Dry-Run-Untertitel in der Titelleiste entfallen; die
   Metadatenboxen (Ziel, Zielbranch, Repository) haben mehr Abstand zur
